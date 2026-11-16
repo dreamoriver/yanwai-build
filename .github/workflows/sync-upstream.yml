@@ -30,8 +30,8 @@ jobs:
       - name: Compare
         id: cmp
         run: |
-          # 自用仓库保留自己的 CHANGELOG 和 Actions 配置，所以只看其余代码是否与上游不同。
-          if git diff --quiet upstream/main HEAD -- . ':(exclude)CHANGELOG.md' ':(exclude).github'; then
+          # 自用仓库保留自己的 CHANGELOG 和 Actions 配置，所以只比较代码与版本文件。
+          if git diff --quiet upstream/main HEAD -- app gradle version.properties settings.gradle.kts build.gradle.kts gradle.properties; then
             echo "代码与上游一致，跳过"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -133,12 +133,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REPO="dreamoriver/yanwai-build"
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk "dist/yanwai-${VERSION}-${CODE}.apk"
-          if gh release view "v${VERSION}" > /dev/null 2>&1; then
+          if gh release view "v${VERSION}" -R "$REPO" > /dev/null 2>&1; then
             echo "v${VERSION} 已存在，只补传资产"
-            gh release upload "v${VERSION}" "dist/yanwai-${VERSION}-${CODE}.apk" --clobber
+            gh release upload "v${VERSION}" "dist/yanwai-${VERSION}-${CODE}.apk" -R "$REPO" --clobber
           else
-            gh release create "v${VERSION}" "dist/yanwai-${VERSION}-${CODE}.apk" \
-              --title "言外 ${VERSION}" --notes-file CHANGELOG.md
+            gh release create "v${VERSION}" "dist/yanwai-${VERSION}-${CODE}.apk" -R "$REPO" \
+              --title "言外 ${VERSION}" --notes-file CHANGELOG.md --target main
           fi
