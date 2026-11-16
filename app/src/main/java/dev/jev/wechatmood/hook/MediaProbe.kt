@@ -19,7 +19,7 @@ object MediaProbe {
         }
         val name = path.substringAfterLast('/')
         val keys = listOf(name, name.removeSuffix(".dat"), name.take(24)).filter { it.isNotBlank() }
-        MoodLog.i("MEDIA_PROBE type=${target.type} path=${path.take(120)}")
+        MoodLog.w("MEDIA_PROBE type=${target.type} path=${path.take(120)}")
 
         var listed = 0
         for (rootPath in listOf("/data/user/0/com.tencent.mm/MicroMsg", "/data/data/com.tencent.mm/MicroMsg")) {
@@ -29,7 +29,7 @@ object MediaProbe {
                 continue
             }
             val dirs = runCatching { root.listFiles()?.filter { it.isDirectory } }.getOrNull().orEmpty()
-            MoodLog.i("MEDIA_PROBE_ROOT ok $rootPath dirs=${dirs.size}")
+            MoodLog.w("MEDIA_PROBE_ROOT ok $rootPath dirs=${dirs.size}")
             for (dir in dirs) {
                 for (sub in subs) {
                     val folder = File(dir, sub)
@@ -37,13 +37,13 @@ object MediaProbe {
                     val files = runCatching { folder.listFiles() }.getOrNull().orEmpty()
                     val hit = files.firstOrNull { file -> keys.any { key -> file.name.contains(key) } }
                     if (hit != null) {
-                        MoodLog.i("MEDIA_PROBE_HIT ${hit.absolutePath} size=${hit.length()} head=${head(hit)}")
+                        MoodLog.w("MEDIA_PROBE_HIT ${hit.absolutePath} size=${hit.length()} head=${head(hit)}")
                         return
                     }
                     if (listed < 6) {
                         listed++
                         val newest = files.maxByOrNull { it.lastModified() }
-                        MoodLog.i("MEDIA_PROBE_DIR ${folder.path} files=${files.size} newest=${newest?.name?.take(70).orEmpty()} size=${newest?.length() ?: 0}")
+                        MoodLog.w("MEDIA_PROBE_DIR ${folder.path} files=${files.size} newest=${newest?.name?.take(70).orEmpty()} size=${newest?.length() ?: 0}")
                     }
                 }
             }
