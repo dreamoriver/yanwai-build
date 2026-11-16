@@ -4,10 +4,12 @@ import dev.jev.wechatmood.core.MoodLog
 import java.io.File
 
 /**
- * 诊断用：把图片/表情消息的本地路径与文件头打印到模块日志。
- * 不含任何聊天内容，只记录路径片段、大小和前 16 字节（判断是否加密）。
+ * 诊断用：定位图片/表情文件在微信私有目录里的实际位置与命名规则。
+ * 只记录路径、文件大小和文件头，不含聊天内容。
  */
 object MediaProbe {
+    private val subs = listOf("image2", "image", "emoji", "emojiinfo", "imageinfo2")
+
     fun probe(target: MessageMetadata?) {
         if (target == null) return
         val path = target.imagePath
@@ -15,33 +17,38 @@ object MediaProbe {
             MoodLog.w("MEDIA_PROBE type=${target.type} path=EMPTY")
             return
         }
-        MoodLog.i("MEDIA_PROBE type=${target.type} path=${path.take(160)}")
         val name = path.substringAfterLast('/')
         val keys = listOf(name, name.removeSuffix(".dat"), name.take(24)).filter { it.isNotBlank() }
-        val roots = listOf(
-            File("/data/user/0/com.tencent.mm/MicroMsg"),
-            File("/data/data/com.tencent.mm/MicroMsg")
-        )
-        var hits = 0
-        var scanned = 0
-        for (root in roots) {
+        MoodLog.i("MEDIA_PROBE type=${target.type} path=${path.take(120)}")
+
+        var listed = 0
+        for (rootPath in listOf("/data/user/0/com.tencent.mm/MicroMsg", "/data/data/com.tencent.mm/MicroMsg")) {
+            val root = File(rootPath)
+            if (!root.isDirectory) {
+                MoodLog.w("MEDIA_PROBE_ROOT missing $rootPath")
+                continue
+            }
             val dirs = runCatching { root.listFiles()?.filter { it.isDirectory } }.getOrNull().orEmpty()
+            MoodLog.i("MEDIA_PROBE_ROOT ok $rootPath dirs=${dirs.size}")
             for (dir in dirs) {
-                for (sub in listOf("image2", "image", "emoji", "emojiinfo")) {
+                for (sub in subs) {
                     val folder = File(dir, sub)
                     if (!folder.isDirectory) continue
                     val files = runCatching { folder.listFiles() }.getOrNull().orEmpty()
-                    scanned += files.size
-                    for (file in files) {
-                        if (keys.none { key -> file.name.contains(key) }) continue
-                        hits++
-                        MoodLog.i("MEDIA_PROBE_HIT ${file.absolutePath} size=${file.length()} head=${head(file)}")
-                        if (hits >= 4) return
+                    val hit = files.firstOrNull { file -> keys.any { key -> file.name.contains(key) } }
+                    if (hit != null) {
+                        MoodLog.i("MEDIA_PROBE_HIT ${hit.absolutePath} size=${hit.length()} head=${head(hit)}")
+                        return
+                    }
+                    if (listed < 6) {
+                        listed++
+                        val newest = files.maxByOrNull { it.lastModified() }
+                        MoodLog.i("MEDIA_PROBE_DIR ${folder.path} files=${files.size} newest=${newest?.name?.take(70).orEmpty()} size=${newest?.length() ?: 0}")
                     }
                 }
             }
         }
-        MoodLog.w("MEDIA_PROBE_MISS keys=${keys.joinToString("|")} scanned=$scanned")
+        MoodLog.w("MEDIA_PROBE_MISS keys=${keys.joinToString("|").take(120)} listed=$listed")
     }
 
     private fun head(file: File): String = runCatching {
