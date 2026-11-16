@@ -67,9 +67,14 @@ object ReplyProtocol {
         })).put("draft", draft.take(2000)).put("direction", direction.take(2000))
             .put("previous_suggestion", previous.take(2000)).put("focus_message_id", focusMessageId ?: JSONObject.NULL)
             .put("my_style", JSONArray(context.messages.filter { it.speaker == "我" }.takeLast(6).map { it.text.take(60) }))
-            .put("reply_target", focusMessageId?.let { id -> context.messages.firstOrNull { it.id == id } }?.let { target ->
-                JSONObject().put("id", target.id).put("speaker", target.speaker).put("text", target.text)
-            } ?: JSONObject.NULL)
+            .put("reply_target", when {
+                context.targetMedia != null -> JSONObject().put("id", context.focusMessageId)
+                    .put("type", "media").put("media", context.targetMedia)
+                    .put("note", "对方发来一张${context.targetMedia}，本轮未识别内容，请依据上下文自然回应")
+                else -> focusMessageId?.let { id -> context.messages.firstOrNull { it.id == id } }?.let { target ->
+                    JSONObject().put("id", target.id).put("speaker", target.speaker).put("text", target.text)
+                } ?: JSONObject.NULL
+            })
             .put("omitted_media", context.omittedMedia).put("context_trimmed", context.trimmed)
             .put("context_source", context.source.name).put("page_only", context.source == ReplyContextSource.LOADED_PAGE)
             .put("requested_message_count", context.requestedMessages).put("actual_message_count", context.messages.size)

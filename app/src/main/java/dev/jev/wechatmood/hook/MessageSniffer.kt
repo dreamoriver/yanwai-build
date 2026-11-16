@@ -261,7 +261,7 @@ object MessageSniffer {
         val talker = conversation(activity, scope, current) ?: return null
         val ancestors = generateSequence(view) { it.parent as? View }.toSet()
         return current.filter { it.first in ancestors }.mapNotNull { it.second.metadata }
-            .filter { it.talker == talker && it.isReplyTarget() }.distinct().singleOrNull()
+            .filter { it.talker == talker && it.isReplyTarget(allowMedia = true) }.distinct().singleOrNull()
     }
 
     fun suggestReply(view: View, expected: MessageMetadata): Boolean {
@@ -277,7 +277,7 @@ object MessageSniffer {
     }
 
     /** Captures a bounded window from the active loaded adapter at user click time. */
-    fun replyContext(requireBottom: Boolean = true): ReplyContext {
+    fun replyContext(requireBottom: Boolean = true, focusId: Long = 0): ReplyContext {
         val activity = active.get() ?: error("请先打开聊天")
         val scope = chatNodes(activity.window.decorView)
         val rows = records(scope)
@@ -320,7 +320,10 @@ object MessageSniffer {
         }
         val result = ReplyContext.collect(talker, messages.asReversed())
         check(result.historyAnchor != null || result.messages.isNotEmpty()) { "暂时无法核对当前聊天，请重新进入后重试" }
-        return result.copy(trimmed = result.trimmed || messages.size < count)
+        // 图片/表情本身不进 messages，只记下目标类型，供请求层提示模型。
+        val target = if (focusId > 0) messages.firstOrNull { it.messageId == focusId } else null
+        val targetMedia = when (target?.type) { 3 -> "图片"; 47 -> "表情"; else -> null }
+        return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusId, targetMedia = targetMedia)
     }
 
     /** Cheap live boundary check, without re-reading 100 messages on every scan. */

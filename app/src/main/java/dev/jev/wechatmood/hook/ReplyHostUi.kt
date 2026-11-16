@@ -80,7 +80,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         if (dialog?.isShowing == true || openingJob?.isActive == true) return true
         val epoch = ReplyDatabaseHistory.pendingAccountScope()
         ownerEpoch = epoch
-        val live = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrElse {
+        val live = runCatching { MessageSniffer.replyContext(requireBottom = false, focusId = focusMessageId ?: 0) }.getOrElse {
             toast(it.message ?: "读取聊天失败"); return true
         }
         if (live.talker != selectedTalker) return false
@@ -622,7 +622,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             failed = false
             state.text = ""; state.setTextColor(theme.muted)
             renderParts(); controls(false)
-            val loaded = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrElse {
+            val loaded = runCatching { MessageSniffer.replyContext(requireBottom = false, focusId = focusMessageId ?: 0) }.getOrElse {
                 reference.fail(ticket); state.text = it.message ?: "读取聊天失败，请重试"; controls(false); return
             }.let { it.copy(focusMessageId = focusMessageId ?: it.latestLoadedId) }
             if (loaded.talker != selectedTalker) { reference.cancel(); window.dismiss(); return }
@@ -643,9 +643,12 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     if (!ownsDrawer() || !ModulePrefs.canGenerateReply) return@launch
                     if (!verifyAccount()) { window.dismiss(); return@launch }
                     if (current.messages.isEmpty() || current.messages.all { it.voiceState == VoiceState.FAILED }) {
-                        reference.fail(ticket)
-                        state.text = "尚无可用正文，语音可能未能转写，请在条数菜单中重试"
-                        return@launch
+                        if (current.targetMedia == null) {
+                            reference.fail(ticket)
+                            state.text = "尚无可用正文，语音可能未能转写，请在条数菜单中重试"
+                            return@launch
+                        }
+                        state.text = "本轮目标是一张${current.targetMedia}，暂不识别内容，按上下文拟回复。"
                     }
                     if (!reference.complete(ticket, current, MessageSniffer.currentReplyTalker())) return@launch
                     snapshot = current
