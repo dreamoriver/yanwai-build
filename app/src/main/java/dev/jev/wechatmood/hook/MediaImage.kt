@@ -28,20 +28,22 @@ object MediaImage {
         val scaled = scale(bitmap)
         val out = ByteArrayOutputStream()
         scaled.compress(Bitmap.CompressFormat.JPEG, QUALITY, out)
-        val bytes = out.toByteArray()
-        MoodLog.w("MEDIA_CAPTURE ok source=${if (imageView != null) "imageview" else "view"} " +
-            "${scaled.width}x${scaled.height} bytes=${bytes.size}")
-        "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+        "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }.onFailure { MoodLog.w("MEDIA_CAPTURE_FAILED ${it.javaClass.simpleName}") }.getOrNull()
 
+    /** 气泡里可能同时有头像和内容图：按面积取最大的那个，避免把头当图片发出去。 */
     private fun findImageView(view: View): ImageView? {
-        if (view is ImageView && view.width > 0 && view.height > 0) return view
+        val found = mutableListOf<ImageView>()
+        collect(view, found)
+        return found.filter { it.width > 0 && it.height > 0 }
+            .maxByOrNull { it.width.toLong() * it.height }
+    }
+
+    private fun collect(view: View, out: MutableList<ImageView>) {
+        if (view is ImageView) out += view
         if (view is ViewGroup) {
-            for (index in 0 until view.childCount) {
-                findImageView(view.getChildAt(index))?.let { return it }
-            }
+            for (index in 0 until view.childCount) collect(view.getChildAt(index), out)
         }
-        return null
     }
 
     private fun toBitmap(image: ImageView): Bitmap? {

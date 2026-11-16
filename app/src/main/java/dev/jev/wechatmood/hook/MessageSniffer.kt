@@ -324,8 +324,17 @@ object MessageSniffer {
         check(result.historyAnchor != null || result.messages.isNotEmpty()) { "暂时无法核对当前聊天，请重新进入后重试" }
         // 图片/表情本身不进 messages，只记下目标类型，供请求层提示模型。
         val target = if (focusId > 0) messages.firstOrNull { it.messageId == focusId } else null
-        val targetMedia = when (target?.type) { 3 -> "图片"; 47 -> "表情"; else -> null }
-        if (targetMedia != null) MediaProbe.probe(target)
+        val targetMedia = when {
+            target == null -> null
+            target.type == 3 -> "图片"
+            target.type == 47 -> "表情"
+            target.type == 49 || target.type == 822083633 -> when (target.quotedMessage()?.type) {
+                3 -> "图片"
+                47 -> "表情"
+                else -> null
+            }
+            else -> null
+        }
         return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusId, targetMedia = targetMedia)
     }
 

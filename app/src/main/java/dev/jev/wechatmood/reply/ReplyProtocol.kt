@@ -1,7 +1,5 @@
 package dev.jev.wechatmood.reply
 
-import dev.jev.wechatmood.core.MoodLog
-
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
@@ -55,7 +53,6 @@ object ReplyProtocol {
             .put(JSONObject().put("role", "system").put("content", "$instructions\n\n$knowledge"))
         // 有目标图片时用 OpenAI 兼容的多模态消息；模型不支持时由 HttpClient 回退成纯文本。
         val image = context.targetImageDataUri
-        MoodLog.w("REPLY_PAYLOAD image=${image != null} bytes=${image?.length ?: 0}")
         payloadMessages.put(if (image != null) JSONObject().put("role", "user").put("content", JSONArray()
             .put(JSONObject().put("type", "text").put("text", evidence.toString()))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image))))
