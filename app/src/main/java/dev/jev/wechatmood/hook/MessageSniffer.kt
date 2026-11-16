@@ -323,6 +323,7 @@ object MessageSniffer {
         // 图片/表情本身不进 messages，只记下目标类型，供请求层提示模型。
         val target = if (focusId > 0) messages.firstOrNull { it.messageId == focusId } else null
         val targetMedia = when (target?.type) { 3 -> "图片"; 47 -> "表情"; else -> null }
+        if (targetMedia != null) MediaProbe.probe(target)
         return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusId, targetMedia = targetMedia)
     }
 
