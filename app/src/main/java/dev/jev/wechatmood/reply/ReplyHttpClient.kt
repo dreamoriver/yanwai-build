@@ -1,6 +1,7 @@
 package dev.jev.wechatmood.reply
 
 import dev.jev.wechatmood.core.HttpClients
+import dev.jev.wechatmood.core.MoodLog
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -36,6 +37,7 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
                 once(settings, org.json.JSONObject(payload.toString()).put("max_tokens", 2400), parse)
             } else if (hasImage(payload)) {
                 // 模型不接受图片（常见 400）时退回纯文本，功能不至于整块失败。
+                MoodLog.w("REPLY_FALLBACK_TEXT 模型不接受图片，已回退纯文本：${error.message?.take(60)}")
                 once(settings, withoutImage(payload), parse)
             } else throw error
         }
