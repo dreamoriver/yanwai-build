@@ -74,7 +74,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         views(root).filterIsInstance<EditText>().filter { it.isShown && it.isEnabled }.singleOrNull()
     }
 
-    fun open(focusMessageId: Long? = null): Boolean {
+    fun open(focusMessageId: Long? = null, imageDataUri: String? = null): Boolean {
         val selectedTalker = talker ?: return false
         if (MessageSniffer.currentReplyTalker() != selectedTalker) return false
         if (dialog?.isShowing == true || openingJob?.isActive == true) return true
@@ -106,7 +106,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     !owner.isCurrent(ReplyDatabaseHistory.pendingAccountScope(), MessageSniffer.currentReplyTalker()) ||
                     !owner.acceptsAccount(latestAccount)) return@launch
                 // All reads finish before the editor is created, so a late load cannot erase typed text.
-                openResolved(focusMessageId, live, owner, identity, preferredLimit, background)
+                openResolved(focusMessageId, live, owner, identity, preferredLimit, background, imageDataUri)
             } catch (e: CancellationException) { throw e }
             catch (error: Exception) {
                 MoodLog.e("REPLY_SETTINGS_READ_FAILED", error)
@@ -124,7 +124,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     }
 
     private fun openResolved(focusMessageId: Long?, live: ReplyContext, owner: ReplyIdentityOwner,
-        identity: ReplyIdentitySetting, preferredLimit: Int, contactBackground: ContactBackground): Boolean {
+        identity: ReplyIdentitySetting, preferredLimit: Int, contactBackground: ContactBackground,
+        imageDataUri: String? = null): Boolean {
         val selectedTalker = owner.talker
         val generation = ModulePrefs.analysisSettings()?.generation
         var rolesRevision = ModulePrefs.analysisSettings()?.rolesRevision
@@ -136,7 +137,9 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         var selectedIdentity = identity
         val reference = ReplyHistorySelection(selectedTalker, remembered?.context?.takeIf { it.requestedMessages == preferredLimit })
         // Reopening saved content must not depend on scrolling to the latest message or text input mode.
-        val captured = remembered?.context ?: live
+        val captured = (remembered?.context ?: live).let { ctx ->
+            if (imageDataUri != null && ctx.targetImageDataUri == null) ctx.copy(targetImageDataUri = imageDataUri) else ctx
+        }
         if (captured.talker != selectedTalker) return false
         val initialEditor = editor()
         if (remembered == null && initialEditor == null) { toast("请先切换到文字输入"); return true }
@@ -624,7 +627,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             renderParts(); controls(false)
             val loaded = runCatching { MessageSniffer.replyContext(requireBottom = false, focusId = focusMessageId ?: 0) }.getOrElse {
                 reference.fail(ticket); state.text = it.message ?: "读取聊天失败，请重试"; controls(false); return
-            }.let { it.copy(focusMessageId = focusMessageId ?: it.latestLoadedId) }
+            }.let { it.copy(focusMessageId = focusMessageId ?: it.latestLoadedId,
+                targetImageDataUri = imageDataUri ?: it.targetImageDataUri) }
             if (loaded.talker != selectedTalker) { reference.cancel(); window.dismiss(); return }
             historyJob = scope.launch {
                 try {

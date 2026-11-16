@@ -267,7 +267,9 @@ object MessageSniffer {
     fun suggestReply(view: View, expected: MessageMetadata): Boolean {
         val target = replyTargetForView(view) ?: return false
         if (target != expected) return false
-        return ui?.suggestReply(target.messageId) == true
+        // 图片/表情从已渲染的气泡取图，避开发送前还要解密微信文件。
+        val image = if (target.type == 3 || target.type == 47) MediaImage.capture(view) else null
+        return ui?.suggestReply(target.messageId, image) == true
     }
 
     fun currentReplyTalker(): String? {
