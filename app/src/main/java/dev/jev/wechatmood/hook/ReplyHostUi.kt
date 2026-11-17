@@ -25,6 +25,7 @@ import dev.jev.wechatmood.BuildConfig
 import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.core.ReplyIdentityBridge
+import dev.jev.wechatmood.core.RelationFactBridge
 import dev.jev.wechatmood.core.ReplyLimitBridge
 import dev.jev.wechatmood.reply.*
 import kotlinx.coroutines.*
@@ -49,6 +50,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     /** 长按图片/表情时记住目标消息与已取的图，重新读取历史后也要留住。 */
     private var targetFocusId: Long = 0
     private var targetImage: String? = null
+    /** 当前会话的关系档案，生成回复时随上下文一起给模型。 */
+    private var facts: List<RelationFact> = emptyList()
 
     fun update(currentTalker: String?) {
         if (dialog?.isShowing == true && savingRoleWindow !== dialog && drawerRolesRevision != ModulePrefs.analysisSettings()?.rolesRevision) hide()
@@ -119,6 +122,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 val owner = ReplyIdentityOwner(epoch, account, selectedTalker)
                 val identity = owner.key?.let { ReplyIdentityBridge.load(activity, it) } ?: ReplyIdentitySetting()
                 val background = owner.key?.let { ReplyIdentityBridge.loadBackground(activity, it) } ?: ContactBackground()
+                val loadedFacts = owner.key?.let { key -> withContext(Dispatchers.IO) { RelationFactBridge.load(activity, key) } }.orEmpty()
                 val preferredLimit = ReplyLimitBridge.load(activity, account)
                 ensureActive()
                 if (generation != ModulePrefs.analysisSettings()?.generation || rolesRevision != ModulePrefs.analysisSettings()?.rolesRevision) return@launch
@@ -129,7 +133,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     !owner.isCurrent(ReplyDatabaseHistory.pendingAccountScope(), MessageSniffer.currentReplyTalker()) ||
                     !owner.acceptsAccount(latestAccount)) return@launch
                 // All reads finish before the editor is created, so a late load cannot erase typed text.
-                openResolved(focusMessageId, live, owner, identity, preferredLimit, background, imageDataUri)
+                openResolved(focusMessageId, live, owner, identity, preferredLimit, background, imageDataUri, loadedFacts)
             } catch (e: CancellationException) { throw e }
             catch (error: Exception) {
                 MoodLog.e("REPLY_SETTINGS_READ_FAILED", error)
@@ -146,7 +150,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
 
     private fun openResolved(focusMessageId: Long?, live: ReplyContext, owner: ReplyIdentityOwner,
         identity: ReplyIdentitySetting, preferredLimit: Int, contactBackground: ContactBackground,
-        imageDataUri: String? = null): Boolean {
+        imageDataUri: String? = null, loadedFacts: List<RelationFact> = emptyList()): Boolean {
+        facts = loadedFacts
         val selectedTalker = owner.talker
         val generation = ModulePrefs.analysisSettings()?.generation
         var rolesRevision = ModulePrefs.analysisSettings()?.rolesRevision
@@ -266,6 +271,9 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             setText(composition.background.text)
         }
         roleEditor.addView(identityBackground, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        var refreshFacts: (Boolean) -> Unit = {}
+        roleEditor.addView(action("更新关系档案", quiet = true) { refreshFacts(false) },
+            LinearLayout.LayoutParams(-1, dp(40)).apply { bottomMargin = dp(6) })
         val saveIdentityButton = action("保存角色")
         val instruction = EditText(activity).apply {
             hint = "这次想怎么回？如：委婉拒绝、别太正式（选填）"
@@ -498,6 +506,42 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             val expand = !instructionExpanded
             collapseEditors(); instructionExpanded = expand; controls(false)
         }
+        fun doRefreshFacts(auto: Boolean) {
+            if (!auto && busy) return@doRefreshFacts
+            val key = owner.key
+            if (key == null) {
+                if (!auto) toast("账号或联系人尚未确认，暂时不能整理档案")
+                return@doRefreshFacts
+            }
+            val settings = ModulePrefs.replySettings()
+            if (!settings.isConfigured) {
+                if (!auto) toast("请先在「回复」里配置模型")
+                return@doRefreshFacts
+            }
+            if (!auto) state.text = "正在整理关系档案…"
+            scope.launch {
+                try {
+                    val live = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
+                        ?: return@launch
+                    val extracted = withContext(Dispatchers.IO) { FactExtractor().extract(settings, live.messages) }
+                    if (extracted.isEmpty()) {
+                        if (!auto) state.text = "这次没有提取到新的事实"
+                        return@launch
+                    }
+                    val saved = withContext(Dispatchers.IO) {
+                        RelationFactBridge.save(activity, key, extracted, System.currentTimeMillis(),
+                            live.messages.lastOrNull()?.id ?: 0)
+                    }
+                    facts = saved
+                    if (!auto) state.text = "关系档案已更新：${saved.size} 条"
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    MoodLog.w("RELATION_FACTS_FAILED " + e.javaClass.simpleName)
+                    if (!auto) state.text = "关系档案更新失败：" + (e.message ?: "请重试")
+                }
+            }
+        }
+        refreshFacts = ::doRefreshFacts
         fun revealReply() {
             collapseEditors(); controls(false)
             scroll.post { if (ownsDrawer()) scroll.smoothScrollTo(0, replyTitle.top) }
@@ -707,7 +751,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                         state.text = "尚无可用正文，语音可能未能转写，请在条数菜单中重试"
                         return@launch
                     }
-                    if (!reference.complete(ticket, current, MessageSniffer.currentReplyTalker())) return@launch
+                    if (!reference.complete(ticket, current.copy(facts = facts), MessageSniffer.currentReplyTalker())) return@launch
                     snapshot = current
                     state.text = when {
                         current.messages.any { it.voiceState == VoiceState.FAILED } ->
@@ -795,7 +839,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             if (!composition.hasValidRelationship) { customRole.requestFocus(); toast("请先填写对方身份"); return }
             if (!ownsDrawer()) { window.dismiss(); return }
             if (!canGenerate()) { configure(); return }
-            val current = reference.context?.copy(background = composition.background) ?: run { prepareHistory(composition.historyLimit); return }
+            val current = reference.context?.copy(background = composition.background, facts = facts)
+                ?: run { prepareHistory(composition.historyLimit); return }
             val latest = MessageSniffer.replyBoundary()
             if (latest != null && latest != current.latestLoadedId && current.messages.none { it.id == latest }) {
                 prepareHistory(composition.historyLimit); toast("聊天有更新，读取完成后再点生成"); return
@@ -905,6 +950,17 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); setDimAmount(0.32f)
         }
         window.show()
+        // 开关打开时按条件静默整理一次：距上次超过 3 天，或这段时间新增了 30 条以上消息。
+        val factsKey = owner.key
+        if (RelationFactBridge.enabled(activity) && factsKey != null) {
+            scope.launch {
+                val meta = withContext(Dispatchers.IO) { RelationFactBridge.meta(activity, factsKey) }
+                val gap = System.currentTimeMillis() - meta.lastAt
+                if (gap < 24 * 3600_000L) return@launch
+                val fresh = live.messages.count { it.id > meta.lastMessageId }
+                if (gap > 3 * 24 * 3600_000L || fresh >= 30) refreshFacts(true)
+            }
+        }
         fitWindow()
         body.requestFocus(); updateNotice()
         if (reference.context == null && canGenerate()) prepareHistory(composition.historyLimit)

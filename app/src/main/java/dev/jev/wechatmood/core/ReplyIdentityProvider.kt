@@ -28,6 +28,15 @@ object ReplyIdentityProvider {
             }).also { store = it }
         } catch (error: Exception) { db.close(); throw error }
     }
+    /** 清空所有联系人的关系档案（App 进程内直接调用）。 */
+    @Synchronized fun clearAllFacts(context: Context) {
+        val db = SQLiteDatabase.openOrCreateDatabase(File(context.noBackupFilesDir, "reply_identities_v1.db"), null)
+        try {
+            db.execSQL("DELETE FROM relation_facts")
+            db.execSQL("DELETE FROM relation_meta")
+        } finally { db.close() }
+    }
+
     @Synchronized fun roles(context: Context): List<ReplyRole> = storage(context).roles.list()
     @Synchronized fun rolesRevision(context: Context): Long = storage(context).roles.revision()
     @Synchronized fun saveRole(context: Context, id: String?, name: String, background: String, revision: String?): ReplyRole =
@@ -45,9 +54,39 @@ object ReplyIdentityProvider {
         if (method == "reply_role_list") return Bundle().apply {
             putStringArrayList("roles", ArrayList(storage(context).roles.templates().map { it.encode(includeBackground = false) }))
         }
+        if (method == "relation_facts_enabled") {
+            val prefs = context.getSharedPreferences(ModulePrefs.FILE_NAME, 0)
+            return Bundle().apply { putBoolean("enabled", prefs.getBoolean(ModulePrefs.KEY_RELATION_FACTS, false)) }
+        }
         val requested = ReplyContactKey(requireNotNull(arg))
         val key = ReplyContactKey(AnalysisCacheKey.digest(caller.toString(), requested.value))
         return when (method) {
+            "relation_facts_get" -> {
+                val store = storage(context).facts
+                val meta = store.meta(key)
+                Bundle().apply {
+                    putStringArrayList("facts", ArrayList(store.list(key).map { it.encode().toString() }))
+                    putLong("last_at", meta.lastAt)
+                    putLong("last_message_id", meta.lastMessageId)
+                }
+            }
+            "relation_facts_put" -> {
+                val store = storage(context).facts
+                val incoming = extras?.getString("facts").orEmpty().let { payload ->
+                    runCatching { org.json.JSONArray(payload) }.getOrNull()?.let { array ->
+                        (0 until array.length()).mapNotNull { array.optJSONObject(it)?.let(RelationFact::decode) }
+                    }.orEmpty()
+                }
+                val merged = RelationFacts.merge(store.list(key), incoming, System.currentTimeMillis())
+                store.save(key, merged)
+                store.saveMeta(key, RelationMeta(extras?.getLong("last_at", 0L) ?: 0L,
+                    extras?.getLong("last_message_id", 0L) ?: 0L))
+                Bundle().apply { putStringArrayList("facts", ArrayList(merged.map { it.encode().toString() })) }
+            }
+            "relation_facts_clear" -> {
+                storage(context).facts.clear(key)
+                Bundle()
+            }
             "reply_role_put" -> {
                 val applied = storage(context).roles.saveFromChat(key,
                     ReplyIdentitySetting.decode(requireNotNull(extras?.getString("identity"))),
