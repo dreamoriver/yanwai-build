@@ -4,7 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** 一条草稿体检结果：最多两条问题，外加一条保持原意的改写。 */
-data class DraftCheck(val issues: List<String>, val rewrite: String?) {
+data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed: Boolean = true) {
     val isEmpty: Boolean get() = issues.isEmpty() && rewrite.isNullOrBlank()
 }
 
@@ -18,7 +18,7 @@ object DraftCheckProtocol {
 规则：
 1. 只报确定的问题，最多两条；说明要具体，指出依据，比如“他刚说周末要加班，这句容易被读成甩脸子”。
 2. 不做心理分析，不推测对方的想法、感情或动机。
-3. 没有问题就返回空数组，不要为了凑数挑刺。
+3. 只要这句话存在被误读的可能，就至少指出一个最可能被误读的点；只有确实完全中性时才返回空数组。
 4. 给一条改写：保持原意和用户平时说话的口气，不超过 30 个字；如果不建议改可以不返回。
 5. 只返回 JSON 对象：{"issues":["..."],"rewrite":"..."}，不要解释和 Markdown。"""
 
@@ -53,7 +53,7 @@ object DraftCheckProtocol {
         val rewrite = json.optString("rewrite").trim()
             .takeIf { it.isNotBlank() && it != "null" }?.take(MAX_REWRITE)
         DraftCheck(issues, rewrite)
-    }.getOrDefault(DraftCheck(emptyList(), null))
+    }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))
 }
 
 /** 同一份草稿在短时间内重复点只算一次，避免反复花钱。 */

@@ -274,7 +274,6 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         var refreshFacts: (Boolean) -> Unit = {}
         roleEditor.addView(action("更新关系档案", quiet = true) { refreshFacts(false) },
             LinearLayout.LayoutParams(-1, dp(40)).apply { bottomMargin = dp(6) })
-        val saveIdentityButton = action("保存角色")
         val instruction = EditText(activity).apply {
             hint = "这次想怎么回？如：委婉拒绝、别太正式（选填）"
             textSize = 14f; setTextColor(theme.ink); setHintTextColor(theme.muted)
@@ -290,6 +289,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val draftCache = DraftCheckCache()
         var lastRewrite: String? = null
         var checkDraftAction: (() -> Unit)? = null
+        var backgroundSaveJob: Job? = null
         val draftPanel = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -313,7 +313,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val topicButton = action("找找话题")
         val shorter = action("更简短", quiet = true)
         val generationActions = LinearLayout(activity)
-        listOf(saveIdentityButton, generateButton, topicButton).forEachIndexed { index, button ->
+        listOf(generateButton, topicButton, checkDraft).forEachIndexed { index, button ->
             button.textSize = 13f; button.setPadding(dp(4), dp(6), dp(4), dp(6))
             // Let large system fonts wrap instead of clipping an action or shrinking the touch target.
             generationActions.addView(button, LinearLayout.LayoutParams(0, -1, 1f).apply { if (index < 2) rightMargin = dp(6) })
@@ -425,10 +425,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         var findingTopics = false
         var applyingRole = false
         var identitySaving = false
-        fun hasUnsavedIdentityBackground() = !group && composition.relationship != ReplyRelationship.UNSPECIFIED &&
-            (identityBackground.text.toString() != composition.background.text ||
-                composition.relationship != selectedIdentity.relationship ||
-                composition.activeCustomRelationship != selectedIdentity.relationship.customValue(selectedIdentity.customText))
+        fun hasUnsavedIdentityBackground() = false
+        // 背景改为停止输入后自动保存，不再需要「未保存」拦截。
         fun topicKey(current: ReplyContext, draft: String, date: String) = TopicKey(current.fingerprint, current.requestedMessages,
             composition.relationship, instruction.text.toString(), draft, date, composition.activeCustomRelationship)
         fun preview(text: CharSequence, empty: String) = text.toString().trim().replace(Regex("\\s+"), " ").take(22).ifBlank { empty }
@@ -500,10 +498,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             instructionToggle.contentDescription = "本次补充，${if (instructionExpanded) "已展开，点击收起" else "已收起，点击展开"}"
             generateButton.contentDescription = "${generateButton.text}，已读取 ${ready?.messages?.size ?: 0} 条消息"
             identityBackground.visibility = if (editingIdentity) View.VISIBLE else View.GONE
-            saveIdentityButton.visibility = if (!group && composition.relationship != ReplyRelationship.UNSPECIFIED) View.VISIBLE else View.GONE
             identityBackground.isEnabled = !generating
-            saveIdentityButton.isEnabled = !generating && composition.hasValidRelationship
-            saveIdentityButton.text = if (identitySaving) "保存中…" else "保存角色"
             rolePicker.text = roleLabel()
             rolePicker.contentDescription = "选择对方身份，当前${composition.relationship.displayLabel(composition.customRelationship)}"
             historyPicker.isEnabled = !generating
@@ -567,6 +562,11 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             }
         }
         fun showDraftCheck(check: DraftCheck) {
+            if (!check.parsed) {
+                draftPanel.visibility = View.GONE
+                state.text = "没看懂模型的返回，点一次重试；连续失败就看下模型配置"
+                return
+            }
             if (check.isEmpty) {
                 draftPanel.visibility = View.GONE
                 state.text = "这句话没什么问题"
@@ -652,45 +652,24 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 }
             }
         }
-        saveIdentityButton.setOnClickListener {
-            if (!ownsDrawer() || busy || group) return@setOnClickListener
-            if (!composition.hasValidRelationship) { customRole.requestFocus(); toast("请先填写对方身份"); return@setOnClickListener }
-            if (owner.key == null) { toast("账号或联系人尚未确认，请重新打开后保存"); return@setOnClickListener }
-            val identityValue = ReplyIdentitySetting(composition.relationship, composition.customRelationship,
-                selectedIdentity.roleId, selectedIdentity.roleRevision)
-            val backgroundText = identityBackground.text.toString()
-            ++saveRevision
-            savingRoleWindow = window
-            identitySaving = true; controls(false)
-            scope.launch {
-                try {
-                    check(verifyAccount()) { "当前聊天或账号已变化" }
-                    val saved = ReplyIdentityBridge.saveRole(activity, owner, identityValue, backgroundText,
-                        { ReplyDatabaseHistory.replyAccount(live) })
-                    if (window === dialog && generation == ModulePrefs.analysisSettings()?.generation &&
-                        owner.isCurrent(ReplyDatabaseHistory.pendingAccountScope(), MessageSniffer.currentReplyTalker())) {
-                        rolesRevision = saved.catalogRevision
-                        drawerRolesRevision = rolesRevision
-                    }
-                    if (ownsDrawer()) {
-                        selectedIdentity = saved.identity
-                        composition.background = saved.background
-                        collapseEditors()
-                        renderParts(); toast("角色和背景已保存")
-                    }
-                } catch (e: CancellationException) { throw e }
-                catch (_: Exception) { if (ownsDrawer()) toast("身份或背景保存失败，请重试") }
-                finally {
-                    if (savingRoleWindow === window) savingRoleWindow = null
-                    identitySaving = false
-                    if (ownsDrawer()) controls(false) else if (window === dialog) hide()
-                }
-            }
-        }
         identityBackground.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-            override fun afterTextChanged(s: Editable?) { if (ownsDrawer()) controls(busy) }
+            override fun afterTextChanged(s: Editable?) {
+                if (ownsDrawer()) controls(busy)
+                if (applyingRole) return
+                // 停止输入 800ms 后自动存到当前联系人，不写角色库、不影响其他聊天。
+                backgroundSaveJob?.cancel()
+                backgroundSaveJob = scope.launch {
+                    delay(800)
+                    val key = owner.key ?: return@launch
+                    if (!ownsDrawer()) return@launch
+                    runCatching {
+                        ReplyIdentityBridge.saveBackground(activity, owner, s?.toString().orEmpty(),
+                            { ReplyDatabaseHistory.replyAccount(live) })
+                    }.onSuccess { saved -> composition.background = saved }
+                }
+            }
         })
         customRole.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit

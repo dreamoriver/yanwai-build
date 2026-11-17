@@ -108,6 +108,9 @@ object ReplyIdentityProvider {
             }
             "contact_background_get" -> Bundle().apply { putString("payload", storage(context).background(key).encode()) }
             "contact_background_put" -> Bundle().apply {
+                // 手动改过背景就不再跟随角色模板，否则会连带改到用同一角色的其他聊天。
+                val current = storage(context).find(key)
+                if (current.roleId != null) storage(context).save(key, current.copy(roleId = null, roleRevision = null))
                 putString("payload", storage(context).saveBackground(key, requireNotNull(extras?.getString("text"))).encode())
             }
             "reply_identity_get" -> Bundle().apply { putString("payload", storage(context).find(key).encode()) }
