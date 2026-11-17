@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 /** 一条草稿体检结果：最多两条问题，外加一条保持原意的改写。 */
 data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed: Boolean = true,
-    val verdict: String? = null) {
+    val verdict: String? = null, val relates: Boolean? = null, val referenceCount: Int = 0) {
     val isEmpty: Boolean get() = issues.isEmpty() && rewrite.isNullOrBlank()
 }
 
@@ -15,7 +15,10 @@ object DraftCheckProtocol {
     private const val MAX_REWRITE = 60
 
     private const val INSTRUCTIONS = """你是聊天回复检查器。draft 是用户已经打好、但还没发出去的一句话。只判断这句话发出去会不会有问题。
-检查项只限这些：太急、太生硬、太冷、太敷衍、太书面、有歧义、答非所问、和当前话题无关、节奏不合。
+第一步必须先回答 relates_to_topic：这句话有没有接住对方最近说的内容。
+- 对方提问、请求、说明一件事，而 draft 完全没有回应这件事 → false
+- 主动换话题、开玩笑岔开、只是打招呼 → 算 true，不算问题
+relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接上。
 规则：
 1. 只报确定的问题，最多两条；说明要具体，指出依据，比如“他刚说周末要加班，这句容易被读成甩脸子”。
 2. 不做心理分析，不推测对方的想法、感情或动机。
@@ -23,7 +26,7 @@ object DraftCheckProtocol {
 4. rewrite 要沿用 my_style 里的说话习惯，包括句长和标点：我平时不加句号就别加，不写书面连接词；rewrite 是能直接替换 draft 发出去的版本，不是对 draft 的评论或回应，也不要加「你可以说」这类前缀；保持原意和用户平时说话的口气，不超过 30 个字；不建议改就不返回。
 5. 无意义内容、乱码、和当前话题无关的话，必须写进 issues，不能只写在 verdict 里。
 6. verdict 必须写一句话，说明这句话和当前对话的关系（例如「回应了对方的问题，语气偏冷」或「和刚才的话题无关」），不管有没有问题都要写。
-7. 只返回 JSON 对象：{"issues":["..."],"rewrite":"...","verdict":"..."}，不要解释和 Markdown。"""
+7. 只返回 JSON 对象：{"relates_to_topic":true,"issues":["..."],"rewrite":"...","verdict":"..."}，不要解释和 Markdown。"""
 
     fun payload(settings: ReplySettings, context: ReplyContext, draft: String,
         relationship: ReplyRelationship, customRelationship: String = ""): JSONObject {
@@ -59,13 +62,14 @@ object DraftCheckProtocol {
             .takeIf { it.isNotBlank() && it != "null" }?.take(MAX_REWRITE)
         val verdict = json.optString("verdict").trim().takeIf { it.isNotBlank() && it != "null" }?.take(80)
         // 模型有时把「无关」只写在 verdict 里；这种情况按问题处理，避免显示成没问题。
-        val unrelated = verdict != null && listOf("无关", "不相关", "无意义", "乱码", "看不懂", "没有关系", "不知所云",
-            "字母", "拼音", "测试输入", "无法理解", "不构成")
-            .any { verdict.contains(it) }
-        val finalIssues = if (issues.isEmpty() && unrelated) listOf("和当前对话无关，发出去对方可能看不懂") else issues
+        val relates = if (json.has("relates_to_topic")) json.optBoolean("relates_to_topic", true) else null
+        val unrelated = relates == false || (verdict != null && listOf("无关", "不相关", "无意义", "乱码", "看不懂",
+            "没有关系", "不知所云", "字母", "拼音", "测试输入", "无法理解", "不构成").any { verdict.contains(it) })
+        val finalIssues = if (issues.isEmpty() && unrelated)
+            listOf("没有接住对方刚才说的内容，容易被当成没在看消息") else issues
         dev.jev.wechatmood.core.MoodLog.i(
-            "DRAFT_CHECK ok chars=${content.length} issues=${finalIssues.size} rewrite=${rewrite != null} verdict=${verdict != null}")
-        DraftCheck(finalIssues, rewrite, verdict = verdict)
+            "DRAFT_CHECK ok chars=${content.length} relates=${relates} issues=${finalIssues.size} rewrite=${rewrite != null} verdict=${verdict != null}")
+        DraftCheck(finalIssues, rewrite, verdict = verdict, relates = relates)
     }.onFailure {
         dev.jev.wechatmood.core.MoodLog.w("DRAFT_CHECK_PARSE_FAILED " + it.javaClass.simpleName)
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))

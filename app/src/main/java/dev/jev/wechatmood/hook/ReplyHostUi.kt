@@ -578,7 +578,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             }
             if (check.isEmpty) {
                 draftPanel.visibility = View.GONE
-                state.text = check.verdict?.let { "模型判断：$it" } ?: "这句话没什么问题"
+                state.text = check.verdict?.let { "参考最近 ${check.referenceCount} 条 · 模型判断：$it" } ?: "这句话没什么问题"
                 return
             }
             state.text = check.verdict?.let { "模型判断：$it" }.orEmpty()
@@ -622,8 +622,9 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                             current.copy(facts = facts), text, composition.relationship, composition.activeCustomRelationship),
                             DraftCheckProtocol::parse)
                     }
-                    draftCache.put(talker.orEmpty(), text, check)
-                    showDraftCheck(check)
+                    val tagged = check.copy(referenceCount = current.messages.size)
+                    draftCache.put(talker.orEmpty(), text, tagged)
+                    showDraftCheck(tagged)
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { state.text = "检查失败：" + (e.message ?: "请重试") }
                 finally { busy = false; controls(false) }

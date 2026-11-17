@@ -69,7 +69,7 @@ class DraftCheckTest {
     @Test fun `verdict about irrelevance is promoted to an issue`() {
         val check = DraftCheckProtocol.parse(body("""{"issues":[],"rewrite":"","verdict":"这句话和当前话题无关"}"""))
         assertEquals(1, check.issues.size)
-        assertTrue(check.issues[0].contains("无关"))
+        assertTrue(check.issues[0].contains("没有接住"))
     }
 
     @Test fun `payload carries my style when there is enough history`() {
