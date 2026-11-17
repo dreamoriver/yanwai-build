@@ -53,6 +53,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     /** 当前会话的关系档案，生成回复时随上下文一起给模型。 */
     private var facts: List<RelationFact> = emptyList()
     private var draftTargetMedia: String? = null
+    private var draftText: String = ""
+    private var draftLastIncoming: String? = null
 
     fun update(currentTalker: String?) {
         if (dialog?.isShowing == true && savingRoleWindow !== dialog && drawerRolesRevision != ModulePrefs.analysisSettings()?.rolesRevision) hide()
@@ -580,10 +582,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             if (check.isEmpty) {
                 draftPanel.visibility = View.GONE
                 if (check.verdict == null) {
-                    // 模型两次都没给结构时，别让它变成一句「不擅长」；图片场景直接说明看不到内容。
-                    state.text = if (draftTargetMedia != null)
-                        "这张${draftTargetMedia}的具体内容没能判断出来，先自己确认这句话和图有没有关系"
-                    else "模型连续两次都没给出判断，可能是这句太短，或这个模型不擅长这种任务"
+                    // 模型两次都没给结构时用本地判断兜底，避免只给一句「不擅长」。
+                    state.text = DraftFallback.hint(draftText, draftLastIncoming)
                     return
                 }
                 state.text = "参考最近 ${check.referenceCount} 条 · 模型判断：" + check.verdict
@@ -617,6 +617,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             // 手动点检查就给新结果：缓存会让同一句反复测试时一直显示旧结论。
             val current = reference.context
             draftTargetMedia = current?.targetMedia
+            draftText = text
+            draftLastIncoming = current?.messages?.lastOrNull { it.speaker != "我" }?.text
             if (current == null) {
                 MoodLog.i("DRAFT_CHECK_SKIP no_context")
                 toast("先点一次「重新读取聊天记录」，再检查")

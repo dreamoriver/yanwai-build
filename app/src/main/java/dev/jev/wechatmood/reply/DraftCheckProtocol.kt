@@ -17,8 +17,8 @@ object DraftCheckProtocol {
     private const val INSTRUCTIONS = """你是聊天回复检查器。draft 是用户已经打好、但还没发出去的一句话。只判断这句话发出去会不会有问题。
 第一步必须先回答 relates_to_topic：这句话有没有接住对方最近说的内容。
 先看 focus：它是用户长按的那一条消息（可能是图片/表情/引用），draft 应该是在回应它。
-如果 focus 是图片或表情，图片内容会一并附上；先看这张图在表达什么，再判断 draft 有没有接住它，
-不要只说「那张图片」，也不要猜图里没有的东西。
+如果 focus 是图片或表情，图片内容会一并附上：verdict 的第一句先用 10 个字左右描述图里是什么
+（例如「海边逆光的剪影照」），再判断 draft 有没有接住它；不要只说「那张图片」，也不要猜图里没有的东西。
 没有 focus 时再看 last_incoming（对方最后说的那句）；两者都没有语义关联就判 false，
 例如对方问「周末有空吗」而你准备回「今天天气不错」。
 - 对方提问、请求、说明一件事，而 draft 完全没有回应这件事 → false
@@ -98,6 +98,16 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
     }.onFailure {
         dev.jev.wechatmood.core.MoodLog.w("DRAFT_CHECK_PARSE_FAILED " + it.javaClass.simpleName)
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))
+}
+
+/** 模型连续失败时的本地兜底：按字面重合度判断有没有接住对方最后一句。 */
+object DraftFallback {
+    fun hint(draft: String, lastIncoming: String?): String {
+        if (lastIncoming.isNullOrBlank()) return "模型没给出判断，也缺少足够的上下文，建议自己再读一遍"
+        val overlap = RelationFacts.similarity(draft, lastIncoming)
+        return if (overlap < 0.1) "这句话和对方刚才说的「${lastIncoming.take(20)}」看不出关联，发出去容易被当成没在听"
+        else "模型没给出判断；这句和对方上一句有一定重合，但语气是否合适仍需自己确认"
+    }
 }
 
 /** 脏话这类明显问题不依赖模型判断，本地先兜一层，避免模型放行。 */
