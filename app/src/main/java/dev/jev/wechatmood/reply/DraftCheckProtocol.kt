@@ -54,7 +54,7 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
             }))
             .put("draft", draft.take(500))
         return JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 300).put("temperature", 0.2)
+            .put("max_tokens", 500).put("temperature", 0.1)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content", INSTRUCTIONS))
                 .put(JSONObject().put("role", "user").put("content", evidence.toString())))

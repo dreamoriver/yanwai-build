@@ -578,7 +578,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             if (check.isEmpty) {
                 draftPanel.visibility = View.GONE
                 if (check.verdict == null) {
-                    state.text = "模型这次没给出判断依据，再点一次试试"
+                    state.text = "模型连续两次都没给出判断，可能是这句太短，或这个模型不擅长这种任务"
                     return
                 }
                 state.text = "参考最近 ${check.referenceCount} 条 · 模型判断：" + check.verdict
@@ -620,10 +620,14 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             busy = true; controls(true)
             scope.launch {
                 try {
-                    val check = withContext(Dispatchers.IO) {
-                        ReplyHttpClient().request(settings, DraftCheckProtocol.payload(settings,
-                            current.copy(facts = facts), text, composition.relationship, composition.activeCustomRelationship),
-                            DraftCheckProtocol::parse)
+                    val payload = DraftCheckProtocol.payload(settings, current.copy(facts = facts), text,
+                        composition.relationship, composition.activeCustomRelationship)
+                    val client = ReplyHttpClient()
+                    var check = withContext(Dispatchers.IO) { client.request(settings, payload, DraftCheckProtocol::parse) }
+                    // 模型偶尔不回结构：自动重试一次，别让用户再点。
+                    if (check.isEmpty && check.verdict == null) {
+                        MoodLog.i("DRAFT_CHECK_RETRY 首次没有判断依据")
+                        check = withContext(Dispatchers.IO) { client.request(settings, payload, DraftCheckProtocol::parse) }
                     }
                     showDraftCheck(check.copy(referenceCount = current.messages.size))
                 } catch (e: CancellationException) { throw e }
