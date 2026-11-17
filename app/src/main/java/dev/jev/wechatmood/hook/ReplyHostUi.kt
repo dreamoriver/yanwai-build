@@ -834,7 +834,10 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 catch (_: Exception) {
                     if (reference.isCurrent(ticket) && ownsDrawer()) state.text = "历史读取失败，请重试"
                 } finally {
-                    if (reference.isCurrent(ticket) && ownsDrawer()) { reference.fail(ticket); controls(busy) }
+                    // 无论界面是否还开着都要清 loading，否则 reference.loading 卡住后，
+                    // 生成、找话题、重新读取都会被开头的 loading 判断直接挡掉。
+                    reference.fail(ticket)
+                    if (reference.isCurrent(ticket) && ownsDrawer()) controls(busy)
                 }
             }
         }

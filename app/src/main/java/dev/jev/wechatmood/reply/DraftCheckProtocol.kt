@@ -10,12 +10,14 @@ data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed
 }
 
 object DraftCheckProtocol {
-    private const val MAX_CONTEXT = 8
+    private const val MAX_CONTEXT = 12
     private const val MAX_ISSUE = 40
     private const val MAX_REWRITE = 60
 
     private const val INSTRUCTIONS = """你是聊天回复检查器。draft 是用户已经打好、但还没发出去的一句话。只判断这句话发出去会不会有问题。
 第一步必须先回答 relates_to_topic：这句话有没有接住对方最近说的内容。
+先看 last_incoming（对方最后说的那句），再看 draft；如果 draft 和 last_incoming 没有语义关联，
+例如对方问「周末有空吗」而你准备回「今天天气不错」，必须判 false。
 - 对方提问、请求、说明一件事，而 draft 完全没有回应这件事 → false
 - 主动换话题、开玩笑岔开、只是打招呼 → 算 true，不算问题
 relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接上。
@@ -35,6 +37,8 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
         val evidence = JSONObject()
             .put("relationship", JSONObject().put("id", relationship.id).put("label", relationship.displayLabel(custom)))
             .put("my_style", style?.summary() ?: JSONObject.NULL)
+            // 单独把对方最后一句拎出来，模型更容易对比 draft 有没有接住。
+            .put("last_incoming", context.messages.lastOrNull { it.speaker != "我" }?.text?.take(120) ?: JSONObject.NULL)
             .put("messages", JSONArray(context.messages.takeLast(MAX_CONTEXT).map {
                 JSONObject().put("speaker", it.speaker).put("text", it.text.take(120))
             }))
