@@ -916,8 +916,12 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             if (!composition.hasValidRelationship) { customRole.requestFocus(); toast("请先填写对方身份"); return }
             if (!ownsDrawer()) { window.dismiss(); return }
             if (!canGenerate()) { configure(); return }
-            val current = reference.context?.copy(background = composition.background, facts = facts)
-                ?: run { prepareHistory(composition.historyLimit); return }
+            val current = reference.context?.let { ctx ->
+                // 历史重建后 focus 可能丢，按打开抽屉时记住的目标补回来。
+                ctx.copy(background = composition.background, facts = facts,
+                    focusMessageId = if (ctx.focusMessageId > 0) ctx.focusMessageId else targetFocusId,
+                    targetImageDataUri = ctx.targetImageDataUri ?: targetImage)
+            } ?: run { prepareHistory(composition.historyLimit); return }
             val latest = MessageSniffer.replyBoundary()
             if (latest != null && latest != current.latestLoadedId && current.messages.none { it.id == latest }) {
                 prepareHistory(composition.historyLimit); toast("聊天有更新，读取完成后再点生成"); return

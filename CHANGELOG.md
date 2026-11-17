@@ -3,6 +3,13 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.30
+
+「帮我回」回的不是长按那一条
+- 重新读取历史后重建的上下文没带上 focusMessageId，reply_target 变成空，模型只能回应最近几条
+- 历史读取现在保留 focusMessageId；生成前再按打开抽屉时记住的目标兜底补一次
+- 图片/表情场景额外保留 targetMedia，保证 reply_target 标明类型
+
 ## 2.9.29
 
 模型偶尔不给判断依据
