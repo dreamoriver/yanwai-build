@@ -12,6 +12,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      YANWAI_KEYSTORE_B64: ${{ secrets.YANWAI_KEYSTORE_B64 }}
+      YANWAI_KEYSTORE_PASSWORD: ${{ secrets.YANWAI_KEYSTORE_PASSWORD }}
+      YANWAI_KEY_ALIAS: ${{ secrets.YANWAI_KEY_ALIAS }}
+      YANWAI_KEY_PASSWORD: ${{ secrets.YANWAI_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +42,18 @@ jobs:
         run: |
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Restore signing keystore
+        # CI 每个 runner 自动生成的 debug keystore 都不同，签名一变就无法覆盖安装。
+        # 配置了固定密钥后，debug/release 都用同一个证书。
+        run: |
+          if [ -n "$YANWAI_KEYSTORE_B64" ]; then
+            echo "$YANWAI_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/yanwai.jks"
+            echo "YANWAI_KEYSTORE=$RUNNER_TEMP/yanwai.jks" >> "$GITHUB_ENV"
+            echo "已启用固定签名"
+          else
+            echo "::warning::没有配置签名密钥，本次使用默认调试签名"
+          fi
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
