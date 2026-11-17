@@ -20,15 +20,18 @@ object DraftCheckProtocol {
 1. 只报确定的问题，最多两条；说明要具体，指出依据，比如“他刚说周末要加班，这句容易被读成甩脸子”。
 2. 不做心理分析，不推测对方的想法、感情或动机。
 3. 只要这句话存在被误读的可能，就至少指出一个最可能被误读的点；只有确实完全中性时才返回空数组。
-4. rewrite 是能直接替换 draft 发出去的版本，不是对 draft 的评论或回应，也不要加「你可以说」这类前缀；保持原意和用户平时说话的口气，不超过 30 个字；不建议改就不返回。
-5. verdict 必须写一句话，说明这句话和当前对话的关系（例如「回应了对方的问题，语气偏冷」或「和刚才的话题无关」），不管有没有问题都要写。
-6. 只返回 JSON 对象：{"issues":["..."],"rewrite":"...","verdict":"..."}，不要解释和 Markdown。"""
+4. rewrite 要沿用 my_style 里的说话习惯，包括句长和标点：我平时不加句号就别加，不写书面连接词；rewrite 是能直接替换 draft 发出去的版本，不是对 draft 的评论或回应，也不要加「你可以说」这类前缀；保持原意和用户平时说话的口气，不超过 30 个字；不建议改就不返回。
+5. 无意义内容、乱码、和当前话题无关的话，必须写进 issues，不能只写在 verdict 里。
+6. verdict 必须写一句话，说明这句话和当前对话的关系（例如「回应了对方的问题，语气偏冷」或「和刚才的话题无关」），不管有没有问题都要写。
+7. 只返回 JSON 对象：{"issues":["..."],"rewrite":"...","verdict":"..."}，不要解释和 Markdown。"""
 
     fun payload(settings: ReplySettings, context: ReplyContext, draft: String,
         relationship: ReplyRelationship, customRelationship: String = ""): JSONObject {
         val custom = relationship.customValue(customRelationship)
+        val style = StyleProfileCache.of(context.talker, context.messages)
         val evidence = JSONObject()
             .put("relationship", JSONObject().put("id", relationship.id).put("label", relationship.displayLabel(custom)))
+            .put("my_style", style?.summary() ?: JSONObject.NULL)
             .put("messages", JSONArray(context.messages.takeLast(MAX_CONTEXT).map {
                 JSONObject().put("speaker", it.speaker).put("text", it.text.take(120))
             }))
@@ -55,8 +58,13 @@ object DraftCheckProtocol {
         val rewrite = json.optString("rewrite").trim()
             .takeIf { it.isNotBlank() && it != "null" }?.take(MAX_REWRITE)
         val verdict = json.optString("verdict").trim().takeIf { it.isNotBlank() && it != "null" }?.take(80)
-        dev.jev.wechatmood.core.MoodLog.i("DRAFT_CHECK ok chars=${content.length} issues=${issues.size} rewrite=${rewrite != null} verdict=${verdict != null}")
-        DraftCheck(issues, rewrite, verdict = verdict)
+        // 模型有时把「无关」只写在 verdict 里；这种情况按问题处理，避免显示成没问题。
+        val unrelated = verdict != null && listOf("无关", "不相关", "无意义", "乱码", "看不懂", "没有关系", "不知所云")
+            .any { verdict.contains(it) }
+        val finalIssues = if (issues.isEmpty() && unrelated) listOf("和当前对话无关，发出去对方可能看不懂") else issues
+        dev.jev.wechatmood.core.MoodLog.i(
+            "DRAFT_CHECK ok chars=${content.length} issues=${finalIssues.size} rewrite=${rewrite != null} verdict=${verdict != null}")
+        DraftCheck(finalIssues, rewrite, verdict = verdict)
     }.onFailure {
         dev.jev.wechatmood.core.MoodLog.w("DRAFT_CHECK_PARSE_FAILED " + it.javaClass.simpleName)
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))
