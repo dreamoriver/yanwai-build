@@ -22,4 +22,15 @@ class DraftGuardTest {
         assertNotNull(hint)
         assert(hint!!.contains("攻击性"))
     }
+
+    @Test fun `random letters are caught locally`() {
+        assertNotNull(DraftGuard.hint("asdfgh"))
+        assertNotNull(DraftGuard.hint("qwrtypsdfg"))
+    }
+
+    @Test fun `real english words are not treated as gibberish`() {
+        assertNull(DraftGuard.hint("hahaha"))
+        assertNull(DraftGuard.hint("okok"))
+        assertNull(DraftGuard.hint("明天见"))
+    }
 }

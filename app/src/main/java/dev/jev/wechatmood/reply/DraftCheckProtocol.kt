@@ -59,7 +59,8 @@ object DraftCheckProtocol {
             .takeIf { it.isNotBlank() && it != "null" }?.take(MAX_REWRITE)
         val verdict = json.optString("verdict").trim().takeIf { it.isNotBlank() && it != "null" }?.take(80)
         // 模型有时把「无关」只写在 verdict 里；这种情况按问题处理，避免显示成没问题。
-        val unrelated = verdict != null && listOf("无关", "不相关", "无意义", "乱码", "看不懂", "没有关系", "不知所云")
+        val unrelated = verdict != null && listOf("无关", "不相关", "无意义", "乱码", "看不懂", "没有关系", "不知所云",
+            "字母", "拼音", "测试输入", "无法理解", "不构成")
             .any { verdict.contains(it) }
         val finalIssues = if (issues.isEmpty() && unrelated) listOf("和当前对话无关，发出去对方可能看不懂") else issues
         dev.jev.wechatmood.core.MoodLog.i(
@@ -75,8 +76,28 @@ object DraftGuard {
     private val HOSTILE = listOf("操你妈", "草泥马", "傻逼", "去死", "贱人", "废物", "神经病", "滚蛋", "他妈的", "你麻痹")
 
     fun hint(draft: String): String? {
-        val hit = HOSTILE.firstOrNull { draft.contains(it) } ?: return null
-        return "这句话带攻击性（包含「$hit」），发出去容易把话说死；可以换成说自己感受的说法，比如「我现在挺生气的，晚点再说」"
+        HOSTILE.firstOrNull { draft.contains(it) }?.let { hit ->
+            return "这句话带攻击性（包含「$hit」），发出去容易把话说死；可以换成说自己感受的说法，比如「我现在挺生气的，晚点再说」"
+        }
+        if (looksLikeGibberish(draft)) {
+            return "这看起来是一串字母或测试输入，和当前聊天没有关系；确认要发的话，先换成一句正常的话"
+        }
+        return null
+    }
+
+    /**
+     * 中文用户随手敲的字母串（如 asdfgh）元音比例很低，直接本地判掉，
+     * 不依赖模型，避免「没问题」这种明显不对的结论。
+     */
+    private fun looksLikeGibberish(draft: String): Boolean {
+        if (draft.any { it in '\u4e00'..'\u9fff' }) return false
+        val letters = draft.filter { it.isLetter() }
+        if (letters.length >= 4) {
+            val vowels = letters.count { it.lowercaseChar() in "aeiou" }
+            return vowels.toDouble() / letters.length < 0.2
+        }
+        val digits = draft.filter { it.isDigit() }
+        return digits.length >= 4 && digits.length == draft.count { it.isLetterOrDigit() }
     }
 }
 
