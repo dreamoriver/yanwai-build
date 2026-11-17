@@ -286,7 +286,6 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         }
         results.addView(instruction, LinearLayout.LayoutParams(-1, -2))
         // 草稿体检：只在输入框有文字时出现，点一下看这句会不会说错。
-        val draftCache = DraftCheckCache()
         var lastRewrite: String? = null
         var checkDraftAction: (() -> Unit)? = null
         var backgroundSaveJob: Job? = null
@@ -578,7 +577,11 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             }
             if (check.isEmpty) {
                 draftPanel.visibility = View.GONE
-                state.text = check.verdict?.let { "参考最近 ${check.referenceCount} 条 · 模型判断：$it" } ?: "这句话没什么问题"
+                if (check.verdict == null) {
+                    state.text = "模型这次没给出判断依据，再点一次试试"
+                    return
+                }
+                state.text = "参考最近 ${check.referenceCount} 条 · 模型判断：" + check.verdict
                 return
             }
             state.text = check.verdict?.let { "模型判断：$it" }.orEmpty()
@@ -606,7 +609,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             }
             val settings = ModulePrefs.replySettings()
             if (!settings.isConfigured) { MoodLog.i("DRAFT_CHECK_SKIP unconfigured"); toast("请先配置回复模型"); return }
-            draftCache.get(talker.orEmpty(), text)?.let { MoodLog.i("DRAFT_CHECK_CACHE_HIT"); showDraftCheck(it); return }
+            // 手动点检查就给新结果：缓存会让同一句反复测试时一直显示旧结论。
             val current = reference.context
             if (current == null) {
                 MoodLog.i("DRAFT_CHECK_SKIP no_context")
@@ -622,9 +625,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                             current.copy(facts = facts), text, composition.relationship, composition.activeCustomRelationship),
                             DraftCheckProtocol::parse)
                     }
-                    val tagged = check.copy(referenceCount = current.messages.size)
-                    draftCache.put(talker.orEmpty(), text, tagged)
-                    showDraftCheck(tagged)
+                    showDraftCheck(check.copy(referenceCount = current.messages.size))
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { state.text = "检查失败：" + (e.message ?: "请重试") }
                 finally { busy = false; controls(false) }
