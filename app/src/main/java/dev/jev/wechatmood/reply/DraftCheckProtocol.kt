@@ -52,7 +52,10 @@ object DraftCheckProtocol {
         }.orEmpty()
         val rewrite = json.optString("rewrite").trim()
             .takeIf { it.isNotBlank() && it != "null" }?.take(MAX_REWRITE)
+        dev.jev.wechatmood.core.MoodLog.i("DRAFT_CHECK ok chars=${content.length} issues=${issues.size} rewrite=${rewrite != null}")
         DraftCheck(issues, rewrite)
+    }.onFailure {
+        dev.jev.wechatmood.core.MoodLog.w("DRAFT_CHECK_PARSE_FAILED " + it.javaClass.simpleName)
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))
 }
 

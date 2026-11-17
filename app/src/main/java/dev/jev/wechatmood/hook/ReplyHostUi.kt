@@ -307,7 +307,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         draftPanel.addView(draftRewrite)
         draftPanel.addView(draftUse, LinearLayout.LayoutParams(-2, dp(36)))
         results.addView(draftPanel)
-        val checkDraft = action("检查输入框这句", quiet = true) { checkDraftAction?.invoke() }.apply { visibility = View.GONE }
+        val checkDraft = action("检查输入框这句") { checkDraftAction?.invoke() }.apply { visibility = View.GONE }
         val generateButton = action("生成回复", primary = true)
         val topicButton = action("找找话题")
         val shorter = action("更简短", quiet = true)
@@ -512,8 +512,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 else "填入后可自由修改，发送永远由你点"
             state.visibility = if (state.text.isBlank()) View.GONE else View.VISIBLE
             if (window.isShowing) fitWindow()
-            // 用 INVISIBLE 占位，避免三格在输入框为空时被拉伸成两格。
-            checkDraft.visibility = if (!generatingRequest && editor()?.text?.isNullOrBlank() == false) View.VISIBLE else View.INVISIBLE
+            // GONE 时剩下的两格按 weight 平分整行；有文字时三格三等分。
+            checkDraft.visibility = if (!generatingRequest && editor()?.text?.isNullOrBlank() == false) View.VISIBLE else View.GONE
         }
         roleToggle.setOnClickListener {
             if (!ownsDrawer() || busy) return@setOnClickListener
