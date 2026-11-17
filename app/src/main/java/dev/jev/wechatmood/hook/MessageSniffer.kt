@@ -354,7 +354,15 @@ object MessageSniffer {
             else -> null
         }
         // 目标消息可能不在最近 N 条里，单独带一份正文，避免模型只能看到别的消息。
-        val focusText = target?.plainText() ?: target?.quotedMessage()?.text
+        val focusText = target?.let { record ->
+            val own = record.plainText()
+            val quoted = record.quotedMessage()
+            when {
+                own == null -> quoted?.text
+                quoted?.text != null -> "【引用${quoted.displayName.orEmpty()}：${quoted.text}】$own"
+                else -> own
+            }
+        }
         return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusId,
             targetMedia = targetMedia, focusText = focusText)
     }
