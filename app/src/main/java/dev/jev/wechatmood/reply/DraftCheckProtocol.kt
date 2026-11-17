@@ -10,14 +10,15 @@ data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed
 }
 
 object DraftCheckProtocol {
-    private const val MAX_CONTEXT = 12
+    private const val MAX_CONTEXT = 20
     private const val MAX_ISSUE = 40
     private const val MAX_REWRITE = 60
 
     private const val INSTRUCTIONS = """你是聊天回复检查器。draft 是用户已经打好、但还没发出去的一句话。只判断这句话发出去会不会有问题。
 第一步必须先回答 relates_to_topic：这句话有没有接住对方最近说的内容。
 先看 focus：它是用户长按的那一条消息（可能是图片/表情/引用），draft 应该是在回应它。
-如果 focus 是图片或表情，判断 draft 有没有针对这张图/表情说话，而不是泛泛接别人的话。
+如果 focus 是图片或表情，图片内容会一并附上；先看这张图在表达什么，再判断 draft 有没有接住它，
+不要只说「那张图片」，也不要猜图里没有的东西。
 没有 focus 时再看 last_incoming（对方最后说的那句）；两者都没有语义关联就判 false，
 例如对方问「周末有空吗」而你准备回「今天天气不错」。
 - 对方提问、请求、说明一件事，而 draft 完全没有回应这件事 → false
@@ -34,7 +35,7 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
 7. 只返回 JSON 对象：{"relates_to_topic":true,"issues":["..."],"rewrite":"...","verdict":"..."}，不要解释和 Markdown。"""
 
     fun payload(settings: ReplySettings, context: ReplyContext, draft: String,
-        relationship: ReplyRelationship, customRelationship: String = ""): JSONObject {
+        relationship: ReplyRelationship, customRelationship: String = "", image: String? = null): JSONObject {
         val custom = relationship.customValue(customRelationship)
         val style = StyleProfileCache.of(context.talker, context.messages)
         val evidence = JSONObject()
@@ -53,13 +54,17 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
                 JSONObject().put("speaker", it.speaker).put("text", it.text.take(120))
             }))
             .put("draft", draft.take(500))
+        val userMessage = if (image != null) JSONObject().put("role", "user").put("content", JSONArray()
+            .put(JSONObject().put("type", "text").put("text", evidence.toString()))
+            .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image))))
+        else JSONObject().put("role", "user").put("content", evidence.toString())
         return JSONObject().put("model", settings.model).put("stream", false)
             .put("max_tokens", 500).put("temperature", 0.1)
             // 强制 JSON 输出，减少模型只回一段话导致解析为空。
             .put("response_format", JSONObject().put("type", "json_object"))
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content", INSTRUCTIONS))
-                .put(JSONObject().put("role", "user").put("content", evidence.toString())))
+                .put(userMessage))
     }
 
     internal fun parse(body: String): DraftCheck = runCatching {

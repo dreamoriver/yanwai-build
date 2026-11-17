@@ -622,7 +622,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             scope.launch {
                 try {
                     val payload = DraftCheckProtocol.payload(settings, current.copy(facts = facts), text,
-                        composition.relationship, composition.activeCustomRelationship)
+                        composition.relationship, composition.activeCustomRelationship, current.targetImageDataUri)
                     val client = ReplyHttpClient()
                     var check = withContext(Dispatchers.IO) { client.request(settings, payload, DraftCheckProtocol::parse) }
                     // 模型偶尔不回结构：自动重试一次，别让用户再点。
