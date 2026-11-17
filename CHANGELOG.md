@@ -3,6 +3,15 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.13
+
+用量里的 token 一直是 0
+- 「帮我回」走流式时响应里没有 usage，之前只记了请求次数
+- 流式请求现在带 stream_options.include_usage，服务会在最后一段返回 usage
+- 不支持这个参数的服务会自动去掉后重试，不影响回复本身
+- JEV 分析线路如果响应里带 usage 也会记真实值，否则仍然只计次
+- 日志 REPLY_STREAM 增加 usage=prompt+completion，方便确认
+
 ## 2.9.12
 
 用量显示挪到首页

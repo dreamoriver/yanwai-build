@@ -63,7 +63,10 @@ object ReplyProtocol {
             .put(JSONObject().put("type", "text").put("text", evidence.toString()))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image))))
         else JSONObject().put("role", "user").put("content", evidence.toString())
-        return JSONObject().put("model", settings.model).put("stream", stream)
+        val request = JSONObject().put("model", settings.model).put("stream", stream)
+        // 让兼容 OpenAI 的服务在最后一段带上 usage；不支持的服务会在请求层去掉后重试。
+        if (stream) request.put("stream_options", JSONObject().put("include_usage", true))
+        return request
             .put("max_tokens", 1200).put("temperature", 0.9).put("messages", JSONArray()
             .put(JSONObject().put("role", "system").put("content", "$instructions$mediaHint\n\n$knowledge"))
             .put(userMessage))
