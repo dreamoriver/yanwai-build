@@ -313,12 +313,21 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             toast("已复制这一条")
         }
         results.addView(streamCard, results.indexOfChild(state) + 1)
+        // 候选都很短，首条和其余通常只差几百毫秒；先等一会儿再显示，避免卡片闪一下。
+        var streamPending: Runnable? = null
         fun showStream(text: String) {
             if (!ownsDrawer()) return
             streamText.text = text
-            streamCard.visibility = View.VISIBLE
+            if (streamCard.visibility == View.VISIBLE) return
+            val reveal = Runnable { if (ownsDrawer()) streamCard.visibility = View.VISIBLE }
+            streamPending = reveal
+            streamCard.postDelayed(reveal, 700)
         }
-        fun hideStream() { streamCard.visibility = View.GONE }
+        fun hideStream() {
+            streamPending?.let { streamCard.removeCallbacks(it) }
+            streamPending = null
+            streamCard.visibility = View.GONE
+        }
         val stale = action("有新消息 · 重新读取", quiet = true)
         stale.visibility = View.GONE; newMessageNotice = stale
         results.addView(stale, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
