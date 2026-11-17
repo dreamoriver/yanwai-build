@@ -11,36 +11,42 @@ class DraftCheckTest {
     private fun body(content: String): String = JSONObject().put("choices", JSONArray().put(
         JSONObject().put("message", JSONObject().put("content", content)))).toString()
 
-    @Test fun `issues and rewrite are parsed`() {
-        val check = DraftCheckProtocol.parse(body("""{"issues":["可能显得在赌气"],"rewrite":"那我先不折腾了，你定？"}"""))
-        assertEquals(listOf("可能显得在赌气"), check.issues)
-        assertEquals("那我先不折腾了，你定？", check.rewrite)
+    @Test fun `three labelled lines are parsed`() {
+        val check = DraftCheckProtocol.parse(body(
+            "判断：没接住对方问的电脑配置\n问题：没回应对方的问题；语气偏冷\n改写：星辰云电脑？没搞过"))
+        assertEquals(listOf("没回应对方的问题", "语气偏冷"), check.issues)
+        assertEquals("星辰云电脑？没搞过", check.rewrite)
+        assertEquals("没接住对方问的电脑配置", check.verdict)
+    }
+
+    @Test fun `no problem still keeps a rewrite`() {
+        val check = DraftCheckProtocol.parse(body("判断：回应到位\n问题：无\n改写：好呀，我看看"))
+        assertTrue(check.issues.isEmpty())
+        assertEquals("好呀，我看看", check.rewrite)
         assertTrue(!check.isEmpty)
     }
 
-    @Test fun `at most two issues are kept`() {
-        val check = DraftCheckProtocol.parse(body("""{"issues":["一","二","三"],"rewrite":""}"""))
-        assertEquals(2, check.issues.size)
+    @Test fun `half width colon and extra lines are tolerated`() {
+        val check = DraftCheckProtocol.parse(body("判断: 图片是海边剪影\n问题: 无\n改写: 这张挺好看的\n补充说明"))
+        assertEquals("图片是海边剪影", check.verdict)
+        assertNull(check.issues.firstOrNull())
+        assertEquals("这张挺好看的", check.rewrite)
+    }
+
+    @Test fun `missing rewrite becomes null`() {
+        val check = DraftCheckProtocol.parse(body("判断：还行\n问题：无\n改写：无"))
         assertNull(check.rewrite)
     }
 
-    @Test fun `null rewrite token becomes null`() {
-        assertNull(DraftCheckProtocol.parse(body("""{"issues":[],"rewrite":"null"}""")).rewrite)
-    }
-
-    @Test fun `empty result is treated as no problem`() {
-        val check = DraftCheckProtocol.parse(body("""{"issues":[],"rewrite":""}"""))
-        assertTrue(check.isEmpty)
-    }
-
-    @Test fun `prose around the object is tolerated`() {
-        val check = DraftCheckProtocol.parse(body("""检查完了：{"issues":["太生硬"],"rewrite":"好呀"} 以上。"""))
-        assertEquals(listOf("太生硬"), check.issues)
+    @Test fun `prose without labels still yields a verdict`() {
+        val check = DraftCheckProtocol.parse(body("这句话和当前话题无关"))
+        assertTrue(check.issues.isEmpty())
+        assertNull(check.verdict)
     }
 
     @Test fun `malformed body yields an empty result`() {
         assertTrue(DraftCheckProtocol.parse("not json").isEmpty)
-        assertTrue(DraftCheckProtocol.parse(body("没有可说的")).isEmpty)
+        assertTrue(DraftCheckProtocol.parse(body("")).isEmpty)
     }
 
     @Test fun `cache hits only for the same draft within the window`() {
@@ -52,32 +58,17 @@ class DraftCheckTest {
         assertNull(cache.get("t1", "好的", now = 1500))
     }
 
-    @Test fun `payload keeps recent messages and the draft`() {
+    @Test fun `payload keeps focus and recent messages`() {
         val settings = ReplySettings.fromInput("https://example.com/v1/chat/completions", "key", "model")
         val context = ReplyContext("talker@chatroom", listOf(
             ReplyMessage(1, "对方", 1000, "这周末有空吗"),
             ReplyMessage(2, "我", 2000, "看情况"),
-        ))
-        val payload = DraftCheckProtocol.payload(settings, context, "那你自己看着办吧", ReplyRelationship.PARTNER)
+        ), focusMessageId = 1, focusText = "这周末有空吗")
+        val payload = DraftCheckProtocol.payload(settings, context, "今天天气不错", ReplyRelationship.FRIEND)
         val evidence = JSONObject(payload.getJSONArray("messages").getJSONObject(1).getString("content"))
-        assertEquals("那你自己看着办吧", evidence.getString("draft"))
+        assertEquals("今天天气不错", evidence.getString("draft"))
+        assertEquals("这周末有空吗", evidence.getJSONObject("focus").getString("text"))
         assertEquals(2, evidence.getJSONArray("messages").length())
-        assertEquals("model", payload.getString("model"))
-        assertTrue(!payload.getBoolean("stream"))
-    }
-
-    @Test fun `verdict about irrelevance is promoted to an issue`() {
-        val check = DraftCheckProtocol.parse(body("""{"issues":[],"rewrite":"","verdict":"这句话和当前话题无关"}"""))
-        assertEquals(1, check.issues.size)
-        assertTrue(check.issues[0].contains("没有接住"))
-    }
-
-    @Test fun `payload carries my style when there is enough history`() {
-        val settings = ReplySettings.fromInput("https://example.com/v1/chat/completions", "key", "model")
-        val messages = (1..12).map { ReplyMessage(it.toLong(), "我", it * 1000L, "行") }
-        val payload = DraftCheckProtocol.payload(settings, ReplyContext("talker", messages), "那就这样吧", ReplyRelationship.FRIEND)
-        val evidence = JSONObject(payload.getJSONArray("messages").getJSONObject(1).getString("content"))
-        assertTrue(evidence.has("my_style"))
-        assertTrue(!evidence.isNull("my_style"))
+        assertTrue(!payload.has("response_format"))
     }
 }
