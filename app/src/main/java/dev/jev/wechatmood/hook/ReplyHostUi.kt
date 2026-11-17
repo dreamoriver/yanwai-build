@@ -299,9 +299,18 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val draftIssues = theme.label("", 13f, theme.ink)
         val draftRewrite = theme.label("", 15f, theme.accent).apply { setPadding(0, dp(6), 0, 0) }
         val draftUse = action("用这条替换", quiet = true) {
-            lastRewrite?.let { instruction.setText(it); instruction.setSelection(it.length) }
-            draftPanel.visibility = View.GONE
-            toast("已替换草稿，自己确认后再发送")
+            val rewrite = lastRewrite
+            if (rewrite.isNullOrBlank()) return@action
+            val target = editor()
+            if (target == null) {
+                toast("找不到微信输入框，请切回文字输入再试")
+                return@action
+            }
+            // 写的是微信聊天输入框，不是抽屉里的「本次补充」。
+            target.setText(rewrite)
+            target.setSelection(rewrite.length)
+            hide()
+            toast("已替换，自己确认后再发送")
         }
         draftPanel.addView(draftIssues)
         draftPanel.addView(draftRewrite)

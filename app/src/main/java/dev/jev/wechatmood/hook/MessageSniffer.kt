@@ -243,7 +243,7 @@ object MessageSniffer {
         if (!isVisible(view)) return null
         val scope = chatNodes(activity.window.decorView)
         if (view !in scope) return null
-        val current = records(scope)
+        val current = records(scope, useCache = false)
         val talker = conversation(activity, scope, current) ?: return null
         val ancestors = generateSequence(view) { it.parent as? View }.toSet()
         return current.filter { it.first in ancestors }.mapNotNull { it.second.input }
@@ -262,7 +262,7 @@ object MessageSniffer {
     fun replyTargetForView(view: View): MessageMetadata? {
         val activity = active.get() ?: return null
         val scope = chatNodes(activity.window.decorView)
-        val current = records(scope)
+        val current = records(scope, useCache = false)
         val talker = conversation(activity, scope, current) ?: return null
         val ancestors = generateSequence(view) { it.parent as? View }.toSet()
         return current.filter { it.first in ancestors }.mapNotNull { it.second.metadata }
@@ -402,7 +402,7 @@ object MessageSniffer {
         return ConversationIdentity.resolve(records.map { it.second.talker }, footerTalker, dedicated)
     }
 
-    private fun records(scope: List<View>): List<Pair<View, BoundMessage>> {
+    private fun records(scope: List<View>, useCache: Boolean = true): List<Pair<View, BoundMessage>> {
         val lists = scope.filterIsInstance<ListView>()
         var signature = 17L
         for (list in lists) {
@@ -417,7 +417,8 @@ object MessageSniffer {
             bindings.keys.forEach { signature = signature * 31 + System.identityHashCode(it) }
             signature = signature * 31 + bindings.size
         }
-        recordsSnapshot?.takeIf { it.signature == signature }?.let { return it.rows }
+        // 长按是对着具体 View 找行的，缓存里的旧 View 引用可能已经被回收复用，必须重建。
+        if (useCache) recordsSnapshot?.takeIf { it.signature == signature }?.let { return it.rows }
         val records = mutableListOf<Pair<View, BoundMessage>>()
         for (list in lists) {
             for (index in 0 until list.childCount) {
