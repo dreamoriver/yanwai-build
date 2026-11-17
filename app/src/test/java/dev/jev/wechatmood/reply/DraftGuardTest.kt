@@ -36,15 +36,16 @@ class DraftGuardTest {
 
     @Test fun `fallback flags unrelated draft`() {
         val hint = DraftFallback.hint("科技公好士", "星辰云电脑你们有在搞么")
-        assert(hint.contains("看不出关联"))
+        assert(hint.contains("接不上"))
+        assert(hint.contains("生成回复"))
     }
 
     @Test fun `fallback keeps quiet when there is overlap`() {
         val hint = DraftFallback.hint("星辰云电脑没搞过", "星辰云电脑你们有在搞么")
-        assert(hint.contains("仍需自己确认"))
+        assert(hint.contains("语气合不合适"))
     }
 
     @Test fun `fallback handles missing context`() {
-        assert(DraftFallback.hint("行吧", null).contains("缺少足够的上下文"))
+        assert(DraftFallback.hint("行吧", null).contains("上下文也不够"))
     }
 }

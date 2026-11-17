@@ -103,10 +103,15 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
 /** 模型连续失败时的本地兜底：按字面重合度判断有没有接住对方最后一句。 */
 object DraftFallback {
     fun hint(draft: String, lastIncoming: String?): String {
-        if (lastIncoming.isNullOrBlank()) return "模型没给出判断，也缺少足够的上下文，建议自己再读一遍"
+        if (lastIncoming.isNullOrBlank()) {
+            return "模型没给出判断，上下文也不够；可以点「生成回复」参考几条，或直接说出你的想法"
+        }
         val overlap = RelationFacts.similarity(draft, lastIncoming)
-        return if (overlap < 0.1) "这句话和对方刚才说的「${lastIncoming.take(20)}」看不出关联，发出去容易被当成没在听"
-        else "模型没给出判断；这句和对方上一句有一定重合，但语气是否合适仍需自己确认"
+        return if (overlap < 0.1) {
+            "这句和对方刚说的「${lastIncoming.take(20)}」接不上。要么直接回应他那句，要么点「生成回复」看几条参考再改"
+        } else {
+            "模型没给出判断；这句和对方上一句有重合，语气合不合适还得你自己定"
+        }
     }
 }
 
