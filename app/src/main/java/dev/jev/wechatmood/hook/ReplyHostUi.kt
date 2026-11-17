@@ -286,6 +286,29 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             setOnFocusChangeListener { _, focused -> background = theme.shape(theme.card, 12, if (focused) theme.accent else theme.border) }
         }
         results.addView(instruction, LinearLayout.LayoutParams(-1, -2))
+        // 草稿体检：只在输入框有文字时出现，点一下看这句会不会说错。
+        val draftCache = DraftCheckCache()
+        var lastRewrite: String? = null
+        var checkDraftAction: (() -> Unit)? = null
+        val draftPanel = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = theme.shape(theme.card, 12, theme.accent)
+            visibility = View.GONE
+        }
+        val draftIssues = theme.label("", 13f, theme.ink)
+        val draftRewrite = theme.label("", 15f, theme.accent).apply { setPadding(0, dp(6), 0, 0) }
+        val draftUse = action("用这条替换", quiet = true) {
+            lastRewrite?.let { instruction.setText(it); instruction.setSelection(it.length) }
+            draftPanel.visibility = View.GONE
+            toast("已替换草稿，自己确认后再发送")
+        }
+        draftPanel.addView(draftIssues)
+        draftPanel.addView(draftRewrite)
+        draftPanel.addView(draftUse, LinearLayout.LayoutParams(-2, dp(36)))
+        results.addView(draftPanel)
+        val checkDraft = action("检查这段", quiet = true) { checkDraftAction?.invoke() }.apply { visibility = View.GONE }
+        results.addView(checkDraft, LinearLayout.LayoutParams(-2, dp(36)))
         val generateButton = action("生成回复", primary = true)
         val topicButton = action("找找话题")
         val shorter = action("更简短", quiet = true)
@@ -495,6 +518,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 else "填入后可自由修改，发送永远由你点"
             state.visibility = if (state.text.isBlank()) View.GONE else View.VISIBLE
             if (window.isShowing) fitWindow()
+            checkDraft.visibility = if (!generatingRequest && !instruction.text.isNullOrBlank()) View.VISIBLE else View.GONE
         }
         roleToggle.setOnClickListener {
             if (!ownsDrawer() || busy) return@setOnClickListener
@@ -506,6 +530,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             val expand = !instructionExpanded
             collapseEditors(); instructionExpanded = expand; controls(false)
         }
+
         fun doRefreshFacts(auto: Boolean) {
             if (!auto && busy) return@doRefreshFacts
             val key = owner.key
@@ -541,6 +566,46 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 }
             }
         }
+        fun showDraftCheck(check: DraftCheck) {
+            if (check.isEmpty) {
+                draftPanel.visibility = View.GONE
+                state.text = "这句话没什么问题"
+                return
+            }
+            state.text = ""
+            draftIssues.text = check.issues.joinToString("\n")
+            lastRewrite = check.rewrite
+            draftRewrite.text = check.rewrite?.let { "可以改成：$it" }.orEmpty()
+            draftRewrite.visibility = if (check.rewrite == null) View.GONE else View.VISIBLE
+            draftUse.visibility = if (check.rewrite == null) View.GONE else View.VISIBLE
+            draftPanel.visibility = View.VISIBLE
+        }
+        fun runDraftCheck() {
+            if (busy) return
+            val text = instruction.text.toString().trim()
+            if (text.isEmpty()) { toast("先写一句想发的话"); return }
+            val settings = ModulePrefs.replySettings()
+            if (!settings.isConfigured) { toast("请先配置回复模型"); return }
+            draftCache.get(talker.orEmpty(), text)?.let { showDraftCheck(it); return }
+            val current = reference.context
+            if (current == null) { toast("先点一次「重新读取聊天记录」，再检查"); return }
+            state.text = "正在检查这句…"
+            busy = true; controls(true)
+            scope.launch {
+                try {
+                    val check = withContext(Dispatchers.IO) {
+                        ReplyHttpClient().request(settings, DraftCheckProtocol.payload(settings,
+                            current.copy(facts = facts), text, composition.relationship, composition.activeCustomRelationship),
+                            DraftCheckProtocol::parse)
+                    }
+                    draftCache.put(talker.orEmpty(), text, check)
+                    showDraftCheck(check)
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { state.text = "检查失败：" + (e.message ?: "请重试") }
+                finally { busy = false; controls(false) }
+            }
+        }
+        checkDraftAction = { runDraftCheck() }
         refreshFacts = ::doRefreshFacts
         fun revealReply() {
             collapseEditors(); controls(false)
