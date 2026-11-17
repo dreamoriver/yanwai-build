@@ -16,8 +16,10 @@ object DraftCheckProtocol {
 
     private const val INSTRUCTIONS = """你是聊天回复检查器。draft 是用户已经打好、但还没发出去的一句话。只判断这句话发出去会不会有问题。
 第一步必须先回答 relates_to_topic：这句话有没有接住对方最近说的内容。
-先看 last_incoming（对方最后说的那句），再看 draft；如果 draft 和 last_incoming 没有语义关联，
-例如对方问「周末有空吗」而你准备回「今天天气不错」，必须判 false。
+先看 focus：它是用户长按的那一条消息（可能是图片/表情/引用），draft 应该是在回应它。
+如果 focus 是图片或表情，判断 draft 有没有针对这张图/表情说话，而不是泛泛接别人的话。
+没有 focus 时再看 last_incoming（对方最后说的那句）；两者都没有语义关联就判 false，
+例如对方问「周末有空吗」而你准备回「今天天气不错」。
 - 对方提问、请求、说明一件事，而 draft 完全没有回应这件事 → false
 - 主动换话题、开玩笑岔开、只是打招呼 → 算 true，不算问题
 relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接上。
@@ -40,6 +42,13 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
             .put("my_style", style?.summary() ?: JSONObject.NULL)
             // 单独把对方最后一句拎出来，模型更容易对比 draft 有没有接住。
             .put("last_incoming", context.messages.lastOrNull { it.speaker != "我" }?.text?.take(120) ?: JSONObject.NULL)
+            // 长按的那条才是这一轮要回应的对象，图片/表情只有类型没有文字。
+            .put("focus", context.targetMedia?.let {
+                JSONObject().put("id", context.focusMessageId).put("type", "media").put("media", it)
+                    .put("note", "对方发来一张$it")
+            } ?: context.messages.firstOrNull { it.id == context.focusMessageId }?.let {
+                JSONObject().put("id", it.id).put("speaker", it.speaker).put("text", it.text.take(120))
+            } ?: JSONObject.NULL)
             .put("messages", JSONArray(context.messages.takeLast(MAX_CONTEXT).map {
                 JSONObject().put("speaker", it.speaker).put("text", it.text.take(120))
             }))
