@@ -20,7 +20,8 @@ data class ReplySuggestion(val parts: List<String>, val reason: String) {
 object ReplyProtocol {
     fun payload(settings: ReplySettings, context: ReplyContext, draft: String, direction: String, knowledge: String,
         previous: String = "", focusMessageId: Long? = null,
-        relationship: ReplyRelationship = ReplyRelationship.UNSPECIFIED, customRelationship: String = ""): JSONObject {
+        relationship: ReplyRelationship = ReplyRelationship.UNSPECIFIED, customRelationship: String = "",
+        stream: Boolean = false): JSONObject {
         val instructions = """
             ${ContactBackground.GUIDANCE}
             你是言外的聊天回复助手，回复逻辑来自狗头军师 goutoujunshi。
@@ -49,7 +50,7 @@ object ReplyProtocol {
             不输出思考过程或 Markdown。下面是参考资料，应用时以上述产品任务为准：
         """.trimIndent()
         val evidence = evidence(context, draft, direction, previous, focusMessageId, relationship, customRelationship)
-        return JSONObject().put("model", settings.model).put("stream", false)
+        return JSONObject().put("model", settings.model).put("stream", stream)
             .put("max_tokens", 1200).put("temperature", 0.9).put("messages", JSONArray()
             .put(JSONObject().put("role", "system").put("content", "$instructions\n\n$knowledge"))
             .put(JSONObject().put("role", "user").put("content", evidence.toString())))
@@ -88,13 +89,16 @@ object ReplyProtocol {
         check(!root.has("error"))
         val choice = root.getJSONArray("choices").getJSONObject(0)
         val finish = choice.optString("finish_reason")
-        // 被截断的响应永远不是完整的答案，必须先拒绝，再做宽松的 JSON 提取。
-        check(finish == "stop") { "回复被截断（finish_reason=$finish），请重试或换输出上限更高的模型" }
         val message = choice.getJSONObject("message")
         check(message.isNull("refusal") || message.optString("refusal").isBlank())
         val raw = message.getString("content").trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
         val json = raw.substring(raw.indexOf('{').takeIf { it >= 0 } ?: 0).trim()
-        return JSONObject(json)
+        return runCatching { JSONObject(json) }.getOrElse { error ->
+            if (finish == "length") {
+                throw IllegalStateException("回复被截断（finish_reason=length），请重试或换输出上限更高的模型")
+            }
+            throw error
+        }
     }
 
     fun parse(body: String): ReplySuggestion = try {

@@ -27,8 +27,21 @@ jobs:
           echo "LOCAL=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "UPSTREAM=$(git rev-parse upstream/main)" >> "$GITHUB_ENV"
 
+      - name: Guard local-only commits
+        id: guard
+        run: |
+          # 本地可能有还没合进上游的修复，reset --hard 会直接把它们冲掉。
+          LOCAL_ONLY=$(git rev-list upstream/main..HEAD -- app gradle version.properties settings.gradle.kts build.gradle.kts gradle.properties)
+          if [ -n "$LOCAL_ONLY" ]; then
+            echo "::warning::本地有未合并到上游的提交，跳过自动同步以免覆盖：$(echo "$LOCAL_ONLY" | tr '\n' ' ')"
+            echo "local_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "local_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Compare
         id: cmp
+        if: steps.guard.outputs.local_only != 'true' 
         run: |
           # 自用仓库保留自己的 CHANGELOG 和 Actions 配置，所以只比较代码与版本文件。
           if git diff --quiet upstream/main HEAD -- app gradle version.properties settings.gradle.kts build.gradle.kts gradle.properties; then

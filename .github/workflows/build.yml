@@ -59,6 +59,20 @@ jobs:
             exit 1;
           }
 
+      - name: Unit tests (report only)
+        # 现有仓库在 Linux 上有 24 项历史失败，先只出报告，不阻断发布。
+        continue-on-error: true
+        run: gradle testDebugUnitTest --no-daemon -Pkotlin.compiler.execution.strategy=in-process
+
+      - name: Upload test report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: app/build/reports/tests/testDebugUnitTest
+          retention-days: 14
+
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon -Pkotlin.compiler.execution.strategy=in-process
 

@@ -64,16 +64,14 @@ object ModulePrefs {
     private fun warmReplySnapshot() {
         if (warmScheduled) return
         val ctx = context ?: return
-        val current = session.current ?: return
-        val generation = current.generation
-        val version = "${current.generation}:${current.rolesRevision}"
+        val generation = session.current?.generation ?: return
         warmScheduled = true
         bridgeWorker.execute {
             runCatching {
                 val response = SettingsTransport.call(ctx, "reply_role_list", null,
                     Bundle().apply { putString(SettingsProvider.KEY_GENERATION, generation) })
                 val roles = response?.getStringArrayList("roles") ?: return@runCatching
-                ReplySnapshotCache.saveRoles(ctx, roles, version)
+                ReplySnapshotCache.saveRoles(ctx, roles)
                 MoodLog.i("REPLY_ROLES_WARMED count=${roles.size}")
             }.onFailure {
                 warmScheduled = false
@@ -123,12 +121,7 @@ object ModulePrefs {
         val snapshot = SettingsSync.decode(bundle)
         if (snapshot == null) { MoodLog.w("SYNC_INVALID 广播配置不完整"); return }
         // Invalidate a changed installation immediately, without waiting for Provider I/O.
-        val accepted = bridge.receive(snapshot)
-        // A broadcast that is rejected (unverified reset, retired generation, stale revision)
-        // must not overwrite the on-disk fallback with credentials the session never adopted.
-        if (accepted && analysisSettings()?.revision == snapshot.revision) {
-            context?.let { SettingsSnapshotCache.save(it, bundle) }
-        }
+        bridge.receive(snapshot)
         MoodLog.protect(snapshot.api.apiKey)
         MoodLog.protect(snapshot.reply.apiKey)
         MoodLog.protect(snapshot.intent.llm.apiKey)

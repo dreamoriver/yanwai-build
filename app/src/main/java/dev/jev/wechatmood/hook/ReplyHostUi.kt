@@ -67,11 +67,29 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val latest = MessageSniffer.replyBoundary() ?: return
         newMessageNotice?.visibility = if (latest != captured.latestLoadedId && captured.messages.none { it.id == latest }) View.VISIBLE else View.GONE
     }
-    private fun footer(): View? = views(activity.window.decorView).singleOrNull {
-        it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter" && it.isShown
+    private var footerRef: java.lang.ref.WeakReference<View>? = null
+    private var editorRef: java.lang.ref.WeakReference<EditText>? = null
+
+    /**
+     * 这两个查找原来每 tick、每次按键都从 decorView 起做一次最多 4000 节点的 DFS。
+     * 底部栏和输入框在同一个聊天页里是稳定的，缓存后用 attach 状态校验即可。
+     */
+    private fun footer(): View? {
+        footerRef?.get()?.takeIf { it.isAttachedToWindow && it.isShown }?.let { return it }
+        val found = views(activity.window.decorView).singleOrNull {
+            it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter" && it.isShown
+        }
+        footerRef = found?.let { java.lang.ref.WeakReference(it) }
+        return found
     }
-    private fun editor(): EditText? = footer()?.let { root ->
-        views(root).filterIsInstance<EditText>().filter { it.isShown && it.isEnabled }.singleOrNull()
+
+    private fun editor(): EditText? {
+        editorRef?.get()?.takeIf { it.isAttachedToWindow && it.isShown && it.isEnabled }?.let { return it }
+        val found = footer()?.let { root ->
+            views(root).filterIsInstance<EditText>().filter { it.isShown && it.isEnabled }.singleOrNull()
+        }
+        editorRef = found?.let { java.lang.ref.WeakReference(it) }
+        return found
     }
 
     fun open(focusMessageId: Long? = null): Boolean {
@@ -112,11 +130,9 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 MoodLog.e("REPLY_SETTINGS_READ_FAILED", error)
                 if (epoch == ReplyDatabaseHistory.pendingAccountScope() && talker == selectedTalker) {
                     // 不再弹「去开自启动」的对话框；本地已有回退，失败只记日志。
-                    if (error is dev.jev.wechatmood.core.SettingsConnectionUnavailableException || !ModulePrefs.bridgeAvailable) {
-                        dev.jev.wechatmood.core.MoodLog.w("REPLY_OPEN_WITHOUT_BRIDGE 未能连接言外")
-                        // 首次使用没有可用快照时不能只写日志，否则用户点「帮我回」没有任何反应。
-                        toast("未能连接言外设置，请打开言外主应用后重试")
-                    } else toast("回复设置读取失败，请重试；长按分析开关可导出日志")
+                    if (error is dev.jev.wechatmood.core.SettingsConnectionUnavailableException || !ModulePrefs.bridgeAvailable)
+                        dev.jev.wechatmood.core.MoodLog.w("REPLY_OPEN_WITHOUT_BRIDGE 未能连接言外，已按本地缓存继续")
+                    else toast("回复设置读取失败，请重试；长按分析开关可导出日志")
                 }
             }
         }
@@ -624,7 +640,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             renderParts(); controls(false)
             val loaded = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrElse {
                 reference.fail(ticket); state.text = it.message ?: "读取聊天失败，请重试"; controls(false); return
-            }.let { it.copy(focusMessageId = focusMessageId ?: it.latestLoadedId) }
+            }
             if (loaded.talker != selectedTalker) { reference.cancel(); window.dismiss(); return }
             historyJob = scope.launch {
                 try {
@@ -782,7 +798,17 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     val client = ReplyHttpClient()
                     val topics = if (findTopics) client.findTopics(config, current, baselineDraft, notes, knowledge, relationship,
                         requireNotNull(time), previousTopics, customRelationship) else null
-                    val suggestion = if (findTopics) null else client.generate(config, current, baselineDraft, direction, knowledge, previous, focusId, relationship, customRelationship)
+                    // 流式：第一条候选写完整就先显示在状态栏，不必等 3–5 条全部生成。
+                    val suggestion = if (findTopics) null else client.generate(config, current, baselineDraft, direction,
+                        knowledge, previous, focusId, relationship, customRelationship) { partial ->
+                        activity.runOnUiThread {
+                            if (job?.isActive == true && ownsDrawer() &&
+                                session.accepts(ticket, MessageSniffer.currentReplyTalker())) {
+                                state.text = partial
+                                state.setTextColor(theme.muted)
+                            }
+                        }
+                    }
                     val activeConfig = ModulePrefs.replySettings()
                     if (!session.accepts(ticket, MessageSniffer.currentReplyTalker()) || !ownsDrawer() || !ModulePrefs.canGenerateReply) return@launch
                     if (!verifyAccount()) { window.dismiss(); return@launch }
