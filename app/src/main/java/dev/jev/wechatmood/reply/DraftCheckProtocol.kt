@@ -74,7 +74,7 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
         }.orEmpty()
         val rewrite = json.optString("rewrite").trim()
             .takeIf { it.isNotBlank() && it != "null" }?.take(MAX_REWRITE)
-        val verdict = json.optString("verdict").trim().takeIf { it.isNotBlank() && it != "null" }?.take(80)
+        val verdict = json.optString("verdict").trim().takeIf { it.isNotBlank() && it != "null" }?.take(120)
         // 模型有时把「无关」只写在 verdict 里；这种情况按问题处理，避免显示成没问题。
         val relates = if (json.has("relates_to_topic")) json.optBoolean("relates_to_topic", true) else null
         val unrelated = relates == false || (verdict != null && listOf("无关", "不相关", "无意义", "乱码", "看不懂",

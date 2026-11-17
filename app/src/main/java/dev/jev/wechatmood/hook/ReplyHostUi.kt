@@ -281,7 +281,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             setPadding(dp(10), dp(10), dp(10), dp(10)); background = theme.shape(theme.card, 12, theme.border)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             filters = arrayOf(InputFilter.LengthFilter(2000)); isSaveEnabled = false
-            setText(remembered?.direction.orEmpty())
+            // 不再回填上次的补充要求：旧版本曾把模型输出写进这里，回填后会被当成要求发给模型。
+            setText("")
             setOnFocusChangeListener { _, focused -> background = theme.shape(theme.card, 12, if (focused) theme.accent else theme.border) }
         }
         results.addView(instruction, LinearLayout.LayoutParams(-1, -2))
