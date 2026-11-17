@@ -297,8 +297,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             visibility = View.GONE
         }
         val draftIssues = theme.label("", 13f, theme.ink)
-        val draftRewrite = theme.label("", 15f, theme.accent).apply { setPadding(0, dp(6), 0, 0) }
-        val draftUse = action("用这条替换", quiet = true) {
+        val draftRewrite = theme.label("", 15f, theme.ink).apply { setPadding(0, dp(6), 0, 0) }
+        val draftUse = action("用这条替换") {
             val rewrite = lastRewrite
             if (rewrite.isNullOrBlank()) return@action
             val target = editor()
@@ -314,7 +314,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         }
         draftPanel.addView(draftIssues)
         draftPanel.addView(draftRewrite)
-        draftPanel.addView(draftUse, LinearLayout.LayoutParams(-2, dp(36)))
+        draftPanel.addView(draftUse, LinearLayout.LayoutParams(-2, dp(44)).apply { topMargin = dp(10) })
         results.addView(draftPanel)
         val checkDraft = action("检查输入框这句") { checkDraftAction?.invoke() }.apply { visibility = View.GONE }
         val generateButton = action("生成回复", primary = true)
@@ -927,6 +927,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 renderParts(); revealReply(); remember(); return
             }
             job?.cancel()
+            // 生成前清掉上一次的检查卡片，避免和新结果混在一起。
+            draftPanel.visibility = View.GONE
             val config = ModulePrefs.replySettings()
             val ticket = session.begin(current.talker, current.fingerprint)
             val previous = if (composition.result?.topics == null) composition.previousText else ""

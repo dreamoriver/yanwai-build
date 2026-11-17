@@ -269,6 +269,19 @@ object MessageSniffer {
             .filter { it.talker == talker && it.isReplyTarget(allowMedia = true) }.distinct().singleOrNull()
     }
 
+    /** 长按没出菜单时用：只记数量与哈希，不记聊天内容。 */
+    fun describeTarget(view: View): String = runCatching {
+        val activity = active.get() ?: return "no_activity"
+        val scope = chatNodes(activity.window.decorView)
+        if (scope.isEmpty()) return "no_scope"
+        val current = records(scope, useCache = false)
+        val talker = conversation(activity, scope, current) ?: return "no_talker rows=${current.size}"
+        val ancestors = generateSequence(view) { it.parent as? View }.toSet()
+        val candidates = current.filter { it.first in ancestors }.mapNotNull { it.second.metadata }
+        "talker=${talker.hashCode()} rows=${current.size} matched=${candidates.size} " +
+            "targets=${candidates.count { it.isReplyTarget(allowMedia = true) }}"
+    }.getOrElse { "error=" + it.javaClass.simpleName }
+
     fun suggestReply(view: View, expected: MessageMetadata): Boolean {
         val target = replyTargetForView(view) ?: return false
         if (target != expected) return false
