@@ -43,6 +43,7 @@
                         <TextView style="@style/Yanwai.Section" android:layout_marginTop="0dp" android:text="微信模块" />
                         <TextView android:id="@+id/textHostBadge" style="@style/Yanwai.Badge" />
                         <TextView android:id="@+id/textFrameworkStatus" style="@style/Yanwai.Caption" android:layout_marginTop="12dp" android:accessibilityLiveRegion="polite" />
+                        <TextView android:id="@+id/usageSummary" style="@style/Yanwai.Badge" android:layout_marginTop="12dp" android:accessibilityLiveRegion="polite" />
                         <com.google.android.material.button.MaterialButton android:id="@+id/buttonOpenWechat" style="@style/Yanwai.Button" android:text="打开微信" />
                         <com.google.android.material.button.MaterialButton android:id="@+id/buttonSetupGuide" style="@style/Yanwai.Button.Text" android:text="查看启用与使用指南" />
                     </LinearLayout>
@@ -68,7 +69,6 @@
                         <TextView style="@style/Yanwai.Section" android:layout_marginTop="0dp" android:text="在微信里使用" />
                         <TextView style="@style/Yanwai.Body" android:text="在微信聊天中展开「＋」，点击「帮我回 · 找话题」。选择对方身份和参考条数，再点击生成。" />
                         <TextView android:id="@+id/replySummary" style="@style/Yanwai.Badge" android:layout_marginTop="16dp" />
-                        <TextView android:id="@+id/usageSummary" style="@style/Yanwai.Caption" android:layout_marginTop="8dp" android:accessibilityLiveRegion="polite" />
                         <com.google.android.material.button.MaterialButton android:id="@+id/openReplyModel" style="@style/Yanwai.Button.Outline" android:layout_marginTop="12dp" android:text="配置回复模型" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
