@@ -56,7 +56,7 @@ object ReplyIdentityProvider {
         }
         if (method == "relation_facts_enabled") {
             val prefs = context.getSharedPreferences(ModulePrefs.FILE_NAME, 0)
-            return Bundle().apply { putBoolean("enabled", prefs.getBoolean(ModulePrefs.KEY_RELATION_FACTS, false)) }
+            return Bundle().apply { putBoolean("enabled", prefs.getBoolean(ModulePrefs.KEY_RELATION_FACTS, true)) }
         }
         val requested = ReplyContactKey(requireNotNull(arg))
         val key = ReplyContactKey(AnalysisCacheKey.digest(caller.toString(), requested.value))

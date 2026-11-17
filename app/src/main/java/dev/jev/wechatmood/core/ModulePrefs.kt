@@ -85,6 +85,7 @@ object ModulePrefs {
         val app = context.applicationContext ?: context
         this.context = app
         AnalysisResultCache.init(app)
+        UsageReporter.init(app)
         if (app.packageName == "com.tencent.mm" && conversations == null) {
             val local = app.getSharedPreferences("yanwai_conversations", Context.MODE_PRIVATE)
             conversations = ConversationSwitches(local.getStringSet("enabled_chats", emptySet()).orEmpty()) {

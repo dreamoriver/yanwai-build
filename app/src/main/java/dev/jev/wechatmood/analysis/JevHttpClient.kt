@@ -70,6 +70,7 @@ class JevHttpClient(private val client: Call.Factory = HttpClients.shared.newBui
             }
             throw IllegalStateException("$reason（HTTP ${response.code}）")
         }
+        dev.jev.wechatmood.core.UsageReporter.report()
         return body
     }
 

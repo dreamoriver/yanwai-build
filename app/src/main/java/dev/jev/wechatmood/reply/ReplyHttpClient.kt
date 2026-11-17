@@ -102,7 +102,7 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
                                 dev.jev.wechatmood.core.MoodLog.i("REPLY_STREAM off type=${body.contentType()}")
                                 readWhole(body)
                             }
-                        }.let(parse)
+                        }.also(::reportUsage).let(parse)
                     }.recoverCatching { error ->
                         if (error is IllegalStateException) throw error
                         throw IllegalStateException("读取回复失败，请检查网络后重试")
@@ -111,6 +111,14 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
                 }
             })
         }
+
+    /** usage 只在服务返回时才有；流式拼出来的响应没有 usage，至少要记一次请求。 */
+    private fun reportUsage(body: String) {
+        val usage = runCatching { JSONObject(body).optJSONObject("usage") }.getOrNull()
+        dev.jev.wechatmood.core.UsageReporter.report(
+            usage?.optLong("prompt_tokens", 0L) ?: 0L,
+            usage?.optLong("completion_tokens", 0L) ?: 0L)
+    }
 
     private fun readWhole(body: ResponseBody): String {
         val source = body.source()

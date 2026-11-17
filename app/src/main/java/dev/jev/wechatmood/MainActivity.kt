@@ -185,7 +185,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val factsSwitch = binding.replySettings.switchRelationFacts
-        factsSwitch.isChecked = prefs.getBoolean(ModulePrefs.KEY_RELATION_FACTS, false)
+        factsSwitch.isChecked = prefs.getBoolean(ModulePrefs.KEY_RELATION_FACTS, true)
         factsSwitch.setOnCheckedChangeListener { _, value ->
             if (!syncingSwitches) {
                 save(ModulePrefs.KEY_RELATION_FACTS, value)
@@ -495,6 +495,7 @@ class MainActivity : AppCompatActivity() {
         })
         val reply = ModulePrefs.replySettings()
         SettingsStatus.show(binding.replySummary, if (reply.isConfigured) "当前模型：" + reply.model else "先连接回复模型", if (reply.isConfigured) R.color.status_neutral else R.color.status_warning)
+        binding.usageSummary.text = dev.jev.wechatmood.core.UsageMeter.summary(this)
         binding.buttonTestModel.text = when (probeState) {
             ProbeState.CHECKING -> "正在检测…"
             ProbeState.FAILED -> "连接失败 · 点击重试"
