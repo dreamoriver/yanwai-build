@@ -55,6 +55,8 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
             .put("draft", draft.take(500))
         return JSONObject().put("model", settings.model).put("stream", false)
             .put("max_tokens", 500).put("temperature", 0.1)
+            // 强制 JSON 输出，减少模型只回一段话导致解析为空。
+            .put("response_format", JSONObject().put("type", "json_object"))
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content", INSTRUCTIONS))
                 .put(JSONObject().put("role", "user").put("content", evidence.toString())))
