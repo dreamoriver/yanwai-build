@@ -578,10 +578,10 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             }
             if (check.isEmpty) {
                 draftPanel.visibility = View.GONE
-                state.text = "这句话没什么问题"
+                state.text = check.verdict?.let { "模型判断：$it" } ?: "这句话没什么问题"
                 return
             }
-            state.text = ""
+            state.text = check.verdict?.let { "模型判断：$it" }.orEmpty()
             draftIssues.text = check.issues.joinToString("\n")
             lastRewrite = check.rewrite
             draftRewrite.text = check.rewrite?.let { "可以改成：$it" }.orEmpty()

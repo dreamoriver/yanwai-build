@@ -4,7 +4,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** 一条草稿体检结果：最多两条问题，外加一条保持原意的改写。 */
-data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed: Boolean = true) {
+data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed: Boolean = true,
+    val verdict: String? = null) {
     val isEmpty: Boolean get() = issues.isEmpty() && rewrite.isNullOrBlank()
 }
 
@@ -14,13 +15,14 @@ object DraftCheckProtocol {
     private const val MAX_REWRITE = 60
 
     private const val INSTRUCTIONS = """你是聊天回复检查器。用户已经写好了要发的话（draft），只判断这句话放进这段对话里是否合适。
-检查项只限这些：太急、太生硬、太冷、太敷衍、太书面、有歧义、答非所问、节奏不合。
+检查项只限这些：太急、太生硬、太冷、太敷衍、太书面、有歧义、答非所问、和当前话题无关、节奏不合。
 规则：
 1. 只报确定的问题，最多两条；说明要具体，指出依据，比如“他刚说周末要加班，这句容易被读成甩脸子”。
 2. 不做心理分析，不推测对方的想法、感情或动机。
 3. 只要这句话存在被误读的可能，就至少指出一个最可能被误读的点；只有确实完全中性时才返回空数组。
 4. 给一条改写：保持原意和用户平时说话的口气，不超过 30 个字；如果不建议改可以不返回。
-5. 只返回 JSON 对象：{"issues":["..."],"rewrite":"..."}，不要解释和 Markdown。"""
+5. verdict 必须写一句话，说明这句话和当前对话的关系（例如「回应了对方的问题，语气偏冷」或「和刚才的话题无关」），不管有没有问题都要写。
+6. 只返回 JSON 对象：{"issues":["..."],"rewrite":"...","verdict":"..."}，不要解释和 Markdown。"""
 
     fun payload(settings: ReplySettings, context: ReplyContext, draft: String,
         relationship: ReplyRelationship, customRelationship: String = ""): JSONObject {
@@ -52,8 +54,9 @@ object DraftCheckProtocol {
         }.orEmpty()
         val rewrite = json.optString("rewrite").trim()
             .takeIf { it.isNotBlank() && it != "null" }?.take(MAX_REWRITE)
-        dev.jev.wechatmood.core.MoodLog.i("DRAFT_CHECK ok chars=${content.length} issues=${issues.size} rewrite=${rewrite != null}")
-        DraftCheck(issues, rewrite)
+        val verdict = json.optString("verdict").trim().takeIf { it.isNotBlank() && it != "null" }?.take(80)
+        dev.jev.wechatmood.core.MoodLog.i("DRAFT_CHECK ok chars=${content.length} issues=${issues.size} rewrite=${rewrite != null} verdict=${verdict != null}")
+        DraftCheck(issues, rewrite, verdict = verdict)
     }.onFailure {
         dev.jev.wechatmood.core.MoodLog.w("DRAFT_CHECK_PARSE_FAILED " + it.javaClass.simpleName)
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))
