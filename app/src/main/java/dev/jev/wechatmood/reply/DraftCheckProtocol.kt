@@ -59,6 +59,16 @@ object DraftCheckProtocol {
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))
 }
 
+/** 脏话这类明显问题不依赖模型判断，本地先兜一层，避免模型放行。 */
+object DraftGuard {
+    private val HOSTILE = listOf("操你妈", "草泥马", "傻逼", "去死", "贱人", "废物", "神经病", "滚蛋", "他妈的", "你麻痹")
+
+    fun hint(draft: String): String? {
+        val hit = HOSTILE.firstOrNull { draft.contains(it) } ?: return null
+        return "这句话带攻击性（包含「$hit」），发出去容易把话说死；可以换成说自己感受的说法，比如「我现在挺生气的，晚点再说」"
+    }
+}
+
 /** 同一份草稿在短时间内重复点只算一次，避免反复花钱。 */
 class DraftCheckCache(private val windowMs: Long = 30L * 60 * 1000) {
     private data class Entry(val at: Long, val draft: String, val check: DraftCheck)

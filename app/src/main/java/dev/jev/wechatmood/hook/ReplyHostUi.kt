@@ -590,15 +590,29 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             draftPanel.visibility = View.VISIBLE
         }
         fun runDraftCheck() {
-            if (busy) return
+            if (busy) { MoodLog.i("DRAFT_CHECK_SKIP busy"); return }
             // 检查的是微信聊天输入框里已经写好的话，不是抽屉里的「本次补充要求」。
             val text = editor()?.text?.toString()?.trim().orEmpty()
-            if (text.isEmpty()) { toast("先在微信输入框里写好要发的话"); return }
+            if (text.isEmpty()) {
+                MoodLog.i("DRAFT_CHECK_SKIP empty_input")
+                toast("先在微信输入框里写好要发的话")
+                return
+            }
+            // 脏话这类明显问题本地先兜一层，不依赖模型。
+            DraftGuard.hint(text)?.let { hint ->
+                MoodLog.i("DRAFT_CHECK_LOCAL_HIT chars=${text.length}")
+                showDraftCheck(DraftCheck(listOf(hint), null))
+                return
+            }
             val settings = ModulePrefs.replySettings()
-            if (!settings.isConfigured) { toast("请先配置回复模型"); return }
-            draftCache.get(talker.orEmpty(), text)?.let { showDraftCheck(it); return }
+            if (!settings.isConfigured) { MoodLog.i("DRAFT_CHECK_SKIP unconfigured"); toast("请先配置回复模型"); return }
+            draftCache.get(talker.orEmpty(), text)?.let { MoodLog.i("DRAFT_CHECK_CACHE_HIT"); showDraftCheck(it); return }
             val current = reference.context
-            if (current == null) { toast("先点一次「重新读取聊天记录」，再检查"); return }
+            if (current == null) {
+                MoodLog.i("DRAFT_CHECK_SKIP no_context")
+                toast("先点一次「重新读取聊天记录」，再检查")
+                return
+            }
             state.text = "正在检查这句…"
             busy = true; controls(true)
             scope.launch {
