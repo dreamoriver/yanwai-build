@@ -47,6 +47,8 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
             .put("focus", context.targetMedia?.let {
                 JSONObject().put("id", context.focusMessageId).put("type", "media").put("media", it)
                     .put("note", "对方发来一张$it")
+            } ?: context.focusText?.let {
+                JSONObject().put("id", context.focusMessageId).put("speaker", "对方").put("text", it.take(300))
             } ?: context.messages.firstOrNull { it.id == context.focusMessageId }?.let {
                 JSONObject().put("id", it.id).put("speaker", it.speaker).put("text", it.text.take(120))
             } ?: JSONObject.NULL)
@@ -54,6 +56,8 @@ relates_to_topic 为 false 时，issues 至少要写一条，说明哪里没接�
                 JSONObject().put("speaker", it.speaker).put("text", it.text.take(120))
             }))
             .put("draft", draft.take(500))
+        dev.jev.wechatmood.core.MoodLog.i("DRAFT_FOCUS id=${context.focusMessageId} media=${context.targetMedia} " +
+            "text=${context.focusText != null} msgs=${context.messages.size}")
         val userMessage = if (image != null) JSONObject().put("role", "user").put("content", JSONArray()
             .put(JSONObject().put("type", "text").put("text", evidence.toString()))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image))))

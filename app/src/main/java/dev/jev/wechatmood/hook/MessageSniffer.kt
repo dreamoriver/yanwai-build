@@ -353,7 +353,10 @@ object MessageSniffer {
             }
             else -> null
         }
-        return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusId, targetMedia = targetMedia)
+        // 目标消息可能不在最近 N 条里，单独带一份正文，避免模型只能看到别的消息。
+        val focusText = target?.plainText() ?: target?.quotedMessage()?.text
+        return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusId,
+            targetMedia = targetMedia, focusText = focusText)
     }
 
     /** Cheap live boundary check, without re-reading 100 messages on every scan. */
