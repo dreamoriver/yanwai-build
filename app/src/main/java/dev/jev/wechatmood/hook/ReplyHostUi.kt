@@ -307,7 +307,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         draftPanel.addView(draftRewrite)
         draftPanel.addView(draftUse, LinearLayout.LayoutParams(-2, dp(36)))
         results.addView(draftPanel)
-        val checkDraft = action("检查这段", quiet = true) { checkDraftAction?.invoke() }.apply { visibility = View.GONE }
+        val checkDraft = action("检查输入框这句", quiet = true) { checkDraftAction?.invoke() }.apply { visibility = View.GONE }
         results.addView(checkDraft, LinearLayout.LayoutParams(-2, dp(36)))
         val generateButton = action("生成回复", primary = true)
         val topicButton = action("找找话题")
@@ -518,7 +518,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 else "填入后可自由修改，发送永远由你点"
             state.visibility = if (state.text.isBlank()) View.GONE else View.VISIBLE
             if (window.isShowing) fitWindow()
-            checkDraft.visibility = if (!generatingRequest && !instruction.text.isNullOrBlank()) View.VISIBLE else View.GONE
+            checkDraft.visibility = if (!generatingRequest && editor()?.text?.isNullOrBlank() == false) View.VISIBLE else View.GONE
         }
         roleToggle.setOnClickListener {
             if (!ownsDrawer() || busy) return@setOnClickListener
@@ -582,8 +582,9 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         }
         fun runDraftCheck() {
             if (busy) return
-            val text = instruction.text.toString().trim()
-            if (text.isEmpty()) { toast("先写一句想发的话"); return }
+            // 检查的是微信聊天输入框里已经写好的话，不是抽屉里的「本次补充要求」。
+            val text = editor()?.text?.toString()?.trim().orEmpty()
+            if (text.isEmpty()) { toast("先在微信输入框里写好要发的话"); return }
             val settings = ModulePrefs.replySettings()
             if (!settings.isConfigured) { toast("请先配置回复模型"); return }
             draftCache.get(talker.orEmpty(), text)?.let { showDraftCheck(it); return }
