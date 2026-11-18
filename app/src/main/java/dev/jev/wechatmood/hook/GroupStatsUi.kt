@@ -36,11 +36,11 @@ object StatsFilter {
         HOUR("最近 1 小时", 60L * 60 * 1000),
         HOUR3("最近 3 小时", 3 * 60L * 60 * 1000),
         TODAY("今天", -1),
-        ALL("全部加载", 0),
     }
-    var range: Range = Range.ALL
-    var limit: Int = 0  // 0 表示不限制
-    val limitLabel: String get() = if (limit == 0) "全部" else "最近 $limit 条"
+    // 默认给一个保守范围，避免误点就把整段聊天送去分析。
+    var range: Range = Range.TODAY
+    var limit: Int = 20
+    val limitLabel: String get() = "最近 $limit 条"
 }
 
 /** 群聊统计窗口：数字 + 活跃成员 + 一次 AI 解读，结果可复制。 */
@@ -66,7 +66,6 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 calendar.set(java.util.Calendar.SECOND, 0)
                 calendar.timeInMillis
             }
-            StatsFilter.Range.ALL -> 0
         }
         val byTime = context.messages.filter { it.time >= since }
         return if (StatsFilter.limit > 0) byTime.takeLast(StatsFilter.limit) else byTime
@@ -106,7 +105,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         filters.addView(filterPill("条数 · ${StatsFilter.limitLabel}") { pickLimit() },
             LinearLayout.LayoutParams(0, theme.dp(34), 1f))
         body.addView(filters)
-        body.addView(caption("当前 ${stats.total} 条消息$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
+        body.addView(caption("${StatsFilter.range.label} · 最近 ${StatsFilter.limit} 条内共 ${stats.total} 条$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
 
         val numbers = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -544,17 +543,18 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         android.app.AlertDialog.Builder(activity).setTitle("分析时段")
             .setItems(values.map { it.label }.toTypedArray()) { _, which ->
                 StatsFilter.range = values[which]
+                dev.jev.wechatmood.core.MoodLog.i("STATS_FILTER range=${StatsFilter.range}")
                 dialog?.dismiss()
                 GroupStatsUi(activity, context).show()
             }.setNegativeButton("取消", null).show()
     }
 
     private fun pickLimit() {
-        val options = listOf(0, 10, 20, 50)
-        val labels = options.map { if (it == 0) "全部加载" else "最近 $it 条" }.toTypedArray()
+        val options = listOf(10, 20, 50)
         android.app.AlertDialog.Builder(activity).setTitle("消息条数")
-            .setItems(labels) { _, which ->
+            .setItems(options.map { "最近 $it 条" }.toTypedArray()) { _, which ->
                 StatsFilter.limit = options[which]
+                dev.jev.wechatmood.core.MoodLog.i("STATS_FILTER limit=${StatsFilter.limit}")
                 dialog?.dismiss()
                 GroupStatsUi(activity, context).show()
             }.setNegativeButton("取消", null).show()
