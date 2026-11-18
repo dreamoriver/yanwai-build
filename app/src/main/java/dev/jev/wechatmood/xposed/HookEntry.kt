@@ -6,7 +6,6 @@ import android.app.Instrumentation
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.widget.Toast
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -21,12 +20,20 @@ import dev.jev.wechatmood.hook.ReplyDatabaseHistory
 
 /** Direct package entry, independent of the optional initZygote callback. */
 class HookEntry : IXposedHookLoadPackage {
-    private var installed = false
-    private var failedAnnounced = false
+    @Volatile private var installed = false
+    @Volatile private var scheduled = false
 
     private companion object {
-        /** 主线程迟迟不空闲时，最多等这么久就先装，保证功能不丢。 */
-        const val IDLE_FALLBACK_MS = 6000L
+        /**
+         * 第一个页面 resume 之后再等这么久才装：此时首帧已经画完，
+         * 不会和 WeKit 这类重模块的启动初始化叠加。
+         */
+        const val RESUME_SETTLE_MS = 400L
+        /**
+         * 纯后台进程可能一直不 resume；等这么久兜底装一次。
+         * 12 秒已经越过系统的「surface 未绘制」判定窗口，不会造成白屏。
+         */
+        const val BACKGROUND_FALLBACK_MS = 12_000L
     }
 
     override fun handleLoadPackage(param: XC_LoadPackage.LoadPackageParam) {
@@ -36,9 +43,15 @@ class HookEntry : IXposedHookLoadPackage {
         XposedHelpers.findAndHookMethod(Application::class.java, "attach", Context::class.java,
             object : XC_MethodHook() {
                 override fun afterHookedMethod(p: MethodHookParam) {
-                    // 首帧之前不抢主线程：WeKit 这类重模块同时挂微信时，两边的初始化叠加会把
-                    // 冷启动推过系统 5 秒阈值，微信被判「surface 未绘制」直接黑屏。
-                    scheduleInitialize(p.args[0] as Context)
+                    // 启动路径上什么都不做，只排一个很晚的兜底。
+                    // 之前用主线程 idle 回调也会在冷启动时过早触发，正好压在首帧上。
+                    val context = p.args[0] as Context
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (!installed) {
+                            MoodLog.i("HOOK_INIT_FALLBACK 没有页面 resume，按兜底安装")
+                            initialize(context)
+                        }
+                    }, BACKGROUND_FALLBACK_MS)
                 }
             })
         // Covers module loaders that attach after Application.attach has already run.
@@ -46,15 +59,8 @@ class HookEntry : IXposedHookLoadPackage {
             override fun afterHookedMethod(p: MethodHookParam) {
                 val activity = p.args.firstOrNull() as? Activity ?: return
                 if (activity.packageName != "com.tencent.mm") return
-                initialize(activity.application)
-                if (!installed) {
-                    // 每次切页都弹会烦人，失败只提示一次，细节进日志。
-                    if (!failedAnnounced) {
-                        failedAnnounced = true
-                        Toast.makeText(activity, "情绪助手初始化失败，请查看模块日志", Toast.LENGTH_LONG).show()
-                    }
-                    return
-                }
+                scheduleFromResume(activity)
+                if (!installed) return
                 runCatching { MessageSniffer.resume(activity) }
                     .onFailure { MoodLog.e("HOST_RESUME_FAILED", it) }
             }
@@ -67,27 +73,19 @@ class HookEntry : IXposedHookLoadPackage {
     }
 
     /**
-     * 等主线程空闲（首帧画完）再装 hook。
+     * 等第一个页面真正展示出来（resume）之后，再延迟一点装 hook。
      *
-     * 和 WeKit 这类同样在启动路径上装大量 hook 的模块共存时，双方初始化时间相加会超过
-     * 系统的「surface 未绘制」阈值，微信冷启动直接黑屏。让出首帧窗口就能同时保留两边功能；
-     * 6 秒兜底避免极端情况下永远不装。
+     * 微信冷启动时，WeKit 这类模块的初始化已经吃掉大半预算；言外只要在主线程上做任何初始化，
+     * 两边时间相加就会超过系统的「surface 未绘制」阈值，表现为白屏或黑屏进不去。
+     * resume 之后首帧已经完成，再延迟 400ms 安装就不会落在判定窗口里。
      */
-    private fun scheduleInitialize(context: Context) {
-        val main = Looper.getMainLooper()
-        val task = Runnable {
-            MoodLog.i("HOOK_INIT_IDLE 主线程空闲，开始安装")
-            initialize(context)
-        }
-        if (Looper.myLooper() == main) {
-            main.queue.addIdleHandler {
-                task.run()
-                false
-            }
-        } else {
-            Handler(main).post { scheduleInitialize(context) }
-        }
-        Handler(main).postDelayed({ if (!installed) task.run() }, IDLE_FALLBACK_MS)
+    private fun scheduleFromResume(context: Context) {
+        if (installed || scheduled) return
+        scheduled = true
+        Handler(Looper.getMainLooper()).postDelayed({
+            scheduled = false
+            if (!installed) initialize(context)
+        }, RESUME_SETTLE_MS)
     }
 
     @Synchronized private fun initialize(context: Context) {
@@ -98,7 +96,7 @@ class HookEntry : IXposedHookLoadPackage {
             MessageSniffer.install(context)
             installed = true
             MoodLog.i("微信主进程已加载模块 ${BuildConfig.VERSION_NAME}")
-            // 环境采集、日志上报、WCDB 反射扫描都不参与首帧，挪出冷启动主线程。
+            // 环境采集、日志上报、WCDB 反射扫描都不参与首帧，放后台线程。
             Thread({
                 runCatching {
                     MoodLog.i("ENVIRONMENT\n${Diagnostics.environment(context)}")
