@@ -70,6 +70,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     /** 成员原始名 → 表格里显示的文本，生成图片时复用同一套规则。 */
     private val displayedNames = mutableMapOf<String, String>()
     private var analysisText: String = ""
+
+    /** 看着有码点、渲染却是空白的字符。 */
+    private val BLANK_CODES = setOf(
+        0x3164, 0x2800, 0x115F, 0x1160, 0xFFA0, 0x00A0, 0x3000,
+        0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A,
+        0x200B, 0x200C, 0x200D, 0x2028, 0x2029, 0x202F, 0x205F, 0xFEFF, 0xFE0F,
+    )
     private var dialog: Dialog? = null
 
     /** 按选择的时段与条数裁剪消息。 */
@@ -289,10 +296,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val clean = (fromDb ?: raw).trim()
         // 空白、零宽、格式控制符都算「没有名字」，避免表格里出现空行。
         // 只把「真的能看见」的字符算名字：字母、数字、标点、符号。
-        // 组合符（U+FE0F 这类）和零宽连接符渲染出来是空白，必须排除。
-        val visible = clean.any { ch ->
-            val type = Character.getType(ch).toInt()
-            type in 1..5 || type in 9..11 || type in 20..30
+        // 但 U+3164、U+2800 这类字符虽然属于「字母/符号」，渲染出来是空白，必须单独排除。
+        val visible = clean.codePoints().anyMatch { cp ->
+            if (cp in BLANK_CODES) {
+                false
+            } else {
+                val type = Character.getType(cp).toInt()
+                type in 1..5 || type in 9..11 || type in 20..30
+            }
         }
         if (!visible || clean.startsWith("对方（群成员未知")) {
             if (clean.isNotEmpty()) {
