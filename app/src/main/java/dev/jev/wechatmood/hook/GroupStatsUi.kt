@@ -60,7 +60,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             val format = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
             " · " + format.format(java.util.Date(first)) + "–" + format.format(java.util.Date(last))
         } else ""
-        body.addView(caption("最近 ${context.messages.size} 条消息$span · 只在本机计算"))
+        body.addView(caption("最近 ${context.messages.size} 条消息$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
 
         val numbers = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -159,17 +159,40 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private fun renderTop(names: Map<String, String>) {
         currentNames = names
         topContainer.removeAllViews()
-        if (stats.topSenders.isEmpty()) {
+        if (stats.members.isEmpty()) {
             topContainer.addView(caption("没有可统计的发言"))
             return
         }
-        val total = stats.topSenders.sumOf { it.second }.coerceAtLeast(1)
-        stats.topSenders.forEach { (name, count) ->
-            val shown = (names[name] ?: name).let { displayName(it) }
-            val percent = count * 100 / total
-            topContainer.addView(tableRow(shown, "$count 条", "$percent%"),
-                LinearLayout.LayoutParams(-1, theme.dp(34)))
+        val shown = stats.members.take(10)
+        val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(shown.map { it.count })
+        shown.forEachIndexed { index, member ->
+            val name = displayName(names[member.name] ?: member.name)
+            val media = member.media + member.voice
+            val row = tableRow(name, "${member.count} 条", "${percents[index]}%", if (media > 0) "$media" else "-")
+            row.setOnClickListener { showMemberDetail(member, name) }
+            topContainer.addView(row, LinearLayout.LayoutParams(-1, theme.dp(34)))
         }
+        if (stats.members.size > shown.size) {
+            topContainer.addView(caption("另有 ${stats.members.size - shown.size} 位成员未列出"))
+        }
+    }
+
+    /** 点成员看他自己最近说了什么，不展示全员明细。 */
+    private fun showMemberDetail(member: dev.jev.wechatmood.reply.MemberStat, shownName: String) {
+        val lines = context.messages.filter { it.speaker == member.name }
+            .takeLast(6)
+            .joinToString("\n") { "· " + it.text.take(40) }
+            .ifBlank { "没有可取的代表发言" }
+        val format = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+        val span = if (member.firstAt > 0) {
+            format.format(java.util.Date(member.firstAt)) + "–" + format.format(java.util.Date(member.lastAt))
+        } else ""
+        android.app.AlertDialog.Builder(activity)
+            .setTitle("$shownName · ${member.count} 条")
+            .setMessage("活跃时段：${member.hours.joinToString("、") { "$it 点" }.ifBlank { "未知" }}\n" +
+                "发言范围：${span.ifBlank { "未知" }}\n\n$lines")
+            .setPositiveButton("关闭", null)
+            .show()
     }
 
     /** 空名字、纯符号的昵称统一显示成「群成员」。 */
@@ -179,7 +202,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         return if (clean.length > 12) clean.take(12) + "…" else clean
     }
 
-    private fun tableRow(name: String, count: String, percent: String) = LinearLayout(activity).apply {
+    private fun tableRow(name: String, count: String, percent: String, media: String) = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         addView(TextView(activity).apply {
@@ -200,7 +223,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             textSize = 13f
             setTextColor(theme.muted)
             gravity = Gravity.END
-        }, LinearLayout.LayoutParams(theme.dp(56), -2))
+        }, LinearLayout.LayoutParams(theme.dp(52), -2))
+        addView(TextView(activity).apply {
+            text = media
+            textSize = 13f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(40), -2))
     }
 
     private fun exportText(analysis: String): String = buildString {

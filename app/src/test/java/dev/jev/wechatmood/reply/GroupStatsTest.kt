@@ -45,9 +45,22 @@ class GroupStatsTest {
         assertTrue(stats.lines().any { it.contains("采样") })
     }
 
-    @Test fun `private chat falls back to no sender names`() {
-        val stats = GroupStatsCalculator.compute(listOf(StatRecord(at(9), 0, 1, "普通消息")))
+    @Test fun `private chat counts the other person`() {
+        val stats = GroupStatsCalculator.compute(listOf(StatRecord(at(9), 0, 1, "普通消息", "对方")))
         assertEquals(1, stats.total)
-        assertTrue(stats.topSenders.isEmpty())
+        assertEquals(1, stats.senders)
+        assertEquals("对方", stats.members.first().name)
+    }
+
+    @Test fun `blank or symbol names become anonymous`() {
+        val stats = GroupStatsCalculator.compute(listOf(StatRecord(at(9), 0, 1, "@", "")))
+        assertEquals(GroupStatsCalculator.UNKNOWN, stats.members.first().name)
+    }
+
+    @Test fun `percents always sum to one hundred`() {
+        assertEquals(100, GroupStatsCalculator.percents(listOf(1, 1, 1)).sum())
+        assertEquals(100, GroupStatsCalculator.percents(listOf(3, 3, 3, 3, 3, 3, 3)).sum())
+        assertEquals(100, GroupStatsCalculator.percents(listOf(7)).sum())
+        assertTrue(GroupStatsCalculator.percents(emptyList()).isEmpty())
     }
 }
