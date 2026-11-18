@@ -3,6 +3,14 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.77
+
+AI 偶发两次都空
+- 日志显示两次都返回 content=0，推理型模型容易把预算全花在思考上
+- 输出上限 1500 -> 3000，重试 2500 -> 4000
+- 新增 STATS_AI_RAW，记录 content / reasoning / finish_reason，能直接看出是空返回还是被截断
+- 空白昵称新增 STATS_BLANK_NAME，记录真实码点，便于精确过滤
+
 ## 2.9.76
 
 切换条数时数字对不上

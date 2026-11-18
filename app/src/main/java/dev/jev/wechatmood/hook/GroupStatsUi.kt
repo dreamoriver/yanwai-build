@@ -296,7 +296,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 type != Character.FORMAT.toInt() && type != Character.UNASSIGNED.toInt()
         }
         // wxid 说明数据库里没有可读名字，统一显示未获取昵称。
-        if (!visible || clean == "对方（群成员未知）") return null
+        if (!visible || clean == "对方（群成员未知）") {
+            if (clean.isNotEmpty()) {
+                val codes = clean.codePoints().toArray().take(8).joinToString(",")
+                dev.jev.wechatmood.core.MoodLog.w("STATS_BLANK_NAME len=${clean.length} codes=$codes")
+            }
+            return null
+        }
         if (clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))) return null
         return shorten(clean)
     }
@@ -489,7 +495,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         val sample = context.messages.takeLast(30).joinToString("\n") { "${it.speaker}: ${it.text.take(60)}" }
         val client = ReplyHttpClient()
-        var limit = 1500
+        var limit = 3000
         repeat(2) { attempt ->
             val payload = JSONObject().put("model", current.model).put("stream", false)
                 .put("max_tokens", limit).put("temperature", 0.6)
@@ -502,14 +508,20 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                         "统计：${stats.lines().joinToString("；")}\n最近消息：\n$sample")))
             val raw = withContext(Dispatchers.IO) {
                 client.request(current, payload, parse = { body ->
-                    JSONObject(body).getJSONArray("choices").getJSONObject(0)
-                        .getJSONObject("message").optString("content").trim()
+                    val choice = JSONObject(body).getJSONArray("choices").getJSONObject(0)
+                    val message = choice.getJSONObject("message")
+                    val content = message.optString("content").trim()
+                    val reasoning = message.optString("reasoning_content").trim()
+                    dev.jev.wechatmood.core.MoodLog.i(
+                        "STATS_AI_RAW attempt=${attempt + 1} content=${content.length} reasoning=${reasoning.length} " +
+                            "finish=${choice.optString("finish_reason")}")
+                    content
                 })
             }
             val clean = TextClean.plain(raw).take(1200)
             dev.jev.wechatmood.core.MoodLog.i("STATS_AI_ALL attempt=${attempt + 1} chars=${clean.length}")
             if (clean.isNotBlank()) return clean
-            limit = 2500
+            limit = 4000
         }
         throw IllegalStateException("模型两次都没返回正文，换一个非推理模型试试")
     }
