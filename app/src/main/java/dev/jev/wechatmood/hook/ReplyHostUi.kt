@@ -341,41 +341,6 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             setPadding(0, dp(6), 0, dp(6))
         }
         results.addView(state)
-        // 流式：第一条候选先以可复制卡片出现，同时标明其余还在生成。
-        val streamCard = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = theme.shape(theme.card, 12, theme.accent)
-            visibility = View.GONE
-            isClickable = true; isFocusable = true
-        }
-        val streamTitle = theme.label("正在生成其余候选 · 点这条复制", 12f, theme.muted)
-        val streamText = theme.label("", 16f, theme.ink).apply { setPadding(0, dp(4), 0, 0) }
-        streamCard.addView(streamTitle)
-        streamCard.addView(streamText)
-        streamCard.setOnClickListener {
-            val text = streamText.text?.toString().orEmpty()
-            if (text.isBlank()) return@setOnClickListener
-            (activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                .setPrimaryClip(ClipData.newPlainText("言外回复建议", text))
-            toast("已复制这一条")
-        }
-        results.addView(streamCard, results.indexOfChild(state) + 1)
-        // 候选都很短，首条和其余通常只差几百毫秒；先等一会儿再显示，避免卡片闪一下。
-        var streamPending: Runnable? = null
-        fun showStream(text: String) {
-            if (!ownsDrawer()) return
-            streamText.text = text
-            if (streamCard.visibility == View.VISIBLE) return
-            val reveal = Runnable { if (ownsDrawer()) streamCard.visibility = View.VISIBLE }
-            streamPending = reveal
-            streamCard.postDelayed(reveal, 700)
-        }
-        fun hideStream() {
-            streamPending?.let { streamCard.removeCallbacks(it) }
-            streamPending = null
-            streamCard.visibility = View.GONE
-        }
         val stale = action("有新消息 · 重新读取", quiet = true)
         stale.visibility = View.GONE; newMessageNotice = stale
         results.addView(stale, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
@@ -1011,12 +976,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                         requireNotNull(time), previousTopics, customRelationship) else null
                     // 流式：第一条候选写完整就先显示在状态栏，不必等 3–5 条全部生成。
                     val suggestion = if (findTopics) null else client.generate(config, current, baselineDraft, direction,
-                        knowledge, previous, focusId, relationship, customRelationship) { partial ->
-                        activity.runOnUiThread {
-                            if (job?.isActive == true && ownsDrawer() &&
-                                session.accepts(ticket, MessageSniffer.currentReplyTalker())) showStream(partial)
-                        }
-                    }
+                        knowledge, previous, focusId, relationship, customRelationship)
                     val activeConfig = ModulePrefs.replySettings()
                     if (!session.accepts(ticket, MessageSniffer.currentReplyTalker()) || !ownsDrawer() || !ModulePrefs.canGenerateReply) return@launch
                     if (!verifyAccount()) { window.dismiss(); return@launch }
@@ -1027,7 +987,6 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                         else composition.accept(current, requireNotNull(suggestion), notes, focusId, relationship, customRelationship)
                     if (!accepted) return@launch
                     snapshot = current
-                    hideStream()
                     reason.visibility = View.GONE; reasonToggle.text = "为什么这样回 ▾"; renderParts()
                     state.text = ""
                     revealReply()
@@ -1041,7 +1000,6 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                         toast(e.message ?: "暂时无法生成，请重试")
                     }
                 } finally {
-                    hideStream()
                     if (session.accepts(ticket, talker) && ownsDrawer()) controls(false)
                 }
             }
