@@ -160,7 +160,11 @@ object ReplyDatabaseHistory {
                 }
             }
         }
-        dev.jev.wechatmood.core.MoodLog.i("STATS_TABLES count=${names.size} names=${names.take(40)}")
+        val related = names.filter {
+            it.contains("contact", true) || it.contains("stranger", true) || it.contains("nick", true) ||
+                it.contains("userinfo", true) || it.contains("friend", true)
+        }
+        dev.jev.wechatmood.core.MoodLog.i("STATS_TABLES count=${names.size} related=$related")
         names
     }
 

@@ -436,7 +436,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         val sample = context.messages.takeLast(24).joinToString("\n") { "${it.speaker}: ${it.text.take(60)}" }
         val payload = JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 400).put("temperature", 0.6)
+            .put("max_tokens", 1200).put("temperature", 0.6)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content",
                     "$instruction 要求：口语化、有细节，不复述数字，不写 Markdown，不用星号，不超过 60 字。"))
@@ -455,6 +455,18 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 // 只取正文：reasoning_content 是模型的思考过程，不能当答案。
                 content
             })
+        }
+        if (raw.isBlank()) {
+            // 推理型模型可能把预算全花在思考上，放大上限再试一次。
+            val retry = JSONObject(payload.toString()).put("max_tokens", 2000)
+            val second = withContext(Dispatchers.IO) {
+                client.request(settings, retry, parse = { body ->
+                    JSONObject(body).getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").optString("content").trim()
+                })
+            }
+            dev.jev.wechatmood.core.MoodLog.i("STATS_RETRY $label chars=${second.length}")
+            if (second.isNotBlank()) return TextClean.plain(second).take(220)
         }
         check(raw.isNotBlank()) { "模型只返回了思考过程，没给正文；换一个非推理模型试试" }
         val clean = TextClean.plain(raw).take(220)

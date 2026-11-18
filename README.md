@@ -1,9 +1,9 @@
 > ## 这是自用构建仓库，不是原项目发布页
 >
 > - 源码基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai)，在上游基础上继续加了 [下面这些](#自用构建增加了什么)
-> - **当前版本：2.9.61（versionCode 145）**
+> - **当前版本：2.9.62（versionCode 146）**
 > - **改动清单：[CHANGELOG.md](CHANGELOG.md)｜安装包：[Releases](../../releases)**
-> - 附件名形如 `yanwai-2.9.61-145.apk`，签名已固定，可直接覆盖安装
+> - 附件名形如 `yanwai-2.9.62-146.apk`，签名已固定，可直接覆盖安装
 > - 原仓库未声明开源许可证，安装包仅自己使用，不对外分发
 
 ---
@@ -16,7 +16,7 @@
 
 微信里的聊天助手：理解文字和语音，参考上下文生成回复，聊不下去时找个新话题。
 
-![Version](https://img.shields.io/badge/version-2.9.61-2C7A73)
+![Version](https://img.shields.io/badge/version-2.9.62-2C7A73)
 ![Android](https://img.shields.io/badge/Android-9%2B-3DDC84?logo=android&logoColor=white)
 ![Platform](https://img.shields.io/badge/LSPosed%20%2F%20Xposed-Module-555555)
 ![Model](https://img.shields.io/badge/Powered%20by-Jev-7161A8)

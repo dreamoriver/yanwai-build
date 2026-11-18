@@ -3,6 +3,13 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.62
+
+成员角色 / 互动关系两块老是失败
+- 日志确认：推理模型把 token 全花在思考上（reasoning=587，finish=length），正文没有空间
+- 输出上限 400 -> 1200，仍为空时用 2000 再试一次
+- 昵称诊断日志改为只列出含 contact / stranger / nick / userinfo / friend 的表名
+
 ## 2.9.61
 
 分析结果变成了模型的「内心独白」
