@@ -115,21 +115,36 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         lateinit var aiButton: TextView
         aiButton = theme.action("让 AI 说说这群在聊什么", primary = true) {
             aiButton.isEnabled = false
-            aiButton.text = "正在分析…"
             analysisBox.visibility = View.VISIBLE
             analysisBox.removeAllViews()
-            analysisBox.addView(panel("分析", "正在分析…"))
-            scope.launch {
-                val text = runCatching { analyze(context) }.getOrElse { error ->
-                    dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED " + error.javaClass.simpleName + " " + error.message)
-                    "分析失败：" + (error.message ?: "请重试")
+            val bodies = LinkedHashMap<String, TextView>()
+            sections.forEach { (label, _) ->
+                val body = TextView(activity).apply {
+                    text = "…"
+                    textSize = 13f
+                    setTextColor(theme.ink)
+                    setPadding(0, theme.dp(4), 0, 0)
+                    setLineSpacing(0f, 1.25f)
                 }
-                showAnalysis(text.ifBlank { "模型没有返回内容，可以再点一次试试" })
+                analysisBox.addView(panelWith(label, body),
+                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
+                bodies[label] = body
+            }
+            scope.launch {
+                var done = 0
+                for ((label, instruction) in sections) {
+                    aiButton.text = "正在分析 ${++done}/${sections.size}"
+                    val text = runCatching { analyzeSection(context, label, instruction) }.getOrElse { error ->
+                        dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED $label " + error.message)
+                        ""
+                    }
+                    bodies[label]?.text = text.ifBlank { "（这次没取到内容）" }
+                }
+                analysisText = bodies.entries.joinToString("\n") { "${it.key}：${it.value.text}" }
                 aiButton.text = "重新分析"
                 aiButton.isEnabled = true
             }
         }
-        body.addView(aiButton, LinearLayout.LayoutParams(-1, theme.dp(44)).apply { topMargin = theme.dp(12) })
 
         val actions = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -209,14 +224,15 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(ordered.map { it.value })
         ordered.take(12).forEachIndexed { index, entry ->
             topContainer.addView(tableRow(entry.key, "${entry.value}", "${percents[index]}%"),
-                LinearLayout.LayoutParams(-1, theme.dp(34)))
+                LinearLayout.LayoutParams(-1, theme.dp(30)))
         }
         if (ordered.size > 12) topContainer.addView(caption("另有 ${ordered.size - 12} 位成员未列出"))
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {
-        names[raw]?.trim()?.takeIf { it.isNotEmpty() }?.let { return shorten(it) }
-        val clean = raw.trim()
+        names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
+            ?.let { return shorten(it) }
+        val clean = raw.replace(Regex("[\\u200B-\\u200F\\uFEFF]"), "").trim()
         if (clean.isEmpty()) return null
         if (clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))) return null
         return shorten(clean)
@@ -295,7 +311,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             "互动" to "互动关系", "风险" to "风险提示", "建议" to "沟通建议")
         val hits = mutableListOf<Triple<Int, Int, Pair<String, String>>>()
         for ((key, label) in labels) {
-            val regex = Regex("[【\\[]?$key[】\\]]?[：:， ]")
+            val regex = Regex("[【\\[]?$key[】\\]]?")
             var match = regex.find(text)
             while (match != null) {
                 hits += Triple(match.range.first, match.range.last + 1, key to label)
@@ -316,6 +332,26 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }
 
     /** 分析板块卡片：点标题折叠展开。 */
+    private fun panelWith(label: String, body: TextView): LinearLayout {
+        val card = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
+            background = theme.shape(theme.card, 14, theme.border)
+        }
+        val title = TextView(activity).apply {
+            text = label
+            textSize = 14f
+            setTextColor(theme.ink)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        card.addView(title)
+        card.addView(body)
+        title.setOnClickListener {
+            body.visibility = if (body.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        return card
+    }
+
     private fun panel(label: String, content: String, collapsed: Boolean = false): LinearLayout {
         val card = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -367,56 +403,37 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
     }.trim()
 
-    private suspend fun analyze(context: ReplyContext): String {
+    /** 六个板块分开问，避免模型把内容揉成一段。 */
+    private val sections = listOf(
+        "群氛围" to "用两句话描述这个微信群的聊天风格和情绪走向：是互损玩梗、轻松闲聊还是公事公办。不要复述统计数字。",
+        "核心话题" to "用两句话说这群最近在聊什么，归到日常闲聊、工作业务、生活琐事、八卦吐槽、事务通知其中一类。",
+        "成员角色" to "用两句话说谁在发起话题、谁在接话、谁基本潜水。只依据给出的消息，不编造。",
+        "互动关系" to "用两句话说成员之间的互动特点，有没有明显的小圈子。",
+        "风险提示" to "用一句话说有没有争议、敏感表述或负面情绪，没有就直接说没有。",
+        "沟通建议" to "用一句话说结合这个群的调性，接下来适合聊什么。",
+    )
+
+    private suspend fun analyzeSection(context: ReplyContext, label: String, instruction: String): String {
         val settings = ModulePrefs.replySettings()
         check(settings.isConfigured) { "先在言外「回复」里配置模型" }
-        val sample = context.messages.takeLast(30).joinToString("\n") { "${it.speaker}: ${it.text.take(80)}" }
+        val sample = context.messages.takeLast(24).joinToString("\n") { "${it.speaker}: ${it.text.take(60)}" }
         val payload = JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 700).put("temperature", 0.4)
+            .put("max_tokens", 220).put("temperature", 0.6)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content",
-                    "你在读一个微信群。根据统计和最近消息，按六个板块写观察，每段不超过 60 字，" +
-                        "严格用【氛围】【话题】【角色】【互动】【风险】【建议】作小标题，每块单独一行：\n" +
-                        "氛围：活跃度、关系亲疏、轻松还是严肃\n" +
-                        "话题：主要在聊什么，可归到日常闲聊、工作业务、生活琐事、八卦吐槽、事务通知\n" +
-                        "角色：谁发起话题、谁接话、谁潜水、谁起哄\n" +
-                        "互动：谁和谁互动最多，有没有小圈子\n" +
-                        "风险：有没有争议、敏感表述或负面情绪堆积\n" +
-                        "建议：接下来适合聊什么\n" +
-                        "不要 Markdown，不要星号井号，不要编号；只依据给出内容，不编造。"))
+                    "$instruction 要求：口语化、有细节，不复述数字，不写 Markdown，不用星号，不超过 60 字。"))
                 .put(JSONObject().put("role", "user").put("content",
                     "统计：${stats.lines().joinToString("；")}\n最近消息：\n$sample")))
         val client = ReplyHttpClient()
-        // 空返回重试一次：有些服务偶发返回空 content，重试通常就好了。
-        repeat(2) { attempt ->
-            val raw = withContext(Dispatchers.IO) {
-                client.request(settings, payload, parse = { body ->
-                    JSONObject(body).getJSONArray("choices").getJSONObject(0)
-                        .getJSONObject("message").getString("content").trim()
-                })
-            }
-            val clean = TextClean.plain(raw).take(900)
-            dev.jev.wechatmood.core.MoodLog.i("STATS_AI_OK attempt=${attempt + 1} chars=${clean.length}")
-            if (clean.isNotBlank()) return clean
-        }
-        // 长提示被过滤时，退成最短问法再试一次。
-        val short = JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 300).put("temperature", 0.4)
-            .put("messages", JSONArray()
-                .put(JSONObject().put("role", "system").put("content",
-                    "用三句话说明这个微信群里在聊什么、气氛怎么样，不要 Markdown。"))
-                .put(JSONObject().put("role", "user").put("content",
-                    "统计：${stats.lines().joinToString("；")}\n最近消息：\n$sample")))
         val raw = withContext(Dispatchers.IO) {
-            client.request(settings, short, parse = { body ->
+            client.request(settings, payload, parse = { body ->
                 JSONObject(body).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content").trim()
             })
         }
-        val clean = TextClean.plain(raw).take(400)
-        dev.jev.wechatmood.core.MoodLog.i("STATS_AI_SHORT chars=${clean.length}")
-        if (clean.isNotBlank()) return clean
-        throw IllegalStateException("模型三次都返回了空内容，换个模型或服务再试")
+        val clean = TextClean.plain(raw).take(220)
+        dev.jev.wechatmood.core.MoodLog.i("STATS_SECTION $label chars=${clean.length}")
+        return clean
     }
 
     private fun copy(text: String) {
