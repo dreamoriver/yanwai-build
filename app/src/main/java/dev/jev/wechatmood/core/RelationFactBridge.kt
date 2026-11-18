@@ -44,6 +44,20 @@ object RelationFactBridge {
     }.onFailure { MoodLog.w("RELATION_FACT_BRIDGE_FAIL status ${it.javaClass.simpleName}: ${it.message}") }
         .getOrDefault(false)
 
+    /** 手动补一条事实；失败返回 null，界面据此提示而不是假装保存成功。 */
+    fun addManual(context: Context, key: ReplyContactKey, kind: String, text: String, occurredAt: Long = 0): List<RelationFact>? = try {
+        val result = SettingsTransport.call(context, "relation_facts_add", key.value, Bundle().apply {
+            putString("kind", kind)
+            putString("text", text)
+            putLong("occurred_at", occurredAt)
+            generation()?.let { putString(SettingsProvider.KEY_GENERATION, it) }
+        })
+        result?.getStringArrayList("facts")?.let(::decode)
+    } catch (error: Exception) {
+        MoodLog.w("RELATION_FACT_BRIDGE_FAIL add ${error.javaClass.simpleName}: ${error.message}")
+        null
+    }
+
     fun meta(context: Context, key: ReplyContactKey): RelationMeta = runCatching {
         val bundle = SettingsTransport.call(context, "relation_facts_get", key.value,
             Bundle().apply { generation()?.let { putString(SettingsProvider.KEY_GENERATION, it) } }) ?: return RelationMeta()

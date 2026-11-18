@@ -222,6 +222,17 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         return true
     }
 
+    /** 手动补一条档案；类型和长度照抽取的同一套约束，重复添加同一句只会留下一条。 */
+    fun addManual(key: ReplyContactKey, kind: String, text: String, occurredAt: Long = 0): List<RelationFact>? {
+        val clean = text.trim()
+        if (kind !in RelationFact.KINDS || clean.isEmpty() || clean.length > RelationFact.MAX_TEXT) return null
+        val stamp = now()
+        val fact = RelationFact(kind = kind, text = clean, evidenceTime = 0, updatedAt = stamp,
+            source = "manual", confidence = 1.0, occurredAt = occurredAt.coerceAtLeast(0))
+        replace(key, RelationFacts.merge(listAll(key), listOf(fact), stamp))
+        return list(key)
+    }
+
     /** 待办：带绝对时间的约定与重要日期，按时间先后排；过期不等于无效，由界面决定怎么显示。 */
     fun todos(key: ReplyContactKey): List<RelationFact> {
         val placeholders = RelationFact.TIMED_KINDS.joinToString(",") { "?" }

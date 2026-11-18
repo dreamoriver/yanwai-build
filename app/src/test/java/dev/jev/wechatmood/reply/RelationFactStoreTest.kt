@@ -140,6 +140,28 @@ class RelationFactStoreTest {
         assertEquals(RelationFact.STATUS_ACTIVE, store.listAll(key).single().status)
     }
 
+    @Test fun `manual fact is added once and marked as manual`() {
+        val key = ReplyContactKey("f".repeat(64))
+        val store = RelationFactStore(db())
+        val added = store.addManual(key, "喜好", "喜欢手冲咖啡")
+        assertEquals(1, added?.size)
+        assertEquals("manual", store.list(key).single().source)
+        // 同一句话再添一次不会变成两条。
+        store.addManual(key, "喜好", "喜欢手冲咖啡")
+        assertEquals(1, store.list(key).size)
+        assertEquals(null, store.addManual(key, "不存在的类型", "随便"))
+        assertEquals(null, store.addManual(key, "喜好", "长".repeat(RelationFact.MAX_TEXT + 1)))
+    }
+
+    @Test fun `manual timed promise lands in the todo list`() {
+        val key = ReplyContactKey("ab".repeat(32))
+        val store = RelationFactStore(db())
+        val at = FactTimes.parseLocal("2026-12-01T18:30")
+        assertEquals(1, store.addManual(key, "约定", "一起看展", at)?.size)
+        assertEquals(at, store.todos(key).single().occurredAt)
+        assertEquals(1, store.list(key).size)
+    }
+
     @Test fun `clear removes everything`() {
         val key = ReplyContactKey("c".repeat(64))
         val store = RelationFactStore(db())

@@ -49,7 +49,7 @@ internal class FeaturePanel(
         }
         body.addView(item("群聊统计", "消息量、活跃成员与时段", onStats))
         if (factsAvailable) {
-            body.addView(item("关系档案", "整理过的事实，可删除", onFacts))
+            body.addView(item("关系档案", "整理过的事实，可移出或补一条", onFacts))
             body.addView(item("待办", "带时间的约定与重要日期", onTodos))
         }
 

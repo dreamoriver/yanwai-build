@@ -1,0 +1,347 @@
+package dev.jev.wechatmood.hook
+
+import android.app.Activity
+import android.app.Dialog
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
+import dev.jev.wechatmood.core.MoodLog
+import dev.jev.wechatmood.core.ModulePrefs
+import dev.jev.wechatmood.core.RelationFactBridge
+import dev.jev.wechatmood.reply.FactTimes
+import dev.jev.wechatmood.reply.RelationFact
+import dev.jev.wechatmood.reply.RelationMeta
+import dev.jev.wechatmood.reply.ReplyContactKey
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/**
+ * 关系档案窗口：这个联系人都有哪些有效事实，按类型分组。
+ *
+ * 和待办分开：待办只关心带时间的约定与重要日期，这里看全集。
+ * 移出档案用 cancelled 保留可恢复；作废条目由合并逻辑维护，这里不碰。
+ */
+internal class RelationArchiveUi(private val activity: Activity, private val talker: String?) {
+    private val kit = PanelKit(activity)
+    private val theme = kit.theme
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val listContainer = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+    private val summaryText: TextView = theme.label("", ReplyMetrics.TEXT_CAPTION, theme.muted).apply {
+        setPadding(0, theme.dp(4), 0, 0)
+    }
+    private val statusText: TextView = theme.label("", ReplyMetrics.TEXT_CAPTION, theme.muted).apply {
+        setPadding(0, theme.dp(4), 0, 0)
+        visibility = View.GONE
+    }
+    private var items: List<RelationFact> = emptyList()
+    private var meta: RelationMeta = RelationMeta()
+    private var contactKey: ReplyContactKey? = null
+    private var refreshing = false
+    private var dialog: Dialog? = null
+    private var addDialog: Dialog? = null
+
+    fun show() {
+        val dialog = Dialog(activity).also { this.dialog = it }
+        val root = kit.root()
+        val column = kit.content(root)
+        column.addView(kit.heading("关系档案"))
+        column.addView(kit.caption("从聊天里整理出的事实；可以先补一条，也可以把不对的移出去").apply {
+            setPadding(0, theme.dp(4), 0, theme.dp(8))
+        })
+        column.addView(summaryText)
+
+        val actions = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, theme.dp(10), 0, theme.dp(4))
+        }
+        actions.addView(theme.action("整理一次", primary = true) { refresh() },
+            LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = theme.dp(8) })
+        actions.addView(theme.action("添加一条") { pickKind() }, LinearLayout.LayoutParams(0, -2, 1f))
+        column.addView(actions)
+
+        column.addView(statusText)
+        val scroll = PanelMaxScroll(activity, (activity.resources.displayMetrics.heightPixels * 0.58f).toInt()).apply {
+            addView(listContainer)
+        }
+        column.addView(scroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(6) })
+        column.addView(theme.action("关闭", primary = true) { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })
+
+        dialog.setContentView(root)
+        dialog.window?.apply {
+            setBackgroundDrawableResource(android.R.color.transparent)
+            setGravity(Gravity.BOTTOM)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(ReplyMetrics.DIM)
+        }
+        dialog.setOnShowListener {
+            dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.setOnDismissListener {
+            addDialog?.dismiss()
+            scope.cancel()
+        }
+        dialog.show()
+
+        val selected = talker
+        MoodLog.i("RELATION_ARCHIVE_OPEN talker=${selected != null} group=${selected?.endsWith("@chatroom") == true}")
+        if (selected == null || selected.endsWith("@chatroom")) {
+            showStatus("档案只针对私聊；群聊没有联系人档案", theme.warning)
+            summaryText.text = "返回一个私聊再打开"
+            return
+        }
+        showStatus("正在读取…", theme.muted)
+        scope.launch {
+            val key = resolveKey(selected)
+            contactKey = key
+            if (key == null) {
+                showStatus("没能确认是哪个账号的聊天，先回到聊天页等一会儿", theme.warning)
+                return@launch
+            }
+            load(key)
+        }
+    }
+
+    /** 档案按账号与联系人哈希隔离，确认不了账号就不猜一个 key。 */
+    private suspend fun resolveKey(selected: String): ReplyContactKey? {
+        val live = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull() ?: return null
+        if (live.talker != selected) return null
+        val account = withContext(Dispatchers.IO) { ReplyDatabaseHistory.replyAccount(live) }
+        return ReplyContactKey.of(account, selected)
+    }
+
+    private fun reload() {
+        val key = contactKey ?: return
+        scope.launch { load(key) }
+    }
+
+    private suspend fun load(key: ReplyContactKey) {
+        val loaded = withContext(Dispatchers.IO) {
+            RelationFactBridge.loadAll(activity, key) to RelationFactBridge.meta(activity, key)
+        }
+        items = loaded.first
+        meta = loaded.second
+        hideStatus()
+        MoodLog.i("RELATION_ARCHIVE_LOAD total=${loaded.first.size} open=${loaded.first.count { it.isOpen }}")
+        render()
+    }
+
+    private fun render() {
+        listContainer.removeAllViews()
+        val active = items.filter { it.isOpen }
+        val removed = items.filter { it.status == RelationFact.STATUS_CANCELLED }
+            .sortedByDescending { it.updatedAt }.take(REMOVED_LIMIT)
+        summaryText.text = buildString {
+            append(if (items.isEmpty()) "还没有整理过" else "有效 ${active.size} 条")
+            if (meta.lastAt > 0) append(" · 最近整理 ").append(FactTimes.formatLocal(meta.lastAt, "MM-dd HH:mm"))
+        }
+
+        if (active.isEmpty()) {
+            listContainer.addView(kit.body("这个联系人还没有档案"))
+            listContainer.addView(kit.caption("点「整理一次」读最近聊天自动整理，或「添加一条」自己写"))
+        }
+        for (kind in RelationFact.KINDS) {
+            val group = active.filter { it.kind == kind }.sortedByDescending { it.updatedAt }
+            if (group.isEmpty()) continue
+            listContainer.addView(kit.sectionLabel("$kind · ${group.size} 条"))
+            group.forEach { listContainer.addView(factRow(it), rowParams()) }
+        }
+        if (removed.isNotEmpty()) {
+            listContainer.addView(kit.sectionLabel("已移出 · 点一下可恢复"))
+            removed.forEach { listContainer.addView(factRow(it), rowParams()) }
+        }
+    }
+
+    /** 一条事实：正文在上，来源与时间在下；整行可点。 */
+    private fun factRow(fact: RelationFact): View {
+        val removed = fact.status == RelationFact.STATUS_CANCELLED
+        val note = buildString {
+            if (removed) append("已移出") else append(if (fact.source == "manual") "手动添加" else "自动整理")
+            if (fact.occurredAt > 0) {
+                if (isNotEmpty()) append(" · ")
+                append(FactTimes.formatLocal(fact.occurredAt, "MM-dd HH:mm"))
+            }
+        }
+        val card = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
+            background = theme.shape(theme.card, ReplyMetrics.RADIUS_CARD, theme.border)
+            minimumHeight = theme.dp(ReplyMetrics.TAP)
+            isClickable = true; isFocusable = true
+            contentDescription = "${fact.kind}，${fact.text}，$note，点击操作"
+            setOnClickListener { ask(fact) }
+        }
+        card.addView(theme.label(fact.text, ReplyMetrics.TEXT_ITEM, if (removed) theme.muted else theme.ink))
+        card.addView(theme.label(note, ReplyMetrics.TEXT_CAPTION, theme.muted).apply {
+            setPadding(0, theme.dp(2), 0, 0)
+        })
+        return card
+    }
+
+    /** 操作按有没有依据消息排：有依据就能看原文，否则只给移出或恢复。 */
+    private fun ask(fact: RelationFact) {
+        val hasEvidence = fact.sourceChatMessageId > 0
+        val labels = buildList {
+            if (hasEvidence) add("看依据消息")
+            add(if (fact.isOpen) "移出档案（可恢复）" else "恢复为档案")
+        }
+        kit.picker(fact.text, labels) { index ->
+            when {
+                hasEvidence && index == 0 -> showEvidence(fact)
+                fact.isOpen -> update(fact, RelationFact.STATUS_CANCELLED)
+                else -> update(fact, RelationFact.STATUS_ACTIVE)
+            }
+        }
+    }
+
+    private fun showEvidence(fact: RelationFact) {
+        val selected = talker ?: return
+        val messageId = fact.sourceChatMessageId
+        if (messageId <= 0) return
+        scope.launch {
+            val message = withContext(Dispatchers.IO) { ReplyDatabaseHistory.messageById(selected, messageId) }
+            if (message == null) {
+                kit.info("依据消息", "这条消息已经不在本机数据库里了（可能被清理过）")
+                return@launch
+            }
+            val time = if (message.createdAt > 0) FactTimes.formatLocal(message.createdAt, "MM-dd HH:mm") else "时间未知"
+            kit.info("依据消息", "${message.speaker()} · $time\n\n${message.analysisText() ?: "[非文字消息]"}")
+        }
+    }
+
+    private fun update(fact: RelationFact, status: String) {
+        val key = contactKey ?: return
+        showStatus("正在保存…", theme.muted)
+        scope.launch {
+            val saved = withContext(Dispatchers.IO) { RelationFactBridge.setStatus(activity, key, fact.factId, status) }
+            MoodLog.i("RELATION_ARCHIVE_STATUS ok=$saved status=$status")
+            if (!saved) {
+                showStatus("没保存成功，档案可能刚被更新过，重开一次再试", theme.error)
+                return@launch
+            }
+            load(key)
+        }
+    }
+
+    private fun refresh() {
+        val key = contactKey ?: return
+        val settings = ModulePrefs.replySettings()
+        if (!settings.isConfigured) {
+            showStatus("请先在「回复」里配置模型，再整理档案", theme.warning)
+            return
+        }
+        if (refreshing) return
+        refreshing = true
+        showStatus("正在整理关系档案…", theme.muted)
+        scope.launch {
+            try {
+                val saved = RelationFactRefresher.refresh(activity, key, settings)
+                refreshing = false
+                if (saved.isEmpty()) {
+                    showStatus("这次没有提取到新的事实", theme.muted)
+                    return@launch
+                }
+                load(key)
+                showStatus("已更新：有效 ${saved.size} 条", theme.success)
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
+                refreshing = false
+                MoodLog.w("RELATION_ARCHIVE_REFRESH_FAILED " + e.javaClass.simpleName)
+                showStatus("整理失败：" + (e.message ?: "请重试"), theme.error)
+            }
+        }
+    }
+
+    /** 手动补一条：先选类型，再填正文；约定和重要日期可以带一个绝对时间。 */
+    private fun pickKind() {
+        kit.picker("要添加的类型", RelationFact.KINDS) { index -> addSheet(RelationFact.KINDS[index]) }
+    }
+
+    private fun addSheet(kind: String) {
+        val sheet = kit.sheet()
+        val root = kit.root()
+        val column = kit.content(root)
+        column.addView(kit.heading("添加一条${kind}"))
+        column.addView(kit.caption("不超过 30 个字，别写推断出来的东西"))
+        val text = input("例如：在游戏公司做运营")
+        column.addView(text, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })
+        val timed = kind in RelationFact.TIMED_KINDS
+        val at = if (timed) input("时间，如 2026-11-20 19:00；留空就只当信息") else null
+        at?.let { column.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) }) }
+        val hint = kit.caption("")
+        column.addView(hint)
+        column.addView(theme.action("保存", primary = true) {
+            val body = text.text.toString().trim()
+            when {
+                body.isEmpty() -> hint.text = "写一句再保存"
+                body.length > RelationFact.MAX_TEXT -> hint.text = "超过 ${RelationFact.MAX_TEXT} 个字了"
+                else -> {
+                    val occurredAt = at?.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(FactTimes::parseLocal) ?: 0
+                    sheet.dismiss()
+                    addDialog = null
+                    save(kind, body, occurredAt)
+                }
+            }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })
+        column.addView(theme.action("取消", quiet = true) {
+            sheet.dismiss()
+            addDialog = null
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(4) })
+        sheet.setContentView(root)
+        sheet.setOnDismissListener { if (addDialog === sheet) addDialog = null }
+        sheet.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        addDialog = sheet
+        sheet.show()
+        text.requestFocus()
+    }
+
+    private fun save(kind: String, body: String, occurredAt: Long) {
+        val key = contactKey ?: return
+        showStatus("正在保存…", theme.muted)
+        scope.launch {
+            val active = withContext(Dispatchers.IO) {
+                RelationFactBridge.addManual(activity, key, kind, body, occurredAt)
+            }
+            MoodLog.i("RELATION_ARCHIVE_ADD ok=${active != null} kind=$kind dated=${occurredAt > 0}")
+            if (active == null) {
+                showStatus("没保存成功，检查内容后重试", theme.error)
+                return@launch
+            }
+            load(key)
+            showStatus("已添加", theme.success)
+        }
+    }
+
+    private fun input(hintText: String): EditText = EditText(activity).apply {
+        textSize = ReplyMetrics.TEXT_BODY
+        setTextColor(theme.ink); setHintTextColor(theme.muted)
+        setBackground(theme.shape(theme.card, ReplyMetrics.RADIUS_BUTTON, theme.border))
+        setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
+        hint = hintText
+        minHeight = theme.dp(ReplyMetrics.TAP)
+    }
+
+    private fun showStatus(text: String, color: Int) {
+        statusText.text = text
+        statusText.setTextColor(color)
+        statusText.visibility = View.VISIBLE
+    }
+
+    private fun hideStatus() {
+        statusText.visibility = View.GONE
+    }
+
+    private fun rowParams() = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = theme.dp(8) }
+
+    private companion object {
+        const val REMOVED_LIMIT = 6
+    }
+}

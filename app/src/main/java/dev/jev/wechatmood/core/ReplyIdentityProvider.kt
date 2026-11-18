@@ -98,6 +98,14 @@ object ReplyIdentityProvider {
                 storage(context).facts.clear(key)
                 Bundle()
             }
+            "relation_facts_add" -> {
+                val kind = requireNotNull(extras?.getString("kind")).trim()
+                val text = requireNotNull(extras?.getString("text")).trim()
+                val occurredAt = extras?.getLong("occurred_at", 0L) ?: 0L
+                val active = storage(context).facts.addManual(key, kind, text, occurredAt)
+                    ?: throw IllegalArgumentException("这条内容不能保存：类型不对或超过 30 字")
+                Bundle().apply { putStringArrayList("facts", ArrayList(active.map { it.encode().toString() })) }
+            }
             "relation_facts_status" -> {
                 val factId = requireNotNull(extras?.getString("fact_id")).trim()
                 val status = requireNotNull(extras?.getString("status")).trim()

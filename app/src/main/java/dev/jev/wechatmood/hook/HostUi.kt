@@ -124,7 +124,7 @@ class HostUi(private val activity: Activity) {
             onReply = { replyUi.open() },
             onTopics = { replyUi.open(autoTopics = true) },
             onStats = { showStats() },
-            onFacts = { replyUi.open() },
+            onFacts = { RelationArchiveUi(activity, current).show() },
             onTodos = { RelationTodoUi(activity, current).show() },
             onAnalysisChanged = { value ->
                 if (current != null) {

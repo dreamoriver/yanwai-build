@@ -176,6 +176,20 @@ object ReplyDatabaseHistory {
         out.reversed()
     }
 
+    /** 档案条目回指依据：按 localId 取一条消息，只读，不改游标以外的任何状态。 */
+    suspend fun messageById(talker: String, msgId: Long): MessageMetadata? = withContext(Dispatchers.IO) {
+        if (msgId <= 0) return@withContext null
+        val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        for (db in databases) {
+            val found = runCatching {
+                query(db, "SELECT * FROM message WHERE talker = ? AND msgId = ? LIMIT 1",
+                    arrayOf(talker, msgId.toString())).use { if (it.moveToFirst()) metadata(it) else null }
+            }.getOrNull()
+            if (found != null) return@withContext found
+        }
+        null
+    }
+
     /** 诊断用：列出主库的表名，便于确认群昵称实际存在哪张表。 */
     suspend fun tableNames(): List<String> = withContext(Dispatchers.IO) {
         val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }

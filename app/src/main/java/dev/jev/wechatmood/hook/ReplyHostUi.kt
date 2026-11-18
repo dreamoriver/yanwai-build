@@ -526,26 +526,15 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             if (!auto) state.text = "正在整理关系档案…"
             scope.launch {
                 try {
-                    val live = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
-                        ?: return@launch
-                    // 页面上往往只有十几条，抽不出稳定事实；优先用本机历史补足，读不到再退回页面消息。
-                    val history = runCatching { ReplyDatabaseHistory.load(live, FactExtractor.MAX_MESSAGES) }.getOrNull()
-                    val messages = history?.messages?.takeIf { it.isNotEmpty() } ?: live.messages
-                    MoodLog.i("RELATION_FACT_INPUT page=${live.messages.size} used=${messages.size}")
-                    val extracted = withContext(Dispatchers.IO) { FactExtractor().extract(settings, messages) }
-                    if (extracted.isEmpty()) {
+                    val saved = RelationFactRefresher.refresh(activity, key, settings)
+                    if (saved.isEmpty()) {
                         if (!auto && ownsDrawer()) state.text = "这次没有提取到新的事实"
                         return@launch
-                    }
-                    val saved = withContext(Dispatchers.IO) {
-                        RelationFactBridge.save(activity, key, extracted, System.currentTimeMillis(),
-                            messages.lastOrNull()?.id ?: 0)
                     }
                     if (ownsDrawer()) {
                         facts = saved
                         if (!auto) state.text = "关系档案已更新：${saved.size} 条"
                     }
-                    MoodLog.i("RELATION_FACT_SAVED count=${saved.size}")
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) {
                     MoodLog.w("RELATION_FACTS_FAILED " + e.javaClass.simpleName)
