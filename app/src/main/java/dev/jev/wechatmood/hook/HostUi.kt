@@ -154,7 +154,7 @@ class HostUi(private val activity: Activity) {
                 dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
                     it.analysisText() ?: "[媒体]")
             }
-            GroupStatsUi(activity, context, mapped).show()
+            GroupStatsUi(activity, context, mapped) { showStats() }.show()
         }
     }
 

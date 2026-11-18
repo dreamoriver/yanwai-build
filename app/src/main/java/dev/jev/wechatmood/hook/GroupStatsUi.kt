@@ -60,7 +60,8 @@ object StatsFilter {
 
 /** 群聊统计窗口：数字 + 活跃成员 + 一次 AI 解读，结果可复制。 */
 internal class GroupStatsUi(private val activity: Activity, private val context: ReplyContext,
-    private val dbMessages: List<dev.jev.wechatmood.reply.ReplyMessage> = emptyList()) {
+    private val dbMessages: List<dev.jev.wechatmood.reply.ReplyMessage> = emptyList(),
+    private val reload: (() -> Unit)? = null) {
     private val theme = ReplyTheme(activity)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val stats: GroupStats
@@ -526,11 +527,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setPadding(theme.dp(8), 0, theme.dp(8), 0)
         }
 
-    /** 关闭当前窗口再重建，避免新窗口被还没消失的旧窗口挡住。 */
+    /**
+     * 切换筛选后必须重新查数据库：只重建界面会继续用旧数据，
+     * 于是出现「有时候对有时候不对」。
+     */
     private fun recreate() {
         dialog?.dismiss()
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            GroupStatsUi(activity, context).show()
+            reload?.invoke() ?: GroupStatsUi(activity, context).show()
         }, 400)
     }
 
