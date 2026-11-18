@@ -5,18 +5,20 @@ import org.json.JSONObject
 
 /** 一条草稿体检结果：最多两条问题，外加一条保持原意的改写。 */
 data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed: Boolean = true,
-    val verdict: String? = null, val relates: Boolean? = null, val referenceCount: Int = 0) {
+    val verdict: String? = null, val relates: Boolean? = null, val referenceCount: Int = 0,
+    val responded: String? = null) {
     val isEmpty: Boolean get() = issues.isEmpty() && rewrite.isNullOrBlank()
 }
 
 object DraftCheckProtocol {
-    private const val MAX_CONTEXT = 20
+    private const val MAX_CONTEXT = 8
     private const val MAX_ISSUE = 40
     private const val MAX_REWRITE = 60
 
     private const val INSTRUCTIONS = """你是聊天回复检查器。draft 是用户打好、但还没发出去的一句话。
 先看 focus（用户长按的那条，可能是图片），再看 last_incoming（对方最后说的那句）。
-按下面三行输出，不要 JSON，不要 Markdown，不要额外解释：
+按下面四行输出，不要 JSON，不要 Markdown，不要额外解释：
+回应：先写下你要回应的那条消息的开头一句原文（从 focus 或对方最后一句里摘，最多 15 字）
 判断：一句话说明 draft 和这段对话的关系；focus 是图片时，先用十个字左右描述图里是什么
 问题：最多两条，用「；」分隔；确实没有就写「无」
 改写：一条能直接替换 draft 发出去的话，沿用 my_style 的句长和标点，最多 30 字；即使这句没问题，也要给一条更自然的说法
@@ -66,7 +68,7 @@ object DraftCheckProtocol {
                 .put(userMessage))
     }
 
-    private val LABEL = Regex("^(判断|问题|毛病|改写|可以改成|建议)[：:](.*)$")
+    private val LABEL = Regex("^(回应|判断|问题|毛病|改写|可以改成|建议)[：:](.*)$")
 
     /** 按「判断/问题/改写」三个标签切段，容忍冒号全半角与多行内容。 */
     private fun sections(text: String): Map<String, String> {
@@ -89,10 +91,35 @@ object DraftCheckProtocol {
         return map
     }
 
+    /** 模型连续失败时的简化请求：只要一句能直接发的改写。 */
+    fun simplePayload(settings: ReplySettings, draft: String, focus: String?, lastIncoming: String?): JSONObject {
+        val context = buildString {
+            if (focus != null) append("对方发的这条：").append(focus.take(120)).append('\n')
+            if (lastIncoming != null && lastIncoming != focus) append("对方最后说：").append(lastIncoming.take(120)).append('\n')
+            append("我打好但还没发：").append(draft.take(200))
+        }
+        return JSONObject().put("model", settings.model).put("stream", false)
+            .put("max_tokens", 200).put("temperature", 0.3)
+            .put("messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content",
+                    "你是聊天回复助手。根据上下文把用户打好但还没发出去的话改得更自然、更接得住对方，" +
+                        "只说改写后的这一句，不要解释，不要引号，不超过 30 字，沿用我平时的句长和标点。"))
+                .put(JSONObject().put("role", "user").put("content", context)))
+    }
+
+    internal fun simpleParse(body: String): String? = runCatching {
+        val content = JSONObject(body).getJSONArray("choices").getJSONObject(0)
+            .getJSONObject("message").getString("content").trim()
+        content.lines().firstOrNull { it.isNotBlank() }?.trim()
+            ?.removeSurrounding("「", "」")?.removeSurrounding("\"")
+            ?.take(MAX_REWRITE)?.takeIf { it.isNotBlank() && it != "无" }
+    }.getOrNull()
+
     internal fun parse(body: String): DraftCheck = runCatching {
         val content = JSONObject(body).getJSONArray("choices").getJSONObject(0)
             .getJSONObject("message").getString("content").trim()
         val sections = sections(content)
+        val responded = sections["回应"]?.take(40)?.takeIf { it.isNotBlank() }
         val verdict = sections["判断"]?.take(120)?.takeIf { it.isNotBlank() }
         val problems = sections["问题"] ?: sections["毛病"]
         val issues = problems?.split("；", ";", "\n")?.map { it.trim() }?.filter { it.isNotEmpty() && it != "无" }
@@ -101,7 +128,7 @@ object DraftCheckProtocol {
             ?.trim()?.take(MAX_REWRITE)?.takeIf { it.isNotBlank() && it != "无" && it != "不需要" }
         dev.jev.wechatmood.core.MoodLog.i(
             "DRAFT_CHECK ok chars=${content.length} issues=${issues.size} rewrite=${rewrite != null} verdict=${verdict != null}")
-        DraftCheck(issues, rewrite, verdict = verdict)
+        DraftCheck(issues, rewrite, verdict = verdict, responded = responded)
     }.onFailure {
         dev.jev.wechatmood.core.MoodLog.w("DRAFT_CHECK_PARSE_FAILED " + it.javaClass.simpleName)
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))

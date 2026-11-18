@@ -642,11 +642,31 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     val payload = DraftCheckProtocol.payload(settings, current.copy(facts = facts), text,
                         composition.relationship, composition.activeCustomRelationship, current.targetImageDataUri)
                     val client = ReplyHttpClient()
+                    val lastIncoming = current.messages.lastOrNull { it.speaker != "我" }?.text
+                    val focus = current.focusText ?: lastIncoming
                     var check = withContext(Dispatchers.IO) { client.request(settings, payload, DraftCheckProtocol::parse) }
+                    // 目标校验：模型说回应的片段要和 focus 或对方最后一句对得上，否则重问一次。
+                    check.responded?.let { responded ->
+                        if (focus != null && RelationFacts.similarity(responded, focus) < 0.2) {
+                            MoodLog.i("DRAFT_CHECK_TARGET_MISMATCH len=${responded.length}")
+                            check = withContext(Dispatchers.IO) { client.request(settings, payload, DraftCheckProtocol::parse) }
+                        }
+                    }
                     // 模型偶尔不回结构：自动重试一次，别让用户再点。
                     if (check.isEmpty && check.verdict == null) {
                         MoodLog.i("DRAFT_CHECK_RETRY 首次没有判断依据")
                         check = withContext(Dispatchers.IO) { client.request(settings, payload, DraftCheckProtocol::parse) }
+                    }
+                    // 两次都不给结构：换成「只要一句改写」的简单问法，至少拿到能用的建议。
+                    if (check.isEmpty && check.verdict == null) {
+                        MoodLog.i("DRAFT_CHECK_SIMPLE 换简化问法")
+                        val simple = DraftCheckProtocol.simplePayload(settings, text, focus, lastIncoming)
+                        val rewrite = withContext(Dispatchers.IO) {
+                            client.request(settings, simple, DraftCheckProtocol::simpleParse)
+                        }
+                        if (rewrite != null) {
+                            check = DraftCheck(emptyList(), rewrite, verdict = "模型没给出判断，只给了一条改写")
+                        }
                     }
                     showDraftCheck(check.copy(referenceCount = current.messages.size))
                 } catch (e: CancellationException) { throw e }

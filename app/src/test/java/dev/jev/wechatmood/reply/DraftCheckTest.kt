@@ -71,4 +71,19 @@ class DraftCheckTest {
         assertEquals(2, evidence.getJSONArray("messages").length())
         assertTrue(!payload.has("response_format"))
     }
+
+    @Test fun `responded line is parsed for target check`() {
+        val check = DraftCheckProtocol.parse(body(
+            "回应：星辰云电脑你们有在搞么\n判断：没接住\n问题：无\n改写：没搞过"))
+        assertEquals("星辰云电脑你们有在搞么", check.responded)
+    }
+
+    @Test fun `simple mode returns just a rewrite`() {
+        val rewrite = DraftCheckProtocol.simpleParse(body("「这张挺好看的」"))
+        assertEquals("这张挺好看的", rewrite)
+    }
+
+    @Test fun `simple mode drops blank output`() {
+        assertNull(DraftCheckProtocol.simpleParse(body("   ")))
+    }
 }
