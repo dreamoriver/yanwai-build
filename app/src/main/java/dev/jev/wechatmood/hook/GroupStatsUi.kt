@@ -290,8 +290,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private fun resolveName(raw: String, names: Map<String, String>): String? {
         // 数据库里有名字优先用；没有就用原始名字。只要不是空白就显示，截断即可。
         val fromDb = names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
-        val clean = (fromDb ?: raw).replace(Regex("[\\u200B-\\u200F\\uFEFF]"), "").trim()
-        if (clean.isEmpty() || clean == "对方（群成员未知）") return null
+        val clean = (fromDb ?: raw).trim()
+        // 空白、零宽、格式控制符都算「没有名字」，避免表格里出现空行。
+        val visible = clean.any { ch ->
+            !ch.isWhitespace() && !ch.isISOControl() && Character.getType(ch) != Character.FORMAT.toInt()
+        }
+        if (!visible || clean == "对方（群成员未知）") return null
         return shorten(clean)
     }
 
@@ -534,14 +538,21 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setPadding(theme.dp(8), 0, theme.dp(8), 0)
         }
 
+    /** 关闭当前窗口再重建，避免新窗口被还没消失的旧窗口挡住。 */
+    private fun recreate() {
+        dialog?.dismiss()
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            GroupStatsUi(activity, context).show()
+        }, 220)
+    }
+
     private fun pickRange() {
         val values = StatsFilter.Range.values()
         android.app.AlertDialog.Builder(activity).setTitle("分析时段")
             .setItems(values.map { it.label }.toTypedArray()) { _, which ->
                 StatsFilter.range = values[which]
                 dev.jev.wechatmood.core.MoodLog.i("STATS_FILTER range=${StatsFilter.range}")
-                dialog?.dismiss()
-                GroupStatsUi(activity, context).show()
+                recreate()
             }.setNegativeButton("取消", null).show()
     }
 
@@ -551,8 +562,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             .setItems(options.map { if (it == 0) "该时段全部" else "最近 $it 条" }.toTypedArray()) { _, which ->
                 StatsFilter.limit = options[which]
                 dev.jev.wechatmood.core.MoodLog.i("STATS_FILTER limit=${StatsFilter.limit}")
-                dialog?.dismiss()
-                GroupStatsUi(activity, context).show()
+                recreate()
             }.setNegativeButton("取消", null).show()
     }
 
