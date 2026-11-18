@@ -148,10 +148,20 @@ object ReplyDatabaseHistory {
     }.getOrNull()
 
     /** 按时间范围取统计用消息（不限已加载页），用于「今天 / 最近 N 小时」。 */
-    suspend fun statMessages(talker: String, since: Long, limit: Int): List<MessageMetadata> = withContext(Dispatchers.IO) {
+    suspend fun statMessages(talker: String, sinceMillis: Long, limit: Int): List<MessageMetadata> = withContext(Dispatchers.IO) {
         val out = mutableListOf<MessageMetadata>()
         val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        var since = sinceMillis
         for (db in databases) {
+            // 微信不同版本 createTime 有秒也有毫秒，先看一条样本再决定。
+            val sample = runCatching {
+                var value = 0L
+                query(db, "SELECT createTime FROM message WHERE talker = ? LIMIT 1", arrayOf(talker)).use { cursor ->
+                    if (cursor.moveToFirst()) value = cursor.getLong(0)
+                }
+                value
+            }.getOrDefault(0L)
+            since = if (sample > 1_000_000_000_000L) sinceMillis else sinceMillis / 1000
             runCatching {
                 query(db, "SELECT msgId, type, isSend, content, talker, createTime, imgPath, msgSvrId FROM message " +
                     "WHERE talker = ? AND createTime >= ? ORDER BY createTime DESC LIMIT ?",
@@ -160,7 +170,9 @@ object ReplyDatabaseHistory {
                 }
             }
         }
-        dev.jev.wechatmood.core.MoodLog.i("STATS_RANGE talker=${talker.hashCode()} since=$since count=${out.size}")
+        dev.jev.wechatmood.core.MoodLog.i(
+            "STATS_RANGE talker=${talker.hashCode()} since=$since count=${out.size} " +
+                "first=${out.lastOrNull()?.createdAt} last=${out.firstOrNull()?.createdAt}")
         out.reversed()
     }
 

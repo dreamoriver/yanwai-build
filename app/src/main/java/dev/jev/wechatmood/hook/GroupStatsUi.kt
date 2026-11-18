@@ -44,8 +44,7 @@ object StatsFilter {
     var limit: Int = 20
     val limitLabel: String get() = if (limit == 0) "该时段全部" else "最近 $limit 条"
 
-    /** 数据库的 createTime 是秒级时间戳，这里统一返回秒。 */
-    fun sinceSeconds(now: Long = System.currentTimeMillis()): Long = when (range) {
+    fun sinceMillis(now: Long = System.currentTimeMillis()): Long = when (range) {
         Range.HOUR -> now - Range.HOUR.millis
         Range.HOUR3 -> now - Range.HOUR3.millis
         Range.HOUR12 -> now - Range.HOUR12.millis
@@ -56,7 +55,7 @@ object StatsFilter {
             set(java.util.Calendar.SECOND, 0)
             timeInMillis
         }.timeInMillis
-    } / 1000
+    }
 }
 
 /** 群聊统计窗口：数字 + 活跃成员 + 一次 AI 解读，结果可复制。 */
@@ -74,10 +73,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
 
     /** 按选择的时段与条数裁剪消息。 */
     private fun selectedMessages(): List<dev.jev.wechatmood.reply.ReplyMessage> {
-        val since = StatsFilter.sinceSeconds()
+        val since = StatsFilter.sinceMillis()
         // 优先用数据库按时间查到的消息，页面上下文只有最近几十条。
         val source = dbMessages.ifEmpty { context.messages }
-        val byTime = source.filter { it.time >= since }
+        val byTime = source.filter {
+            val stamp = if (it.time > 1_000_000_000_000L) it.time else it.time * 1000
+            stamp >= since
+        }
         return if (StatsFilter.limit > 0) byTime.takeLast(StatsFilter.limit) else byTime
     }
 
@@ -244,7 +246,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         scope.launch {
             runCatching { ReplyDatabaseHistory.tableNames() }
             val names = runCatching {
-                ReplyDatabaseHistory.displayNames(stats.topSenders.map { it.first })
+                ReplyDatabaseHistory.displayNames(stats.members.map { it.name })
             }.getOrDefault(emptyMap())
             if (names.isNotEmpty()) renderTop(names)
         }
@@ -287,7 +289,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             ch !in blanks && !ch.isWhitespace() && !Character.isSpaceChar(ch) && !ch.isISOControl() &&
                 type != Character.FORMAT.toInt() && type != Character.UNASSIGNED.toInt()
         }
-        if (!visible || clean == "对方（群成员未知）") return null
+        if (!visible || clean == "对方（群成员未知）" || clean.equals("null", true)) return null
         return shorten(clean)
     }
 

@@ -145,7 +145,7 @@ class HostUi(private val activity: Activity) {
             return
         }
         statsScope.launch {
-            val since = StatsFilter.sinceSeconds()
+            val since = StatsFilter.sinceMillis()
             val rows = runCatching {
                 ReplyDatabaseHistory.statMessages(context.talker, since,
                     if (StatsFilter.limit == 0) 5000 else StatsFilter.limit)
