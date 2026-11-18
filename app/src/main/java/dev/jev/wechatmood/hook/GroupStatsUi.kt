@@ -53,7 +53,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setPadding(theme.dp(20), theme.dp(18), theme.dp(20), theme.dp(18))
             background = theme.shape(theme.surface, 22, theme.border)
         }
-        body.addView(title("群聊统计"))
+        body.addView(title(if (context.talker.endsWith("@chatroom")) "群聊统计" else "聊天统计"))
         val first = context.messages.firstOrNull { it.time > 0 }?.time
         val last = context.messages.lastOrNull { it.time > 0 }?.time
         val span = if (first != null && last != null) {
@@ -163,10 +163,44 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             topContainer.addView(caption("没有可统计的发言"))
             return
         }
+        val total = stats.topSenders.sumOf { it.second }.coerceAtLeast(1)
         stats.topSenders.forEach { (name, count) ->
-            val shown = (names[name] ?: name).trim().takeIf { it.isNotEmpty() } ?: "群成员"
-            topContainer.addView(row(shown, "$count 条"), LinearLayout.LayoutParams(-1, theme.dp(44)))
+            val shown = (names[name] ?: name).let { displayName(it) }
+            val percent = count * 100 / total
+            topContainer.addView(tableRow(shown, "$count 条", "$percent%"),
+                LinearLayout.LayoutParams(-1, theme.dp(34)))
         }
+    }
+
+    /** 空名字、纯符号的昵称统一显示成「群成员」。 */
+    private fun displayName(raw: String): String {
+        val clean = raw.trim()
+        if (clean.isEmpty() || clean.none { it.isLetterOrDigit() }) return "群成员"
+        return if (clean.length > 12) clean.take(12) + "…" else clean
+    }
+
+    private fun tableRow(name: String, count: String, percent: String) = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(TextView(activity).apply {
+            text = name
+            textSize = 13f
+            setTextColor(theme.ink)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        addView(TextView(activity).apply {
+            text = count
+            textSize = 13f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(64), -2))
+        addView(TextView(activity).apply {
+            text = percent
+            textSize = 13f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(56), -2))
     }
 
     private fun exportText(analysis: String): String = buildString {
@@ -187,27 +221,36 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private suspend fun analyze(context: ReplyContext): String {
         val settings = ModulePrefs.replySettings()
         check(settings.isConfigured) { "先在言外「回复」里配置模型" }
-        val sample = context.messages.takeLast(20).joinToString("\n") { "${it.speaker}: ${it.text.take(80)}" }
+        val sample = context.messages.takeLast(30).joinToString("\n") { "${it.speaker}: ${it.text.take(80)}" }
         val payload = JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 600).put("temperature", 0.5)
+            .put("max_tokens", 900).put("temperature", 0.5)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content",
-                    "你在读一个微信群。根据统计和最近的聊天内容，写一段 150–220 字的观察：" +
-                        "这个群在聊什么话题、谁在主导、气氛偏什么、有没有值得注意的事。\n" +
-                        "要求：像人说话，分段自然；不要 Markdown，不要星号井号，不要编号列表；" +
-                        "只依据给出的内容，不编造没出现的事。"))
+                    "你在读一个微信群。根据统计和最近消息，按六段写观察，每段不超过 60 字，" +
+                        "分别以「氛围」「话题」「角色」「互动」「风险」「建议」开头：\n" +
+                        "氛围：活跃度、关系亲疏、轻松还是严肃\n" +
+                        "话题：主要在聊什么，可归到日常闲聊、工作业务、生活琐事、八卦吐槽、事务通知\n" +
+                        "角色：谁发起话题、谁接话、谁潜水、谁起哄\n" +
+                        "互动：谁和谁互动最多，有没有小圈子\n" +
+                        "风险：有没有争议、敏感表述或负面情绪堆积\n" +
+                        "建议：接下来适合聊什么\n" +
+                        "不要 Markdown，不要星号井号，不要编号；只依据给出内容，不编造。"))
                 .put(JSONObject().put("role", "user").put("content",
                     "统计：${stats.lines().joinToString("；")}\n最近消息：\n$sample")))
         val client = ReplyHttpClient()
-        return withContext(Dispatchers.IO) {
-            client.request(settings, payload, parse = { body ->
-                JSONObject(body).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content").trim()
-            })
-        }.let { raw ->
-            dev.jev.wechatmood.core.MoodLog.i("STATS_AI_OK chars=${raw.length}")
-            TextClean.plain(raw).take(500)
+        // 空返回重试一次：有些服务偶发返回空 content，重试通常就好了。
+        repeat(2) { attempt ->
+            val raw = withContext(Dispatchers.IO) {
+                client.request(settings, payload, parse = { body ->
+                    JSONObject(body).getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content").trim()
+                })
+            }
+            val clean = TextClean.plain(raw).take(900)
+            dev.jev.wechatmood.core.MoodLog.i("STATS_AI_OK attempt=${attempt + 1} chars=${clean.length}")
+            if (clean.isNotBlank()) return clean
         }
+        throw IllegalStateException("模型两次都返回了空内容，可能是服务端过滤或模型不支持该任务")
     }
 
     private fun copy(text: String) {
