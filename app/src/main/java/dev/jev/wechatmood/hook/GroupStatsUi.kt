@@ -137,9 +137,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                     aiButton.text = "正在分析 ${++done}/${sections.size}"
                     val text = runCatching { analyzeSection(context, label, instruction) }.getOrElse { error ->
                         dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED $label " + error.message)
-                        ""
+                        "（失败：" + (error.message ?: "未知原因") + "）"
                     }
-                    bodies[label]?.text = text.ifBlank { "（这次没取到内容）" }
+                    bodies[label]?.text = text.ifBlank { "（模型返回空内容）" }
                 }
                 analysisText = bodies.entries.joinToString("\n") { "${it.key}：${it.value.text}" }
                 aiButton.text = "重新分析"
@@ -241,7 +241,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
             ?.let { return shorten(it) }
         val clean = raw.replace(Regex("[\\u200B-\\u200F\\uFEFF]"), "").trim()
-        if (clean.isEmpty()) return null
+        if (clean.isEmpty() || clean.none { it.isLetterOrDigit() }) return null
         if (clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))) return null
         return shorten(clean)
     }
@@ -422,8 +422,16 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     )
 
     private suspend fun analyzeSection(context: ReplyContext, label: String, instruction: String): String {
-        val settings = ModulePrefs.replySettings()
-        check(settings.isConfigured) { "先在言外「回复」里配置模型" }
+        var settings = ModulePrefs.replySettings()
+        if (!settings.isConfigured) {
+            // 微信进程可能还没连上设置服务，先强制刷新一次再试。
+            ModulePrefs.reload(force = true)
+            kotlinx.coroutines.delay(1200)
+            settings = ModulePrefs.replySettings()
+        }
+        check(settings.isConfigured) {
+            if (!ModulePrefs.bridgeAvailable) "设置服务未连接：先打开一次言外再回来分析" else "先在言外「回复」里配置模型"
+        }
         val sample = context.messages.takeLast(24).joinToString("\n") { "${it.speaker}: ${it.text.take(60)}" }
         val payload = JSONObject().put("model", settings.model).put("stream", false)
             .put("max_tokens", 220).put("temperature", 0.6)
