@@ -48,6 +48,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }
 
     fun show() {
+        lateinit var scroll: android.widget.ScrollView
         val dialog = Dialog(activity)
         val body = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -143,6 +144,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 analysisText = bodies.entries.joinToString("\n") { "${it.key}：${it.value.text}" }
                 aiButton.text = "重新分析"
                 aiButton.isEnabled = true
+                scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
             }
         }
 
@@ -172,11 +174,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         body.background = null
 
-        val scroll = android.widget.ScrollView(activity).apply {
+        scroll = android.widget.ScrollView(activity).apply {
             isFillViewport = false
             addView(body)
         }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(aiButton, LinearLayout.LayoutParams(-1, theme.dp(44)).apply {
+            setMargins(theme.dp(20), theme.dp(6), theme.dp(20), 0)
+        })
         root.addView(actions, LinearLayout.LayoutParams(-1, -2))
         dialog.setContentView(root)
         val screenHeight = activity.resources.displayMetrics.heightPixels
