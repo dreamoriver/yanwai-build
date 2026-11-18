@@ -100,13 +100,12 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(theme.dp(8), 0, theme.dp(8), 0)
         }
-        row.addView(createAnalysisControl(), LinearLayout.LayoutParams(-2, -1))
-        row.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
-        row.addView(theme.action("帮我回 · 找话题", quiet = true) {
+        // 横条只留一个入口：分析开关和各项功能都收进「附加」弹窗。
+        row.addView(theme.action("附加", primary = true) {
             if (panel === found && found.isShown && found.isAttachedToWindow) {
                 runCatching(open).onFailure { MoodLog.w("REPLY_PLUS_OPEN_FAILED " + it.javaClass.simpleName) }
             }
-        }, LinearLayout.LayoutParams(-2, -1))
+        }, LinearLayout.LayoutParams(-1, -1))
         val host = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         val params = content.layoutParams
         panel = found; original = content; originalParams = params; wrapper = host; this.row = row
