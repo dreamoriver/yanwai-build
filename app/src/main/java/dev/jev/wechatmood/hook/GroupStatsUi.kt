@@ -70,7 +70,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         numbers.addView(number("${stats.senders}", "人发言"), weight())
         numbers.addView(number("${stats.media + stats.voice}", "图片语音"), weight())
         numbers.addView(number("${stats.activeHours.size}", "个时段"), weight())
-        body.addView(numbers, LinearLayout.LayoutParams(-1, theme.dp(84)))
+        body.addView(numbers, LinearLayout.LayoutParams(-1, theme.dp(72)))
 
         body.addView(section("最活跃"))
         body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
@@ -195,10 +195,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             .show()
     }
 
-    /** 空名字、纯符号的昵称统一显示成「群成员」。 */
+    /** 空名字、纯符号的昵称统一显示成「匿名成员」。 */
     private fun displayName(raw: String): String {
         val clean = raw.trim()
-        if (clean.isEmpty() || clean.none { it.isLetterOrDigit() }) return "群成员"
+        if (clean.isEmpty() || clean.count { it.isLetterOrDigit() } < 2) return dev.jev.wechatmood.reply.GroupStatsCalculator.UNKNOWN
         return if (clean.length > 12) clean.take(12) + "…" else clean
     }
 
@@ -252,7 +252,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         check(settings.isConfigured) { "先在言外「回复」里配置模型" }
         val sample = context.messages.takeLast(30).joinToString("\n") { "${it.speaker}: ${it.text.take(80)}" }
         val payload = JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 900).put("temperature", 0.5)
+            .put("max_tokens", 700).put("temperature", 0.4)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content",
                     "你在读一个微信群。根据统计和最近消息，按六段写观察，每段不超过 60 字，" +
@@ -279,7 +279,24 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             dev.jev.wechatmood.core.MoodLog.i("STATS_AI_OK attempt=${attempt + 1} chars=${clean.length}")
             if (clean.isNotBlank()) return clean
         }
-        throw IllegalStateException("模型两次都返回了空内容，可能是服务端过滤或模型不支持该任务")
+        // 长提示被过滤时，退成最短问法再试一次。
+        val short = JSONObject().put("model", settings.model).put("stream", false)
+            .put("max_tokens", 300).put("temperature", 0.4)
+            .put("messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content",
+                    "用三句话说明这个微信群里在聊什么、气氛怎么样，不要 Markdown。"))
+                .put(JSONObject().put("role", "user").put("content",
+                    "统计：${stats.lines().joinToString("；")}\n最近消息：\n$sample")))
+        val raw = withContext(Dispatchers.IO) {
+            client.request(settings, short, parse = { body ->
+                JSONObject(body).getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").getString("content").trim()
+            })
+        }
+        val clean = TextClean.plain(raw).take(400)
+        dev.jev.wechatmood.core.MoodLog.i("STATS_AI_SHORT chars=${clean.length}")
+        if (clean.isNotBlank()) return clean
+        throw IllegalStateException("模型三次都返回了空内容，换个模型或服务再试")
     }
 
     private fun copy(text: String) {
