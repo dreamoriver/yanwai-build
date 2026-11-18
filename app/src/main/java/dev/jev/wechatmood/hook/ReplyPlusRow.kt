@@ -101,14 +101,16 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
             setPadding(theme.dp(8), 0, theme.dp(8), 0)
         }
         // 横条只留一个入口：分析开关和各项功能都收进「附加」弹窗。
-        val entry = theme.action("附加", primary = true) {
+        // 用透明底的主色文字，不再做主色填充按钮：这一排是微信自己的图标，实心按钮会抢眼。
+        val entry = theme.action("附加", quiet = true) {
             if (panel === found && found.isShown && found.isAttachedToWindow) {
                 runCatching(open).onFailure { MoodLog.w("REPLY_PLUS_OPEN_FAILED " + it.javaClass.simpleName) }
             }
         }.apply {
             textSize = 13f
             minHeight = theme.dp(34)
-            setPadding(theme.dp(14), theme.dp(4), theme.dp(14), theme.dp(4))
+            setPadding(theme.dp(6), theme.dp(4), theme.dp(6), theme.dp(4))
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         row.addView(entry, LinearLayout.LayoutParams(-2, theme.dp(34)))
         row.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
