@@ -12,6 +12,11 @@ object ModulePrefs {
     const val KEY_EXPLORE = "explore_mode"
     /** 关系档案自动提取，默认开启；关闭后不会在打开「帮我回」时顺带整理。 */
     const val KEY_RELATION_FACTS = "relation_facts_auto"
+    /** 一次整理读多少条聊天；只存在微信进程本地，不参与设置同步。 */
+    const val KEY_RELATION_FACT_LIMIT = "relation_fact_limit"
+    val RELATION_FACT_LIMIT_VALUES = intArrayOf(30, 50)
+    const val RELATION_FACT_LIMIT_DEFAULT = 50
+    private const val LOCAL_REPLY_FILE = "yanwai_reply_local"
     const val KEY_API_KEY = "api_key"
     const val KEY_API_BASE = "api_base"
     const val KEY_API_PROVIDER = "api_provider"
@@ -207,6 +212,22 @@ object ModulePrefs {
         }
         saved
     }.onFailure { MoodLog.e("CHAT_SWITCH_SAVE_FAILED 本地会话开关保存失败", it) }.getOrDefault(false)
+
+    /** 采集范围：默认最近 50 条。30 条更快更省，50 条覆盖更全，再往上推理模型容易返回空。 */
+    fun relationFactLimit(): Int = runCatching {
+        val ctx = context ?: return RELATION_FACT_LIMIT_DEFAULT
+        ctx.getSharedPreferences(LOCAL_REPLY_FILE, Context.MODE_PRIVATE)
+            .getInt(KEY_RELATION_FACT_LIMIT, RELATION_FACT_LIMIT_DEFAULT)
+            .takeIf { it in RELATION_FACT_LIMIT_VALUES } ?: RELATION_FACT_LIMIT_DEFAULT
+    }.getOrDefault(RELATION_FACT_LIMIT_DEFAULT)
+
+    fun setRelationFactLimit(value: Int): Boolean = runCatching {
+        if (value !in RELATION_FACT_LIMIT_VALUES) return false
+        val ctx = context ?: return false
+        ctx.getSharedPreferences(LOCAL_REPLY_FILE, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_RELATION_FACT_LIMIT, value).commit()
+    }.getOrDefault(false)
+
     fun report(status: String) = bridge.report(status)
 
     private fun reportNow(status: String) {

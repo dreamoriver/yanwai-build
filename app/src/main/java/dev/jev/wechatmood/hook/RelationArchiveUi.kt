@@ -45,6 +45,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
     private var meta: RelationMeta = RelationMeta()
     private var contactKey: ReplyContactKey? = null
     private var refreshing = false
+    private var removedExpanded = false
     private var dialog: Dialog? = null
     private var addDialog: Dialog? = null
 
@@ -56,7 +57,11 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         column.addView(kit.caption("从聊天里整理出的事实；可以先补一条，也可以把不对的移出去").apply {
             setPadding(0, theme.dp(4), 0, theme.dp(8))
         })
-        column.addView(summaryText)
+        column.addView(summaryText.apply {
+            isClickable = true; isFocusable = true
+            contentDescription = "采集范围，点击修改"
+            setOnClickListener { pickLimit() }
+        })
 
         val actions = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -142,6 +147,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         summaryText.text = buildString {
             append(if (items.isEmpty()) "还没有整理过" else "有效 ${active.size} 条")
             if (meta.lastAt > 0) append(" · 最近整理 ").append(FactTimes.formatLocal(meta.lastAt, "MM-dd HH:mm"))
+            append(" · 采集最近 ").append(ModulePrefs.relationFactLimit()).append(" 条")
         }
 
         if (active.isEmpty()) {
@@ -155,8 +161,16 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             group.forEach { listContainer.addView(factRow(it), rowParams()) }
         }
         if (removed.isNotEmpty()) {
-            listContainer.addView(kit.sectionLabel("已移出 · 点一下可恢复"))
-            removed.forEach { listContainer.addView(factRow(it), rowParams()) }
+            // 默认收起来，只占一行；移出去的东西不该继续占版面。
+            val toggle = kit.sectionLabel(
+                if (removedExpanded) "已移出 · ${removed.size} 条 ▴" else "已移出 · ${removed.size} 条 ▾"
+            ).apply {
+                isClickable = true; isFocusable = true
+                contentDescription = "已移出 ${removed.size} 条，${if (removedExpanded) "点击收起" else "点击展开"}"
+                setOnClickListener { removedExpanded = !removedExpanded; render() }
+            }
+            listContainer.addView(toggle)
+            if (removedExpanded) removed.forEach { listContainer.addView(factRow(it), rowParams()) }
         }
     }
 
@@ -186,18 +200,46 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         return card
     }
 
-    /** 操作按有没有依据消息排：有依据就能看原文，否则只给移出或恢复。 */
+    /** 操作：看依据、移出／恢复，彻底删除单独二次确认。 */
     private fun ask(fact: RelationFact) {
         val hasEvidence = fact.sourceChatMessageId > 0
         val labels = buildList {
             if (hasEvidence) add("看依据消息")
-            add(if (fact.isOpen) "移出档案（可恢复）" else "恢复为档案")
+            if (fact.isOpen) {
+                add("移出档案（可恢复）")
+                add("彻底删除")
+            } else {
+                add("恢复为档案")
+                add("彻底删除")
+            }
         }
         kit.picker(fact.text, labels) { index ->
-            when {
-                hasEvidence && index == 0 -> showEvidence(fact)
-                fact.isOpen -> update(fact, RelationFact.STATUS_CANCELLED)
-                else -> update(fact, RelationFact.STATUS_ACTIVE)
+            when (labels.getOrNull(index)) {
+                "看依据消息" -> showEvidence(fact)
+                "移出档案（可恢复）" -> update(fact, RelationFact.STATUS_CANCELLED)
+                "恢复为档案" -> update(fact, RelationFact.STATUS_ACTIVE)
+                "彻底删除" -> confirmDelete(fact)
+            }
+        }
+    }
+
+    private fun confirmDelete(fact: RelationFact) {
+        kit.picker("彻底删除「${fact.text}」？", listOf("删除，以后整理也不再出现", "取消")) { index ->
+            if (index == 0) remove(fact)
+        }
+    }
+
+    /** 采集范围：默认 50 条，30 条更快更省；再往上推理模型容易返回空。 */
+    private fun pickLimit() {
+        val values = ModulePrefs.RELATION_FACT_LIMIT_VALUES
+        val current = ModulePrefs.relationFactLimit()
+        kit.picker("一次整理读多少条聊天", values.map { "最近 $it 条" }, values.indexOf(current)) { index ->
+            val value = values.getOrNull(index) ?: return@picker
+            if (ModulePrefs.setRelationFactLimit(value)) {
+                render()
+                showStatus("下次整理读取最近 $value 条", theme.muted)
+            } else {
+                showStatus("范围没保存成功，重试一次", theme.error)
             }
         }
     }
@@ -228,6 +270,21 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 return@launch
             }
             load(key)
+        }
+    }
+
+    private fun remove(fact: RelationFact) {
+        val key = contactKey ?: return
+        showStatus("正在删除…", theme.muted)
+        scope.launch {
+            val deleted = withContext(Dispatchers.IO) { RelationFactBridge.delete(activity, key, fact.factId) }
+            MoodLog.i("RELATION_ARCHIVE_DELETE ok=$deleted")
+            if (!deleted) {
+                showStatus("没删成功，可能刚被重新整理过，重开一次再试", theme.error)
+                return@launch
+            }
+            load(key)
+            showStatus("已彻底删除，之后的自动整理不会再抽回这条", theme.success)
         }
     }
 

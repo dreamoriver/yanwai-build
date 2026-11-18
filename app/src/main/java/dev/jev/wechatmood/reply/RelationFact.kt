@@ -140,6 +140,9 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
             "status TEXT NOT NULL, kind TEXT NOT NULL, occurred_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, payload TEXT NOT NULL)")
         db.execute("CREATE INDEX IF NOT EXISTS relation_fact_items_contact ON relation_fact_items(contact_key, status, updated_at)")
         db.execute("CREATE TABLE IF NOT EXISTS relation_fact_migrations (contact_key TEXT PRIMARY KEY NOT NULL, migrated_at INTEGER NOT NULL)")
+        // 彻底删除的条目记在这里：光删行不够，下次抽取还会抽出同一句话、同一个派生 id。
+        db.execute("CREATE TABLE IF NOT EXISTS relation_fact_tombstones (contact_key TEXT NOT NULL, fact_id TEXT NOT NULL, " +
+            "deleted_at INTEGER NOT NULL, PRIMARY KEY(contact_key, fact_id))")
         migrateLegacy()
     }
 
@@ -200,8 +203,34 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
 
     /** 整体替换该联系人；传入的列表已经由 [RelationFacts.merge] 合并与裁剪。 */
     fun replace(key: ReplyContactKey, facts: List<RelationFact>) {
+        val ignored = ignored(key)
         db.execute("DELETE FROM relation_fact_items WHERE contact_key = ?", listOf(key.value))
-        facts.forEach { upsert(key.value, it) }
+        facts.filter { it.factId !in ignored }.forEach { upsert(key.value, it) }
+    }
+
+    /** 被彻底删除过的 fact_id；自动抽取写回时据此过滤，避免同一件事实反复复活。 */
+    fun ignored(key: ReplyContactKey): Set<String> = runCatching {
+        db.queryRows("SELECT fact_id FROM relation_fact_tombstones WHERE contact_key = ?", listOf(key.value)).toSet()
+    }.getOrDefault(emptySet())
+
+    /**
+     * 彻底删除一条：删行并留下忽略标记。
+     * 返回 false 表示这条已经不在（可能刚被重新整理过），界面应刷新而不是假装成功。
+     */
+    fun delete(key: ReplyContactKey, factId: String): Boolean {
+        if (!factId.matches(RelationFact.ID_PATTERN)) return false
+        val exists = db.query("SELECT 1 FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?",
+            listOf(factId, key.value)) != null
+        if (!exists) return false
+        db.execute("DELETE FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?", listOf(factId, key.value))
+        db.execute("INSERT OR REPLACE INTO relation_fact_tombstones(contact_key, fact_id, deleted_at) VALUES(?, ?, ?)",
+            listOf(key.value, factId, now().toString()))
+        return true
+    }
+
+    /** 手动重新加回一条时解除忽略：手动是明确意图，不该被上次的删除拦住。 */
+    fun forget(key: ReplyContactKey, factId: String) {
+        db.execute("DELETE FROM relation_fact_tombstones WHERE contact_key = ? AND fact_id = ?", listOf(key.value, factId))
     }
 
     /**
@@ -229,6 +258,8 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         val stamp = now()
         val fact = RelationFact(kind = kind, text = clean, evidenceTime = 0, updatedAt = stamp,
             source = "manual", confidence = 1.0, occurredAt = occurredAt.coerceAtLeast(0))
+        // 手动添加视为"我要它回来"，先解除上次彻底删除留下的忽略。
+        forget(key, fact.factId)
         replace(key, RelationFacts.merge(listAll(key), listOf(fact), stamp))
         return list(key)
     }
@@ -246,6 +277,7 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         db.execute("DELETE FROM relation_fact_items WHERE contact_key = ?", listOf(key.value))
         db.execute("DELETE FROM relation_facts WHERE contact_key = ?", listOf(key.value))
         db.execute("DELETE FROM relation_fact_migrations WHERE contact_key = ?", listOf(key.value))
+        db.execute("DELETE FROM relation_fact_tombstones WHERE contact_key = ?", listOf(key.value))
         // 水位一起清掉，下次才会重新抽，否则清空后再也不更新。
         db.execute("DELETE FROM relation_meta WHERE contact_key = ?", listOf(key.value))
     }
@@ -254,6 +286,7 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         db.execute("DELETE FROM relation_fact_items")
         db.execute("DELETE FROM relation_facts")
         db.execute("DELETE FROM relation_fact_migrations")
+        db.execute("DELETE FROM relation_fact_tombstones")
         db.execute("DELETE FROM relation_meta")
     }
 

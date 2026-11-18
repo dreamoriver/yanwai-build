@@ -162,6 +162,32 @@ class RelationFactStoreTest {
         assertEquals(1, store.list(key).size)
     }
 
+    @Test fun `deleted fact stays deleted after another automatic pass`() {
+        val key = ReplyContactKey("12".repeat(32))
+        val store = RelationFactStore(db())
+        store.replace(key, listOf(RelationFact("喜好", "喜欢手冲咖啡", updatedAt = 1000)))
+        val id = store.list(key).single().factId
+        assertTrue(store.delete(key, id))
+        assertEquals(0, store.listAll(key).size)
+        // 下一次抽取又给同一句：不能复活。
+        store.replace(key, listOf(RelationFact("喜好", "喜欢手冲咖啡", updatedAt = 2000)))
+        assertEquals(0, store.listAll(key).size)
+        // 手动添加是明确意图，可以再回来，并且解除忽略标记。
+        assertEquals(1, store.addManual(key, "喜好", "喜欢手冲咖啡")?.size)
+        assertEquals(0, store.ignored(key).size)
+    }
+
+    @Test fun `clearing the archive also clears ignore marks`() {
+        val key = ReplyContactKey("34".repeat(32))
+        val store = RelationFactStore(db())
+        store.replace(key, listOf(RelationFact("喜好", "喜欢手冲咖啡", updatedAt = 1000)))
+        assertTrue(store.delete(key, store.list(key).single().factId))
+        store.clear(key)
+        assertEquals(0, store.ignored(key).size)
+        store.replace(key, listOf(RelationFact("喜好", "喜欢手冲咖啡", updatedAt = 3000)))
+        assertEquals(1, store.list(key).size)
+    }
+
     @Test fun `clear removes everything`() {
         val key = ReplyContactKey("c".repeat(64))
         val store = RelationFactStore(db())

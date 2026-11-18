@@ -16,9 +16,10 @@ import java.util.Locale
  */
 class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
     suspend fun extract(settings: ReplySettings, messages: List<ReplyMessage>,
-        now: Long = System.currentTimeMillis()): List<RelationFact> {
+        now: Long = System.currentTimeMillis(), limit: Int = MAX_MESSAGES): List<RelationFact> {
         check(settings.isConfigured) { "请先配置回复模型" }
-        val usable = messages.filter { it.text.isNotBlank() && !it.text.startsWith("【引用") }.takeLast(MAX_MESSAGES)
+        val usable = messages.filter { it.text.isNotBlank() && !it.text.startsWith("【引用") }
+            .takeLast(limit.coerceIn(10, MAX_MESSAGES))
         val transcript = usable.withIndex()
             .joinToString("\n") { (index, message) -> "[${index + 1}] ${message.speaker}: ${message.text.take(80)}" }
             .take(MAX_CHARACTERS)

@@ -58,6 +58,16 @@ object RelationFactBridge {
         null
     }
 
+    /** 彻底删除一条事实，并让后续自动整理不再把它抽回来。 */
+    fun delete(context: Context, key: ReplyContactKey, factId: String): Boolean = runCatching {
+        val result = SettingsTransport.call(context, "relation_facts_delete", key.value, Bundle().apply {
+            putString("fact_id", factId)
+            generation()?.let { putString(SettingsProvider.KEY_GENERATION, it) }
+        })
+        result?.getBoolean("saved") == true
+    }.onFailure { MoodLog.w("RELATION_FACT_BRIDGE_FAIL delete ${it.javaClass.simpleName}: ${it.message}") }
+        .getOrDefault(false)
+
     fun meta(context: Context, key: ReplyContactKey): RelationMeta = runCatching {
         val bundle = SettingsTransport.call(context, "relation_facts_get", key.value,
             Bundle().apply { generation()?.let { putString(SettingsProvider.KEY_GENERATION, it) } }) ?: return RelationMeta()

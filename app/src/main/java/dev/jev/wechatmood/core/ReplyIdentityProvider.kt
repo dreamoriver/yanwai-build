@@ -81,7 +81,10 @@ object ReplyIdentityProvider {
                         (0 until array.length()).mapNotNull { array.optJSONObject(it)?.let(RelationFact::decode) }
                     }.orEmpty()
                 }
-                val merged = RelationFacts.merge(store.listAll(key), incoming, System.currentTimeMillis())
+                // 彻底删除过的事实不再写回：抽取结果里出现同一个派生 id 时直接跳过。
+                val ignored = store.ignored(key)
+                val accepted = incoming.filter { it.factId !in ignored }
+                val merged = RelationFacts.merge(store.listAll(key), accepted, System.currentTimeMillis())
                 store.replace(key, merged)
                 store.saveMeta(key, RelationMeta(extras?.getLong("last_at", 0L) ?: 0L,
                     extras?.getLong("last_message_id", 0L) ?: 0L))
@@ -113,6 +116,11 @@ object ReplyIdentityProvider {
                 check(storage(context).facts.setStatus(key, factId, status)) {
                     if (status !in RelationFact.MANUAL_STATUSES) "不支持的状态：$status" else "这条已经变化，请重新打开"
                 }
+                Bundle().apply { putBoolean("saved", true) }
+            }
+            "relation_facts_delete" -> {
+                val factId = requireNotNull(extras?.getString("fact_id")).trim()
+                check(storage(context).facts.delete(key, factId)) { "这条已经变化，请重新打开" }
                 Bundle().apply { putBoolean("saved", true) }
             }
             "reply_role_put" -> {

@@ -2,6 +2,7 @@ package dev.jev.wechatmood.hook
 
 import android.app.Activity
 import dev.jev.wechatmood.core.MoodLog
+import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.RelationFactBridge
 import dev.jev.wechatmood.reply.FactExtractor
 import dev.jev.wechatmood.reply.RelationFact
@@ -16,14 +17,15 @@ import kotlinx.coroutines.withContext
  */
 internal object RelationFactRefresher {
     /** 返回合并后的有效条目；没有抽到内容时返回空列表，不写库。 */
-    suspend fun refresh(activity: Activity, key: ReplyContactKey, settings: ReplySettings): List<RelationFact> {
+    suspend fun refresh(activity: Activity, key: ReplyContactKey, settings: ReplySettings,
+        limit: Int = ModulePrefs.relationFactLimit()): List<RelationFact> {
         val live = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
             ?: error("读取聊天失败")
         // 页面上往往只有十几条，抽不出稳定事实；优先用本机历史补足，读不到再退回页面消息。
-        val history = runCatching { ReplyDatabaseHistory.load(live, FactExtractor.MAX_MESSAGES) }.getOrNull()
+        val history = runCatching { ReplyDatabaseHistory.load(live, limit) }.getOrNull()
         val messages = history?.messages?.takeIf { it.isNotEmpty() } ?: live.messages
-        MoodLog.i("RELATION_FACT_INPUT page=${live.messages.size} used=${messages.size}")
-        val extracted = withContext(Dispatchers.IO) { FactExtractor().extract(settings, messages) }
+        MoodLog.i("RELATION_FACT_INPUT page=${live.messages.size} used=${messages.size} limit=$limit")
+        val extracted = withContext(Dispatchers.IO) { FactExtractor().extract(settings, messages, limit = limit) }
         if (extracted.isEmpty()) return emptyList()
         return withContext(Dispatchers.IO) {
             RelationFactBridge.save(activity, key, extracted, System.currentTimeMillis(), messages.lastOrNull()?.id ?: 0)
