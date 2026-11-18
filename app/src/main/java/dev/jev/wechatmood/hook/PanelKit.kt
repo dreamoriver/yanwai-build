@@ -60,8 +60,7 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
     }
 
     /** 条目行：主标题 + 说明 + 右箭头，整行可点，高度不低于 48dp。 */
-    fun itemRow(title: String, subtitle: String?, onClick: () -> Unit): View {
-        val row = LinearLayout(context).apply {
+    fun itemRow(title: String, subtitle: String?, onClick: () -> Unit): View {        val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
@@ -81,6 +80,22 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
         row.addView(theme.label("›", 20f, theme.muted).apply { setPadding(theme.dp(8), 0, 0, 0) })
         return row
     }
+
+    /** 分组列表里的一行：没有独立卡片底，主标题 + 说明；行间分隔线由调用方补。 */
+    fun listRow(title: String, subtitle: String?, onClick: () -> Unit): View =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(theme.dp(14), theme.dp(11), theme.dp(14), theme.dp(11))
+            minimumHeight = theme.dp(ReplyMetrics.TAP)
+            isClickable = true; isFocusable = true
+            setOnClickListener { onClick() }
+            addView(theme.label(title, ReplyMetrics.TEXT_ITEM, theme.ink))
+            if (!subtitle.isNullOrBlank()) {
+                addView(theme.label(subtitle, ReplyMetrics.TEXT_CAPTION, theme.muted).apply {
+                    setPadding(0, theme.dp(2), 0, 0)
+                })
+            }
+        }
 
     /** 胶囊筛选按钮：和主按钮同高度，不再压到 34dp。 */
     fun pill(label: String, onClick: () -> Unit): TextView =

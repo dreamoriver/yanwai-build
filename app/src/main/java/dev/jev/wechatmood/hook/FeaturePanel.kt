@@ -3,15 +3,16 @@ package dev.jev.wechatmood.hook
 import android.app.Activity
 import android.app.Dialog
 import android.view.Gravity
-import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.Switch
 
 /**
- * 「附加」入口弹出的功能面板：帮回、话题、统计、档案，最后是自动分析开关。
- * 纯原生控件，避免和宿主资源表冲突；零件统一取自 PanelKit。
+ * 「附加」入口弹出的功能面板：帮回、话题、统计、档案、待办，最后是自动分析开关。
+ *
+ * 一块卡片装功能行、行间用细线分隔，不再每项各占一个圆角卡片：
+ * 那样项一多就碎，和微信自己的列表也不像。
  */
 internal class FeaturePanel(
     private val activity: Activity,
@@ -38,23 +39,43 @@ internal class FeaturePanel(
             background = theme.shape(theme.surface, ReplyMetrics.RADIUS_PANEL, theme.border)
         }
 
-        body.addView(kit.heading("附加"))
+        body.addView(kit.heading("言外"))
         body.addView(kit.caption(
-            if (talker == null) "当前聊天尚未识别，部分功能不可用" else "针对当前聊天"
+            when {
+                talker == null -> "当前聊天尚未识别，部分功能不可用"
+                talker.endsWith("@chatroom") -> "群聊 · 功能只在微信里生效"
+                else -> "私聊 · 功能只在微信里生效"
+            }
         ).apply { setPadding(0, theme.dp(4), 0, theme.dp(12)) })
 
+        // 功能行放在同一张卡里，行间一条 1dp 分隔线；卡片本身不加内边距，交给每一行。
+        val group = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = theme.shape(theme.card, ReplyMetrics.RADIUS_CARD, theme.border)
+        }
+        var first = true
+        fun row(title: String, subtitle: String, action: () -> Unit) {
+            if (!first) group.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)))
+            group.addView(kit.listRow(title, subtitle) {
+                dialog.dismiss()
+                action()
+            }, LinearLayout.LayoutParams(-1, -2))
+            first = false
+        }
         if (topicsAvailable) {
-            body.addView(item("帮我回", "参考最近聊天，生成 3–5 条候选", onReply))
-            body.addView(item("找找话题", "聊不下去时给几个新方向", onTopics))
+            row("帮我回", "参考最近聊天，生成 3–5 条候选", onReply)
+            row("找找话题", "聊不下去时给几个新方向", onTopics)
         }
-        body.addView(item("群聊统计", "消息量、活跃成员与时段", onStats))
+        row(if (talker?.endsWith("@chatroom") == true) "群聊统计" else "聊天统计", "消息量、活跃成员与时段", onStats)
         if (factsAvailable) {
-            body.addView(item("关系档案", "整理过的事实，可移出或补一条", onFacts))
-            body.addView(item("待办", "带时间的约定与重要日期", onTodos))
+            row("关系档案", "整理过的事实，可移出或补一条", onFacts)
+            row("待办", "带时间的约定与重要日期", onTodos)
         }
+        body.addView(group, LinearLayout.LayoutParams(-1, -2))
 
-        body.addView(kit.divider(), LinearLayout.LayoutParams(-1, 1).apply { topMargin = theme.dp(12) })
-
+        body.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)).apply {
+            topMargin = theme.dp(14)
+        })
         val switch = Switch(activity).apply {
             isChecked = analysisEnabled
             text = "自动分析"
@@ -65,7 +86,6 @@ internal class FeaturePanel(
             setOnCheckedChangeListener { _, value -> onAnalysisChanged(value) }
         }
         body.addView(switch, LinearLayout.LayoutParams(-1, -2))
-
         body.addView(kit.caption("开启后，收到的文字与语音会在气泡下方显示情绪与解读"))
 
         dialog.setContentView(body)
@@ -82,16 +102,5 @@ internal class FeaturePanel(
                 ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.show()
-    }
-
-    /** 功能项：主标题 + 说明，右侧一个浅色箭头，整行可点。 */
-    private fun item(title: String, subtitle: String, action: () -> Unit): View {
-        // 先收起面板，再执行动作，否则统计窗口会叠在它上面。
-        val row = kit.itemRow(title, subtitle) {
-            dialog?.dismiss()
-            action()
-        }
-        row.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = theme.dp(8) }
-        return row
     }
 }

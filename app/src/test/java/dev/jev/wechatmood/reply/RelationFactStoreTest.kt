@@ -87,6 +87,22 @@ class RelationFactStoreTest {
         assertEquals(0L, FactTimes.parseLocal("下周三"))
     }
 
+    @Test fun `date only entries are not midnight and are not overdue today`() {
+        val now = FactTimes.parseLocal("2026-11-19T10:00")
+        val today = FactTimes.parseLocal("2026-11-19")
+        val tonight = FactTimes.parseLocal("2026-11-19T19:00")
+        val yesterday = FactTimes.parseLocal("2026-11-18")
+        assertFalse(FactTimes.hasClock(today))
+        assertTrue(FactTimes.hasClock(tonight))
+        // 同一天只说日期：还没过完，不算过期。
+        assertFalse(FactTimes.overdue(today, now))
+        assertFalse(FactTimes.overdue(tonight, now))
+        assertTrue(FactTimes.overdue(yesterday, now))
+        assertEquals("今天", FactTimes.label(today, now))
+        assertEquals("今天 19:00", FactTimes.label(tonight, now))
+        assertEquals("昨天", FactTimes.label(yesterday, now))
+    }
+
     @Test fun `extractor maps evidence index to message id and keeps the timestamp`() {
         val facts = FactExtractor().parse(
             body("""[{"kind":"约定","text":"周五一起吃饭","evidence":2,"occurred_at":"2026-10-23T19:00"}]"""),

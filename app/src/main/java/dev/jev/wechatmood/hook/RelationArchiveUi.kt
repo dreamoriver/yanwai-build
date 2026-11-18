@@ -181,7 +181,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             if (removed) append("已移出") else append(if (fact.source == "manual") "手动添加" else "自动整理")
             if (fact.occurredAt > 0) {
                 if (isNotEmpty()) append(" · ")
-                append(FactTimes.formatLocal(fact.occurredAt, "MM-dd HH:mm"))
+                append(FactTimes.label(fact.occurredAt))
             }
         }
         val card = LinearLayout(activity).apply {
@@ -224,7 +224,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
     }
 
     private fun confirmDelete(fact: RelationFact) {
-        kit.picker("彻底删除「${fact.text}」？", listOf("删除，以后整理也不再出现", "取消")) { index ->
+        // 只放一个选项，取消交给 picker 自带的居中按钮，不再出现两个「取消」。
+        kit.picker("彻底删除「${fact.text}」？", listOf("删除，以后整理也不再出现")) { index ->
             if (index == 0) remove(fact)
         }
     }

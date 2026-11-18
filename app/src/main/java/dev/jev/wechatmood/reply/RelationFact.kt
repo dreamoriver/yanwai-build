@@ -117,6 +117,37 @@ object FactTimes {
 
     fun dayKey(value: Long): String = formatLocal(value, "yyyy-MM-dd")
 
+    /** 抽取时只说了日期会写成 00:00；这种条目的“几点”是假的，界面不该显示成零点。 */
+    fun hasClock(value: Long): Boolean {
+        if (value <= 0) return false
+        val calendar = Calendar.getInstance().apply { timeInMillis = value }
+        return calendar.get(Calendar.HOUR_OF_DAY) != 0 || calendar.get(Calendar.MINUTE) != 0
+    }
+
+    fun startOfDay(value: Long): Long = Calendar.getInstance().apply {
+        timeInMillis = value
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    /** 今日／明日／昨天，其余写日期；只到日的不补 00:00。 */
+    fun label(value: Long, now: Long = System.currentTimeMillis()): String {
+        if (value <= 0) return "时间未知"
+        val days = ((startOfDay(value) - startOfDay(now)) / 86_400_000L).toInt()
+        val day = when (days) {
+            0 -> "今天"
+            1 -> "明天"
+            -1 -> "昨天"
+            else -> formatLocal(value, "MM-dd E")
+        }
+        return if (hasClock(value)) day + " " + formatLocal(value, "HH:mm") else day
+    }
+
+    /** 只说到日的条目，到当天结束才算过期，不能拿 00:00 和现在比。 */
+    fun overdue(value: Long, now: Long = System.currentTimeMillis()): Boolean {
+        if (value <= 0) return false
+        return if (hasClock(value)) value < now else startOfDay(value) < startOfDay(now)
+    }
+
     fun sameDay(left: Long, right: Long): Boolean {
         if (left <= 0 || right <= 0) return left == right
         val a = Calendar.getInstance().apply { timeInMillis = left }

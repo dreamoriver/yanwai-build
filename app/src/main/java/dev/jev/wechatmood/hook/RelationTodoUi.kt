@@ -2,6 +2,8 @@ package dev.jev.wechatmood.hook
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.Intent
+import android.provider.CalendarContract
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -19,7 +21,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Calendar
 
 /**
  * 待办窗口：对方说过的、带绝对时间的约定与重要日期。
@@ -115,8 +116,8 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         listContainer.removeAllViews()
         val now = System.currentTimeMillis()
         val todos = items.filter { it.isOpen && it.occurredAt > 0 }.sortedBy { it.occurredAt }
-        val overdue = todos.filter { it.occurredAt < now }
-        val upcoming = todos.filter { it.occurredAt >= now }
+        val overdue = todos.filter { FactTimes.overdue(it.occurredAt, now) }
+        val upcoming = todos.filter { !FactTimes.overdue(it.occurredAt, now) }
         val handled = items.filter { it.status == RelationFact.STATUS_DONE || it.status == RelationFact.STATUS_CANCELLED }
             .sortedByDescending { it.updatedAt }.take(HANDLED_LIMIT)
 
@@ -150,7 +151,7 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         }
         val head = buildString {
             append(fact.kind)
-            if (fact.occurredAt > 0) append(" · ").append(whenLabel(fact.occurredAt))
+            if (fact.occurredAt > 0) append(" · ").append(FactTimes.label(fact.occurredAt))
             when {
                 done -> append(" · 已完成")
                 cancelled -> append(" · 已移除")
@@ -174,16 +175,36 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         return card
     }
 
-    /** 只有三种出口：完成、否掉、恢复；作废条目由合并逻辑维护，不在这里改。 */
+    /** 出口：加到日历、完成、否掉；已处理的只留恢复。 */
     private fun ask(fact: RelationFact) {
-        val labels = if (fact.isOpen) listOf("标记为已完成", "不是这件事，移出待办") else listOf("恢复为待办")
+        val labels = if (fact.isOpen) listOf("加到系统日历", "标记为已完成", "不是这件事，移出待办")
+            else listOf("恢复为待办")
         kit.picker(fact.text, labels) { index ->
-            val status = when {
-                !fact.isOpen -> RelationFact.STATUS_ACTIVE
-                index == 0 -> RelationFact.STATUS_DONE
-                else -> RelationFact.STATUS_CANCELLED
+            when (labels.getOrNull(index)) {
+                "加到系统日历" -> addToCalendar(fact)
+                "标记为已完成" -> update(fact, RelationFact.STATUS_DONE)
+                "不是这件事，移出待办" -> update(fact, RelationFact.STATUS_CANCELLED)
+                "恢复为待办" -> update(fact, RelationFact.STATUS_ACTIVE)
             }
-            update(fact, status)
+        }
+    }
+
+    /** 走系统日历的插入界面：不申请日历权限，写不写由用户在日历里确认。 */
+    private fun addToCalendar(fact: RelationFact) {
+        val clock = FactTimes.hasClock(fact.occurredAt)
+        val begin = if (clock) fact.occurredAt else FactTimes.startOfDay(fact.occurredAt)
+        val end = if (clock) begin + 3_600_000L else begin + 86_400_000L
+        val intent = Intent(Intent.ACTION_INSERT).setData(CalendarContract.Events.CONTENT_URI)
+            .putExtra(CalendarContract.Events.TITLE, fact.text)
+            .putExtra(CalendarContract.Events.DESCRIPTION, "言外关系档案 · ${fact.kind}")
+            .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, begin)
+            .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, end)
+            .putExtra(CalendarContract.EXTRA_EVENT_ALL_DAY, !clock)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val opened = runCatching { activity.startActivity(intent); true }.getOrDefault(false)
+        if (!opened) {
+            MoodLog.w("RELATION_TODO_CALENDAR_FAILED")
+            kit.info("没找到系统日历", "这台手机上打不开日历的插入界面，可以手动新建一条。")
         }
     }
 
@@ -201,20 +222,6 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         }
     }
 
-    /** 今天、明天用相对说法，其余写日期与星期，避免把月日看错。 */
-    private fun whenLabel(value: Long): String {
-        if (value <= 0) return "时间未知"
-        val today = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-        val pattern = when {
-            value in today until today + DAY -> "今天 HH:mm"
-            value in today + DAY until today + 2 * DAY -> "明天 HH:mm"
-            else -> "MM-dd E HH:mm"
-        }
-        return FactTimes.formatLocal(value, pattern)
-    }
-
     private fun showStatus(text: String, color: Int) {
         statusText.text = text
         statusText.setTextColor(color)
@@ -228,7 +235,6 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
     private fun rowParams() = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = theme.dp(8) }
 
     private companion object {
-        const val DAY = 24 * 3600_000L
         const val HANDLED_LIMIT = 6
     }
 }
