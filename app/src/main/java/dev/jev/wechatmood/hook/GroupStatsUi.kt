@@ -288,15 +288,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val fromDb = names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
         val clean = (fromDb ?: raw).trim()
         // 空白、零宽、格式控制符都算「没有名字」，避免表格里出现空行。
-        val blanks = setOf('\u115F', '\u1160', '\u3164', '\uFFA0', '\u2800', '\u3000', '\u00A0',
-            '\u2007', '\u202F', '\u1680', '\u180E', '\u17B4', '\u17B5')
+        // 只把「真的能看见」的字符算名字：字母、数字、标点、符号。
+        // 组合符（U+FE0F 这类）和零宽连接符渲染出来是空白，必须排除。
         val visible = clean.any { ch ->
-            val type = Character.getType(ch)
-            ch !in blanks && !ch.isWhitespace() && !Character.isSpaceChar(ch) && !ch.isISOControl() &&
-                type != Character.FORMAT.toInt() && type != Character.UNASSIGNED.toInt()
+            val type = Character.getType(ch).toInt()
+            type in 1..5 || type in 9..11 || type in 20..30
         }
-        // wxid 说明数据库里没有可读名字，统一显示未获取昵称。
-        if (!visible || clean == "对方（群成员未知）") {
+        if (!visible || clean.startsWith("对方（群成员未知")) {
             if (clean.isNotEmpty()) {
                 val codes = clean.codePoints().toArray().take(8).joinToString(",")
                 dev.jev.wechatmood.core.MoodLog.w("STATS_BLANK_NAME len=${clean.length} codes=$codes")
