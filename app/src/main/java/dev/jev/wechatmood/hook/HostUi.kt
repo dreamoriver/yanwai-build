@@ -147,7 +147,8 @@ class HostUi(private val activity: Activity) {
         statsScope.launch {
             val since = StatsFilter.sinceMillis()
             val rows = runCatching {
-                ReplyDatabaseHistory.statMessages(context.talker, since, StatsFilter.limit)
+                ReplyDatabaseHistory.statMessages(context.talker, since,
+                    if (StatsFilter.limit == 0) 5000 else StatsFilter.limit)
             }.getOrDefault(emptyList())
             val mapped = rows.map {
                 dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,

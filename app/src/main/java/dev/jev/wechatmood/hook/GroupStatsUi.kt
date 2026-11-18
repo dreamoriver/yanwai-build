@@ -35,16 +35,20 @@ object StatsFilter {
     enum class Range(val label: String, val millis: Long) {
         HOUR("最近 1 小时", 60L * 60 * 1000),
         HOUR3("最近 3 小时", 3 * 60L * 60 * 1000),
+        HOUR12("最近 12 小时", 12 * 60L * 60 * 1000),
+        HOUR24("最近 24 小时", 24 * 60L * 60 * 1000),
         TODAY("今天", -1),
     }
     // 默认给一个保守范围，避免误点就把整段聊天送去分析。
     var range: Range = Range.TODAY
     var limit: Int = 20
-    val limitLabel: String get() = "最近 $limit 条"
+    val limitLabel: String get() = if (limit == 0) "该时段全部" else "最近 $limit 条"
 
     fun sinceMillis(now: Long = System.currentTimeMillis()): Long = when (range) {
         Range.HOUR -> now - Range.HOUR.millis
         Range.HOUR3 -> now - Range.HOUR3.millis
+        Range.HOUR12 -> now - Range.HOUR12.millis
+        Range.HOUR24 -> now - Range.HOUR24.millis
         Range.TODAY -> java.util.Calendar.getInstance().apply {
             set(java.util.Calendar.HOUR_OF_DAY, 0)
             set(java.util.Calendar.MINUTE, 0)
@@ -67,18 +71,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
 
     /** 按选择的时段与条数裁剪消息。 */
     private fun selectedMessages(): List<dev.jev.wechatmood.reply.ReplyMessage> {
-        val now = System.currentTimeMillis()
-        val since = when (StatsFilter.range) {
-            StatsFilter.Range.HOUR -> now - StatsFilter.Range.HOUR.millis
-            StatsFilter.Range.HOUR3 -> now - StatsFilter.Range.HOUR3.millis
-            StatsFilter.Range.TODAY -> {
-                val calendar = java.util.Calendar.getInstance()
-                calendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
-                calendar.set(java.util.Calendar.MINUTE, 0)
-                calendar.set(java.util.Calendar.SECOND, 0)
-                calendar.timeInMillis
-            }
-        }
+        val since = StatsFilter.sinceMillis()
         // 优先用数据库按时间查到的消息，页面上下文只有最近几十条。
         val source = dbMessages.ifEmpty { context.messages }
         val byTime = source.filter { it.time >= since }
@@ -119,7 +112,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         filters.addView(filterPill("条数 · ${StatsFilter.limitLabel}") { pickLimit() },
             LinearLayout.LayoutParams(0, theme.dp(34), 1f))
         body.addView(filters)
-        body.addView(caption("${StatsFilter.range.label} · 最近 ${StatsFilter.limit} 条内共 ${stats.total} 条$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
+        body.addView(caption("${StatsFilter.range.label} · ${StatsFilter.limitLabel} · 共 ${stats.total} 条$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
 
         val numbers = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -131,7 +124,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         numbers.addView(number("${stats.activeHours.size}", "个时段"), weight())
         body.addView(numbers, LinearLayout.LayoutParams(-1, theme.dp(72)))
 
-        body.addView(section("最活跃"), LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(6) })
+        body.addView(LinearLayout(activity), LinearLayout.LayoutParams(-1, theme.dp(6)))
         body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
         renderTop(emptyMap())
 
@@ -564,9 +557,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }
 
     private fun pickLimit() {
-        val options = listOf(10, 20, 50)
+        val options = listOf(10, 30, 50, 100, 0)
         android.app.AlertDialog.Builder(activity).setTitle("消息条数")
-            .setItems(options.map { "最近 $it 条" }.toTypedArray()) { _, which ->
+            .setItems(options.map { if (it == 0) "该时段全部" else "最近 $it 条" }.toTypedArray()) { _, which ->
                 StatsFilter.limit = options[which]
                 dev.jev.wechatmood.core.MoodLog.i("STATS_FILTER limit=${StatsFilter.limit}")
                 dialog?.dismiss()
