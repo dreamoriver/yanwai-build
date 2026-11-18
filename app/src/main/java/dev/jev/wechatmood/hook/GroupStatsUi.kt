@@ -73,7 +73,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         numbers.addView(number("${stats.activeHours.size}", "个时段"), weight())
         body.addView(numbers, LinearLayout.LayoutParams(-1, theme.dp(72)))
 
-        body.addView(section("最活跃"))
+        body.addView(section("最活跃"), LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(6) })
         body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
         renderTop(emptyMap())
 
@@ -211,20 +211,23 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         var unknown = 0
         for (member in stats.members) {
             val resolved = resolveName(member.name, names)
-            val shown = when {
+            val candidate = when {
                 resolved != null -> resolved
                 member.name.trim().let { it.startsWith("wxid_") || it.matches(Regex("[A-Za-z0-9_-]{16,}")) } ->
                     "未获取昵称#${++unknown}"
                 else -> "匿名成员#${++anonymous}"
             }
+            // 兜底：显示名不可见或没有实际字符时，也不要留空行。
+            val shown = candidate.takeIf { it.any { ch -> ch.isLetterOrDigit() } }
+                ?: "匿名成员#${++anonymous}"
             merged[shown] = (merged[shown] ?: 0) + member.count
         }
-        topContainer.addView(headerRow(), LinearLayout.LayoutParams(-1, theme.dp(28)))
+        topContainer.addView(headerRow(), LinearLayout.LayoutParams(-1, theme.dp(24)))
         val ordered = merged.entries.sortedByDescending { it.value }
         val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(ordered.map { it.value })
         ordered.take(12).forEachIndexed { index, entry ->
             topContainer.addView(tableRow(entry.key, "${entry.value}", "${percents[index]}%"),
-                LinearLayout.LayoutParams(-1, theme.dp(30)))
+                LinearLayout.LayoutParams(-1, theme.dp(26)))
         }
         if (ordered.size > 12) topContainer.addView(caption("另有 ${ordered.size - 12} 位成员未列出"))
     }
