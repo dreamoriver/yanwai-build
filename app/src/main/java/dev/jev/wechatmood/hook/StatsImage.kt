@@ -36,7 +36,7 @@ object StatsImage {
         val metaPaint = text(20f, MUTED)
 
         val bodyLines = analysis?.takeIf { it.isNotBlank() }?.let { wrap(it, bodyPaint, WIDTH - PAD * 2 - 48) } ?: emptyList()
-        val height = (PAD + 60 + 40 + 130 + 40 + stats.topSenders.size * 52 + 40 +
+        val height = (PAD + 60 + 40 + 130 + 40 + stats.topSenders.size * 64 + 40 +
             (if (bodyLines.isEmpty()) 0 else bodyLines.size * 44 + 90) + 60 + PAD).toInt().coerceAtLeast(900)
 
         val bitmap = Bitmap.createBitmap(WIDTH, height, Bitmap.Config.ARGB_8888)
@@ -66,14 +66,18 @@ object StatsImage {
         if (stats.topSenders.isNotEmpty()) {
             canvas.drawText("最活跃", PAD, y, labelPaint)
             y += 36
+            val max = stats.topSenders.first().second.coerceAtLeast(1)
             stats.topSenders.forEach { (name, count) ->
                 val shown = names[name] ?: name
                 canvas.drawText(shown.take(14), PAD, y, rowPaint)
                 val value = "$count 条"
                 canvas.drawText(value, WIDTH - PAD - rowValuePaint.measureText(value), y, rowValuePaint)
-                y += 52
+                // 条形长度按最高值归一，直观看出谁说得最多。
+                val barWidth = (WIDTH - PAD * 2) * (count.toFloat() / max)
+                canvas.drawRoundRect(PAD, y + 12, PAD + barWidth, y + 22, 5f, 5f, fillPaint(ACCENT))
+                y += 64
             }
-            y += 16
+            y += 12
         }
 
         if (bodyLines.isNotEmpty()) {

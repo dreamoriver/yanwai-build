@@ -99,6 +99,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             analysis.text = "正在分析…"
             scope.launch {
                 val text = runCatching { analyze(context) }.getOrElse { error ->
+                    dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED " + error.javaClass.simpleName + " " + error.message)
                     "分析失败：" + (error.message ?: "请重试")
                 }
                 analysis.text = text
@@ -196,7 +197,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 JSONObject(body).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content").trim()
             })
-        }.let(TextClean::plain).take(500)
+        }.let { raw ->
+            dev.jev.wechatmood.core.MoodLog.i("STATS_AI_OK chars=${raw.length}")
+            TextClean.plain(raw).take(500)
+        }
     }
 
     private fun copy(text: String) {

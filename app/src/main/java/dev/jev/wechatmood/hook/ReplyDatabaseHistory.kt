@@ -154,23 +154,37 @@ object ReplyDatabaseHistory {
         val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
         val result = mutableMapOf<String, String>()
         for (db in databases) {
+            val placeholders = wanted.joinToString(",") { "?" }
+            // 好友在 rcontact；群里的非好友通常在 stranger，两级兜底。
             runCatching {
-                val placeholders = wanted.joinToString(",") { "?" }
-                val cursor = query(db, "SELECT username, nickname, remark FROM rcontact WHERE username IN ($placeholders)",
-                    wanted.toTypedArray())
-                cursor.use {
-                    while (it.moveToNext()) {
-                        val username = runCatching { it.getString(0) }.getOrNull() ?: continue
-                        val nickname = runCatching { it.getString(1) }.getOrNull()
-                        val remark = runCatching { it.getString(2) }.getOrNull()
-                        val display = remark?.takeIf { value -> value.isNotBlank() }
-                            ?: nickname?.takeIf { value -> value.isNotBlank() }
-                            ?: username
-                        result[username] = display
+                query(db, "SELECT username, nickname, conRemark FROM rcontact WHERE username IN ($placeholders)",
+                    wanted.toTypedArray()).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val username = runCatching { cursor.getString(0) }.getOrNull() ?: continue
+                        val nickname = runCatching { cursor.getString(1) }.getOrNull()
+                        val remark = runCatching { cursor.getString(2) }.getOrNull()
+                        val display = remark?.takeIf { it.isNotBlank() }
+                            ?: nickname?.takeIf { it.isNotBlank() }
+                        if (display != null) result[username] = display
+                    }
+                }
+            }
+            val remaining = wanted.filter { it !in result }
+            if (remaining.isNotEmpty()) {
+                runCatching {
+                    val marks = remaining.joinToString(",") { "?" }
+                    query(db, "SELECT username, nickname FROM stranger WHERE username IN ($marks)",
+                        remaining.toTypedArray()).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            val username = runCatching { cursor.getString(0) }.getOrNull() ?: continue
+                            val nickname = runCatching { cursor.getString(1) }.getOrNull()
+                            if (!nickname.isNullOrBlank()) result[username] = nickname
+                        }
                     }
                 }
             }
         }
+        dev.jev.wechatmood.core.MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size}")
         result
     }
 
