@@ -82,9 +82,11 @@ object ModulePrefs {
         }
     }
     fun init(context: Context) {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
         val app = context.applicationContext ?: context
         this.context = app
-        AnalysisResultCache.init(app)
+        // 打开 SQLite 属于磁盘 IO，放到后台，别卡启动。
+        runCatching { java.util.concurrent.Executors.newSingleThreadExecutor().execute { AnalysisResultCache.init(app) } }
         UsageReporter.init(app)
         if (app.packageName == "com.tencent.mm" && conversations == null) {
             val local = app.getSharedPreferences("yanwai_conversations", Context.MODE_PRIVATE)
@@ -104,6 +106,7 @@ object ModulePrefs {
             }
             requestReload(force = true)
         } else reload(force = true)
+        MoodLog.i("STARTUP_PREFS took=${android.os.SystemClock.elapsedRealtime() - startedAt}ms")
     }
 
     private fun cachedSnapshot(): RuntimeSettings? = runCatching {
