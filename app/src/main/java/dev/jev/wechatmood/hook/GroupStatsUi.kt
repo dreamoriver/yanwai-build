@@ -195,8 +195,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         dialog.setOnDismissListener { scope.cancel() }
         dialog.show()
 
-        // 昵称在数据库里，异步查一次再替换 wxid。
+        // 昵称在数据库里，异步查一次再替换 wxid；顺便记一次表名，方便确认字段位置。
         scope.launch {
+            runCatching { ReplyDatabaseHistory.tableNames() }
             val names = runCatching {
                 ReplyDatabaseHistory.displayNames(stats.topSenders.map { it.first })
             }.getOrDefault(emptyMap())
@@ -447,14 +448,15 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 val choice = JSONObject(body).getJSONArray("choices").getJSONObject(0)
                 val message = choice.getJSONObject("message")
                 val content = message.optString("content").trim()
+                val reasoning = message.optString("reasoning_content").trim()
                 val finish = choice.optString("finish_reason")
-                // 推理型模型常把内容放在 reasoning_content，content 为空。
-                val text = content.ifBlank { message.optString("reasoning_content").trim() }
                 dev.jev.wechatmood.core.MoodLog.i(
-                    "STATS_RAW $label content=${content.length} reasoning=${message.optString("reasoning_content").length} finish=$finish")
-                text
+                    "STATS_RAW $label content=${content.length} reasoning=${reasoning.length} finish=$finish")
+                // 只取正文：reasoning_content 是模型的思考过程，不能当答案。
+                content
             })
         }
+        check(raw.isNotBlank()) { "模型只返回了思考过程，没给正文；换一个非推理模型试试" }
         val clean = TextClean.plain(raw).take(220)
         dev.jev.wechatmood.core.MoodLog.i("STATS_SECTION $label chars=${clean.length}")
         return clean

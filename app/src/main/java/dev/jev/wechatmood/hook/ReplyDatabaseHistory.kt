@@ -147,6 +147,23 @@ object ReplyDatabaseHistory {
         }
     }.getOrNull()
 
+    /** 诊断用：列出主库的表名，便于确认群昵称实际存在哪张表。 */
+    suspend fun tableNames(): List<String> = withContext(Dispatchers.IO) {
+        val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        val names = mutableListOf<String>()
+        for (db in databases) {
+            runCatching {
+                query(db, "SELECT name FROM sqlite_master WHERE type='table'", emptyArray()).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        cursor.getString(0)?.let { names += it }
+                    }
+                }
+            }
+        }
+        dev.jev.wechatmood.core.MoodLog.i("STATS_TABLES count=${names.size} names=${names.take(40)}")
+        names
+    }
+
     /** 群成员昵称：把 wxid 换成备注或昵称，查不到就保持原样。 */
     suspend fun displayNames(usernames: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
         val wanted = usernames.filter { it.isNotBlank() }.distinct()
