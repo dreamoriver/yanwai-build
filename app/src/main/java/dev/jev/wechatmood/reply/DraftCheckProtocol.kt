@@ -20,7 +20,10 @@ object DraftCheckProtocol {
 判断：一句话说明 draft 和这段对话的关系；focus 是图片时，先用十个字左右描述图里是什么
 问题：最多两条，用「；」分隔；确实没有就写「无」
 改写：一条能直接替换 draft 发出去的话，沿用 my_style 的句长和标点，最多 30 字；即使这句没问题，也要给一条更自然的说法
-要求：不要推测对方心理；不要编造没出现过的信息；改写必须能直接发送，不要加「你可以说」这类前缀。"""
+要求：
+- 不要在回答里出现 draft、focus、last_incoming、my_style 这些字段名，用「你打的这句」「对方发的这张图」这类自然说法
+- 不要推测对方心理；不要编造没出现过的信息
+- 改写必须能直接发送，不要加「你可以说」这类前缀"""
 
     fun payload(settings: ReplySettings, context: ReplyContext, draft: String,
         relationship: ReplyRelationship, customRelationship: String = "", image: String? = null): JSONObject {
@@ -46,6 +49,12 @@ object DraftCheckProtocol {
             .put("draft", draft.take(500))
         dev.jev.wechatmood.core.MoodLog.i("DRAFT_FOCUS id=${context.focusMessageId} media=${context.targetMedia} " +
             "text=${context.focusText != null} msgs=${context.messages.size}")
+        // 图片没取到时明确写出来，别让模型凭上下文编造图里是什么。
+        if (image == null && context.targetMedia != null) {
+            evidence.put("focus", JSONObject().put("id", context.focusMessageId).put("type", "media")
+                .put("media", context.targetMedia)
+                .put("note", "对方发来一张${context.targetMedia}，但这次没取到图片内容，只能按上下文判断，不要编造图里是什么"))
+        }
         val userMessage = if (image != null) JSONObject().put("role", "user").put("content", JSONArray()
             .put(JSONObject().put("type", "text").put("text", evidence.toString()))
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image))))

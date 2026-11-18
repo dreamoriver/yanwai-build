@@ -625,6 +625,11 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 return
             }
             state.text = "正在检查这句…"
+            // 先清掉上一次的卡片，避免新结果和旧结论混在一起。
+            draftPanel.visibility = View.GONE
+            draftIssues.text = ""
+            draftRewrite.text = ""
+            lastRewrite = null
             busy = true; controls(true)
             scope.launch {
                 try {
