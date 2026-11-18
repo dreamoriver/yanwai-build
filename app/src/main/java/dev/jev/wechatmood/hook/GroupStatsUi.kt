@@ -70,10 +70,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         numbers.addView(number("${stats.senders}", "人发言"), weight())
         numbers.addView(number("${stats.media + stats.voice}", "图片语音"), weight())
         numbers.addView(number("${stats.activeHours.size}", "个时段"), weight())
-        body.addView(numbers)
+        body.addView(numbers, LinearLayout.LayoutParams(-1, theme.dp(84)))
 
         body.addView(section("最活跃"))
-        body.addView(topContainer)
+        body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
         renderTop(emptyMap())
 
         if (stats.activeHours.isNotEmpty()) {
@@ -87,6 +87,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
             background = theme.shape(theme.card, 14, theme.border)
             visibility = View.GONE
+            minHeight = theme.dp(72)
             setLineSpacing(0f, 1.25f)
         }
         body.addView(analysis, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
@@ -102,7 +103,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                     dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED " + error.javaClass.simpleName + " " + error.message)
                     "分析失败：" + (error.message ?: "请重试")
                 }
-                analysis.text = text
+                analysis.text = text.ifBlank { "模型没有返回内容，可以再点一次试试" }
                 aiButton.text = "重新分析"
                 aiButton.isEnabled = true
             }
@@ -163,7 +164,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             return
         }
         stats.topSenders.forEach { (name, count) ->
-            topContainer.addView(row(names[name] ?: name, "$count 条"))
+            val shown = (names[name] ?: name).trim().takeIf { it.isNotEmpty() } ?: "群成员"
+            topContainer.addView(row(shown, "$count 条"), LinearLayout.LayoutParams(-1, theme.dp(44)))
         }
     }
 
