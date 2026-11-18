@@ -138,6 +138,8 @@ class HostUi(private val activity: Activity) {
     /** 群聊统计：按选择的时段从数据库取，不再只看已加载的几十条。 */
     private fun showStats() {
         val context = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
+        dev.jev.wechatmood.core.MoodLog.i(
+            "STATS_OPEN ok=${context != null} msgs=${context?.messages?.size ?: -1} talker=${context?.talker?.hashCode()}")
         if (context == null || context.messages.isEmpty()) {
             Toast.makeText(activity, "先在聊天页等一会儿，再打开统计", Toast.LENGTH_SHORT).show()
             return
