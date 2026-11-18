@@ -130,11 +130,16 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             LinearLayout.LayoutParams(0, theme.dp(44), 1f))
         body.addView(actions)
 
-        dialog.setContentView(body)
+        val scroll = android.widget.ScrollView(activity).apply {
+            isFillViewport = false
+            addView(body)
+        }
+        dialog.setContentView(scroll)
+        val screenHeight = activity.resources.displayMetrics.heightPixels
         dialog.window?.apply {
             setBackgroundDrawableResource(android.R.color.transparent)
             setGravity(Gravity.BOTTOM)
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (screenHeight * 0.82).toInt())
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setDimAmount(0.32f)
         }
@@ -246,7 +251,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private fun row(name: String, value: String) = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, theme.dp(4), 0, theme.dp(4))
+        minimumHeight = theme.dp(40)
+        setPadding(0, theme.dp(2), 0, theme.dp(2))
         addView(TextView(activity).apply {
             text = name
             textSize = 13f
@@ -256,6 +262,6 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             text = value
             textSize = 13f
             setTextColor(theme.muted)
-        })
+        }, LinearLayout.LayoutParams(-2, -2))
     }
 }
