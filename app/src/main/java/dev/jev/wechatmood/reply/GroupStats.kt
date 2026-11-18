@@ -84,9 +84,8 @@ object GroupStatsCalculator {
                 if (record.time < earliest) earliest = record.time
                 if (record.time > latest) latest = record.time
             }
-            if (record.send != 0) continue
-            // 私聊里对方就叫「对方」，也要算一个人，否则群人数会是 0。
-            val name = displayName(record)
+            // 「我」也进成员表，否则会以为自己的消息没统计。
+            val name = if (record.send == 1) "我" else displayName(record)
             val member = members.getOrPut(name) { MutableMember(name) }
             member.count++
             when (record.type) {

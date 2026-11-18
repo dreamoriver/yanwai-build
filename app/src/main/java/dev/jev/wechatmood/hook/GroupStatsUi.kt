@@ -117,7 +117,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         filters.addView(filterPill("条数 · ${StatsFilter.limitLabel}") { pickLimit() },
             LinearLayout.LayoutParams(0, theme.dp(34), 1f))
         body.addView(filters)
-        body.addView(caption("${StatsFilter.range.label} · ${StatsFilter.limitLabel} · 共 ${stats.total} 条$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
+        val windowText = when (StatsFilter.range) {
+            StatsFilter.Range.TODAY -> "今天 00:00–现在"
+            else -> StatsFilter.range.label
+        }
+        body.addView(caption("$windowText · ${StatsFilter.limitLabel} · 共 ${stats.total} 条 · 人均 ${stats.perCapita} 条 · 只在本机计算"))
+        body.addView(caption("数据范围 $span"))
 
         val numbers = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -289,7 +294,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             ch !in blanks && !ch.isWhitespace() && !Character.isSpaceChar(ch) && !ch.isISOControl() &&
                 type != Character.FORMAT.toInt() && type != Character.UNASSIGNED.toInt()
         }
-        if (!visible || clean == "对方（群成员未知）" || clean.equals("null", true)) return null
+        // wxid 说明数据库里没有可读名字，统一显示未获取昵称。
+        if (!visible || clean == "对方（群成员未知）") return null
+        if (clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))) return null
         return shorten(clean)
     }
 
@@ -524,7 +531,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         dialog?.dismiss()
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             GroupStatsUi(activity, context).show()
-        }, 220)
+        }, 400)
     }
 
     private fun pickRange() {
