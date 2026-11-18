@@ -35,6 +35,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private val stats: GroupStats
     private val topContainer = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
     private var currentNames: Map<String, String> = emptyMap()
+    private var analysisText: String = ""
 
     init {
         val records = context.messages.map {
@@ -81,29 +82,42 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             body.addView(caption(stats.activeHours.joinToString("、") { "${it} 点" }))
         }
 
-        val analysis = TextView(activity).apply {
-            textSize = 13f
-            setTextColor(theme.ink)
-            setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
-            background = theme.shape(theme.card, 14, theme.border)
+        val analysisBox = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            minHeight = theme.dp(72)
-            setLineSpacing(0f, 1.25f)
         }
-        body.addView(analysis, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
+        body.addView(analysisBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
+        analysisText = ""
+
+        fun showAnalysis(text: String) {
+            analysisText = text
+            analysisBox.removeAllViews()
+            analysisBox.visibility = View.VISIBLE
+            val sections = splitSections(text)
+            if (sections.isEmpty()) {
+                analysisBox.addView(panel("分析", text))
+                return
+            }
+            sections.forEachIndexed { index, (label, content) ->
+                // 默认只展开前两块，其余折起来，避免一屏全是字。
+                val card = panel(label, content, collapsed = index >= 2)
+                analysisBox.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
+            }
+        }
 
         lateinit var aiButton: TextView
         aiButton = theme.action("让 AI 说说这群在聊什么", primary = true) {
             aiButton.isEnabled = false
             aiButton.text = "正在分析…"
-            analysis.visibility = View.VISIBLE
-            analysis.text = "正在分析…"
+            analysisBox.visibility = View.VISIBLE
+            analysisBox.removeAllViews()
+            analysisBox.addView(panel("分析", "正在分析…"))
             scope.launch {
                 val text = runCatching { analyze(context) }.getOrElse { error ->
                     dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED " + error.javaClass.simpleName + " " + error.message)
                     "分析失败：" + (error.message ?: "请重试")
                 }
-                analysis.text = text.ifBlank { "模型没有返回内容，可以再点一次试试" }
+                showAnalysis(text.ifBlank { "模型没有返回内容，可以再点一次试试" })
                 aiButton.text = "重新分析"
                 aiButton.isEnabled = true
             }
@@ -115,11 +129,11 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setPadding(0, theme.dp(10), 0, 0)
         }
         actions.addView(theme.action("复制", quiet = true) {
-            copy(exportText(analysis.text?.toString().orEmpty()))
+            copy(exportText(analysisText))
         }, LinearLayout.LayoutParams(0, theme.dp(44), 1f))
         actions.addView(theme.action("生成图片", quiet = true) {
-            val summary = analysis.text?.toString()?.takeIf {
-                it.isNotBlank() && !it.startsWith("正在") && !it.startsWith("分析失败")
+            val summary = analysisText.takeIf {
+                it.isNotBlank() && !it.startsWith("分析失败")
             }
             val bitmap = StatsImage.render(stats, currentNames, summary, "群聊统计")
             val uri = StatsImage.save(activity, bitmap)
@@ -166,9 +180,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val shown = stats.members.take(10)
         val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(shown.map { it.count })
         shown.forEachIndexed { index, member ->
-            val name = displayName(names[member.name] ?: member.name)
+            val name = displayName(member.name, index + 1, names)
             val media = member.media + member.voice
-            val row = tableRow(name, "${member.count} 条", "${percents[index]}%", if (media > 0) "$media" else "-")
+            val hourText = member.hours.joinToString(",") { "$it" }.ifBlank { "-" }
+            val row = tableRow(name, "${member.count} 条", "${percents[index]}%", if (media > 0) "$media" else "-", hourText)
             row.setOnClickListener { showMemberDetail(member, name) }
             topContainer.addView(row, LinearLayout.LayoutParams(-1, theme.dp(34)))
         }
@@ -195,14 +210,84 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             .show()
     }
 
-    /** 空名字、纯符号的昵称统一显示成「匿名成员」。 */
-    private fun displayName(raw: String): String {
+    /** 按标签把分析拆成独立板块，模型没按格式写时整段作为一个板块。 */
+    private fun splitSections(text: String): List<Pair<String, String>> {
+        val labels = listOf("氛围" to "群氛围", "话题" to "核心话题", "角色" to "成员角色",
+            "互动" to "互动关系", "风险" to "风险提示", "建议" to "沟通建议")
+        val result = mutableListOf<Pair<String, String>>()
+        var currentLabel: String? = null
+        val buffer = StringBuilder()
+        fun flush() {
+            val label = currentLabel ?: return
+            val body = buffer.toString().trim()
+            if (body.isNotBlank()) result += label to body
+            buffer.clear()
+        }
+        for (line in text.lines()) {
+            var clean = line.trim()
+            for (emoji in listOf("📊", "💬", "👥", "🤝", "⚠️", "⚠", "💡", "🟢", "🟡", "🔵")) {
+                clean = clean.removePrefix(emoji).trim()
+            }
+            val hit = labels.firstOrNull { (key, _) -> clean.startsWith(key) }
+            if (hit != null) {
+                flush()
+                currentLabel = hit.second
+                buffer.append(clean.removePrefix(hit.first).trimStart('：', ':', ' '))
+            } else if (currentLabel != null && clean.isNotEmpty()) {
+                if (buffer.isNotEmpty()) buffer.append('\n')
+                buffer.append(clean)
+            }
+        }
+        flush()
+        return result
+    }
+
+    /** 分析板块卡片：点标题折叠展开。 */
+    private fun panel(label: String, content: String, collapsed: Boolean = false): LinearLayout {
+        val card = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
+            background = theme.shape(theme.card, 14, theme.border)
+        }
+        val title = TextView(activity).apply {
+            text = label
+            textSize = 14f
+            setTextColor(theme.ink)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        val body = TextView(activity).apply {
+            this.text = content
+            textSize = 13f
+            setTextColor(theme.ink)
+            setPadding(0, theme.dp(4), 0, 0)
+            setLineSpacing(0f, 1.25f)
+        }
+        card.addView(title)
+        card.addView(body)
+        if (collapsed) body.visibility = View.GONE
+        title.setOnClickListener {
+            body.visibility = if (body.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        return card
+    }
+
+    /**
+     * 昵称显示规则：
+     * 1. 数据库里查到备注/昵称就用它
+     * 2. 查不到且看着像 wxid，标成「未获取昵称#N」，不裸奔原始 id
+     * 3. 空白或纯符号，标成「匿名成员#N」，多个空名也能区分
+     */
+    private fun displayName(raw: String, index: Int, names: Map<String, String>): String {
+        val resolved = names[raw]?.trim()?.takeIf { it.count { ch -> ch.isLetterOrDigit() } >= 2 }
+        if (resolved != null) return if (resolved.length > 12) resolved.take(12) + "…" else resolved
         val clean = raw.trim()
-        if (clean.isEmpty() || clean.count { it.isLetterOrDigit() } < 2) return dev.jev.wechatmood.reply.GroupStatsCalculator.UNKNOWN
+        val looksLikeId = clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))
+        if (looksLikeId) return "未获取昵称#$index"
+        if (clean.count { it.isLetterOrDigit() } < 2) return "匿名成员#$index"
         return if (clean.length > 12) clean.take(12) + "…" else clean
     }
 
-    private fun tableRow(name: String, count: String, percent: String, media: String) = LinearLayout(activity).apply {
+    private fun tableRow(name: String, count: String, percent: String, media: String, hours: String) = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         addView(TextView(activity).apply {
@@ -230,6 +315,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setTextColor(theme.muted)
             gravity = Gravity.END
         }, LinearLayout.LayoutParams(theme.dp(40), -2))
+        addView(TextView(activity).apply {
+            text = hours
+            textSize = 12f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(64), -2))
     }
 
     private fun exportText(analysis: String): String = buildString {
