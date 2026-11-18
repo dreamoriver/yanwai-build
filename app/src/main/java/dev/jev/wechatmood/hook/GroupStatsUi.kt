@@ -24,9 +24,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+
+/** 分析范围：进程内记住上次选择，重开窗口沿用。 */
+object StatsFilter {
+    enum class Range(val label: String, val millis: Long) {
+        HOUR("最近 1 小时", 60L * 60 * 1000),
+        HOUR3("最近 3 小时", 3 * 60L * 60 * 1000),
+        TODAY("今天", -1),
+        ALL("全部加载", 0),
+    }
+    var range: Range = Range.ALL
+    var limit: Int = 0  // 0 表示不限制
+    val limitLabel: String get() = if (limit == 0) "全部" else "最近 $limit 条"
+}
 
 /** 群聊统计窗口：数字 + 活跃成员 + 一次 AI 解读，结果可复制。 */
 internal class GroupStatsUi(private val activity: Activity, private val context: ReplyContext) {
@@ -36,9 +51,29 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private val topContainer = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
     private var currentNames: Map<String, String> = emptyMap()
     private var analysisText: String = ""
+    private var dialog: Dialog? = null
+
+    /** 按选择的时段与条数裁剪消息。 */
+    private fun selectedMessages(): List<dev.jev.wechatmood.reply.ReplyMessage> {
+        val now = System.currentTimeMillis()
+        val since = when (StatsFilter.range) {
+            StatsFilter.Range.HOUR -> now - StatsFilter.Range.HOUR.millis
+            StatsFilter.Range.HOUR3 -> now - StatsFilter.Range.HOUR3.millis
+            StatsFilter.Range.TODAY -> {
+                val calendar = java.util.Calendar.getInstance()
+                calendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
+                calendar.set(java.util.Calendar.MINUTE, 0)
+                calendar.set(java.util.Calendar.SECOND, 0)
+                calendar.timeInMillis
+            }
+            StatsFilter.Range.ALL -> 0
+        }
+        val byTime = context.messages.filter { it.time >= since }
+        return if (StatsFilter.limit > 0) byTime.takeLast(StatsFilter.limit) else byTime
+    }
 
     init {
-        val records = context.messages.map {
+        val records = selectedMessages().map {
             StatRecord(it.time, if (it.speaker == "我") 1 else 0, 1, it.text, it.speaker)
         }
         val base = GroupStatsCalculator.compute(records, sampled = context.trimmed)
@@ -49,7 +84,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
 
     fun show() {
         lateinit var scroll: android.widget.ScrollView
-        val dialog = Dialog(activity)
+        val dialog = Dialog(activity).also { this.dialog = it }
         val body = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(theme.dp(20), theme.dp(18), theme.dp(20), theme.dp(18))
@@ -62,7 +97,16 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             val format = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
             " · " + format.format(java.util.Date(first)) + "–" + format.format(java.util.Date(last))
         } else ""
-        body.addView(caption("最近 ${context.messages.size} 条消息$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
+        val filters = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, theme.dp(10), 0, 0)
+        }
+        filters.addView(filterPill("时段 · ${StatsFilter.range.label}") { pickRange() },
+            LinearLayout.LayoutParams(0, theme.dp(34), 1f).apply { rightMargin = theme.dp(8) })
+        filters.addView(filterPill("条数 · ${StatsFilter.limitLabel}") { pickLimit() },
+            LinearLayout.LayoutParams(0, theme.dp(34), 1f))
+        body.addView(filters)
+        body.addView(caption("当前 ${stats.total} 条消息$span · 人均 ${stats.perCapita} 条 · 只在本机计算"))
 
         val numbers = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -132,15 +176,23 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 bodies[label] = body
             }
             scope.launch {
-                var done = 0
-                for ((label, instruction) in sections) {
-                    aiButton.text = "正在分析 ${++done}/${sections.size}"
-                    val text = runCatching { analyzeSection(context, label, instruction) }.getOrElse { error ->
-                        dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED $label " + error.message)
-                        "（失败：" + (error.message ?: "未知原因") + "）"
+                val finished = java.util.concurrent.atomic.AtomicInteger(0)
+                val gate = kotlinx.coroutines.sync.Semaphore(3)
+                val jobs = sections.map { (label, instruction) ->
+                    launch {
+                        gate.withPermit {
+                            val text = runCatching { analyzeSection(context, label, instruction) }.getOrElse { error ->
+                                dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED $label " + error.message)
+                                "（失败：" + (error.message ?: "未知原因") + "）"
+                            }
+                            withContext(Dispatchers.Main) {
+                                bodies[label]?.text = text.ifBlank { "（模型返回空内容）" }
+                                aiButton.text = "正在分析 ${finished.incrementAndGet()}/${sections.size}"
+                            }
+                        }
                     }
-                    bodies[label]?.text = text.ifBlank { "（模型返回空内容）" }
                 }
+                jobs.joinAll()
                 analysisText = bodies.entries.joinToString("\n") { "${it.key}：${it.value.text}" }
                 aiButton.text = "重新分析"
                 aiButton.isEnabled = true
@@ -478,6 +530,34 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         (activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             .setPrimaryClip(ClipData.newPlainText("言外统计", text))
         Toast.makeText(activity, "已复制", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun filterPill(label: String, action: () -> Unit): TextView =
+        theme.action(label, quiet = true) { action() }.apply {
+            textSize = 12f
+            minHeight = theme.dp(34)
+            setPadding(theme.dp(8), 0, theme.dp(8), 0)
+        }
+
+    private fun pickRange() {
+        val values = StatsFilter.Range.values()
+        android.app.AlertDialog.Builder(activity).setTitle("分析时段")
+            .setItems(values.map { it.label }.toTypedArray()) { _, which ->
+                StatsFilter.range = values[which]
+                dialog?.dismiss()
+                GroupStatsUi(activity, context).show()
+            }.setNegativeButton("取消", null).show()
+    }
+
+    private fun pickLimit() {
+        val options = listOf(0, 10, 20, 50)
+        val labels = options.map { if (it == 0) "全部加载" else "最近 $it 条" }.toTypedArray()
+        android.app.AlertDialog.Builder(activity).setTitle("消息条数")
+            .setItems(labels) { _, which ->
+                StatsFilter.limit = options[which]
+                dialog?.dismiss()
+                GroupStatsUi(activity, context).show()
+            }.setNegativeButton("取消", null).show()
     }
 
     private fun weight() = LinearLayout.LayoutParams(0, -2, 1f)
