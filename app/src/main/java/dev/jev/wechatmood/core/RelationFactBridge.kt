@@ -22,6 +22,28 @@ object RelationFactBridge {
     }.onFailure { MoodLog.w("RELATION_FACT_BRIDGE_FAIL load ${it.javaClass.simpleName}: ${it.message}") }
         .getOrDefault(emptyList())
 
+    /** 含已完成、已否掉与已作废的条目，待办窗口用它在底部列「已处理」。 */
+    fun loadAll(context: Context, key: ReplyContactKey): List<RelationFact> = runCatching {
+        val bundle = SettingsTransport.call(context, "relation_facts_get", key.value,
+            Bundle().apply {
+                putBoolean("all", true)
+                generation()?.let { putString(SettingsProvider.KEY_GENERATION, it) }
+            }) ?: return emptyList()
+        decode(bundle.getStringArrayList("facts").orEmpty())
+    }.onFailure { MoodLog.w("RELATION_FACT_BRIDGE_FAIL loadAll ${it.javaClass.simpleName}: ${it.message}") }
+        .getOrDefault(emptyList())
+
+    /** 手动标记完成或否掉一条事实；失败时返回 false，界面据此提示重试。 */
+    fun setStatus(context: Context, key: ReplyContactKey, factId: String, status: String): Boolean = runCatching {
+        val result = SettingsTransport.call(context, "relation_facts_status", key.value, Bundle().apply {
+            putString("fact_id", factId)
+            putString("status", status)
+            generation()?.let { putString(SettingsProvider.KEY_GENERATION, it) }
+        })
+        result?.getBoolean("saved") == true
+    }.onFailure { MoodLog.w("RELATION_FACT_BRIDGE_FAIL status ${it.javaClass.simpleName}: ${it.message}") }
+        .getOrDefault(false)
+
     fun meta(context: Context, key: ReplyContactKey): RelationMeta = runCatching {
         val bundle = SettingsTransport.call(context, "relation_facts_get", key.value,
             Bundle().apply { generation()?.let { putString(SettingsProvider.KEY_GENERATION, it) } }) ?: return RelationMeta()

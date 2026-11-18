@@ -53,9 +53,10 @@ class SettingsProvider : ContentProvider() {
                 }
                 // 关系档案的开关与读写都在设置服务里完成。之前漏了这条路由，
                 // 微信侧每次调用都落到下面的 Unknown method，被 RelationFactBridge 的 runCatching 吞掉。
-                "relation_facts_enabled", "relation_facts_get", "relation_facts_put", "relation_facts_clear" -> {
+                "relation_facts_enabled", "relation_facts_get", "relation_facts_put", "relation_facts_clear",
+                "relation_facts_status" -> {
                     val result = ReplyIdentityProvider.call(ctx, caller, method, arg, extras)
-                    if (method.endsWith("_put")) {
+                    if (method.endsWith("_put") || method == "relation_facts_status") {
                         runCatching { ctx.contentResolver.notifyChange(ReplyIdentityProvider.CHANGES_URI, null) }
                     }
                     result

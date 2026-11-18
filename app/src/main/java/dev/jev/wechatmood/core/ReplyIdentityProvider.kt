@@ -98,6 +98,15 @@ object ReplyIdentityProvider {
                 storage(context).facts.clear(key)
                 Bundle()
             }
+            "relation_facts_status" -> {
+                val factId = requireNotNull(extras?.getString("fact_id")).trim()
+                val status = requireNotNull(extras?.getString("status")).trim()
+                // 精确匹配单条事实；找不到说明档案已经被下一次抽取改过，让界面刷新而不是硬写。
+                check(storage(context).facts.setStatus(key, factId, status)) {
+                    if (status !in RelationFact.MANUAL_STATUSES) "不支持的状态：$status" else "这条已经变化，请重新打开"
+                }
+                Bundle().apply { putBoolean("saved", true) }
+            }
             "reply_role_put" -> {
                 val applied = storage(context).roles.saveFromChat(key,
                     ReplyIdentitySetting.decode(requireNotNull(extras?.getString("identity"))),

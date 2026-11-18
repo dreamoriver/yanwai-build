@@ -23,6 +23,7 @@ internal class FeaturePanel(
     private val onTopics: () -> Unit,
     private val onStats: () -> Unit,
     private val onFacts: () -> Unit,
+    private val onTodos: () -> Unit,
     private val onAnalysisChanged: (Boolean) -> Unit,
 ) {
     private val kit = PanelKit(activity)
@@ -47,7 +48,10 @@ internal class FeaturePanel(
             body.addView(item("找找话题", "聊不下去时给几个新方向", onTopics))
         }
         body.addView(item("群聊统计", "消息量、活跃成员与时段", onStats))
-        if (factsAvailable) body.addView(item("关系档案", "整理过的事实，可删除", onFacts))
+        if (factsAvailable) {
+            body.addView(item("关系档案", "整理过的事实，可删除", onFacts))
+            body.addView(item("待办", "带时间的约定与重要日期", onTodos))
+        }
 
         body.addView(kit.divider(), LinearLayout.LayoutParams(-1, 1).apply { topMargin = theme.dp(12) })
 

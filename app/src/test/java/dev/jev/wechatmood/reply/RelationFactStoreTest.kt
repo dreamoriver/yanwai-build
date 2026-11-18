@@ -4,6 +4,7 @@ import dev.jev.wechatmood.core.PersistentAnalysisCacheTest
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -99,6 +100,44 @@ class RelationFactStoreTest {
         val facts = FactExtractor().parse(body("""[{"kind":"约定","text":"改天一起吃饭","occurred_at":"改天"}]"""))
         assertEquals(1, facts.size)
         assertEquals(0L, facts.single().occurredAt)
+    }
+
+    @Test fun `todo list only includes timed active promises`() {
+        val key = ReplyContactKey("d".repeat(64))
+        val store = RelationFactStore(db())
+        val soon = FactTimes.parseLocal("2026-11-20T19:00")
+        val later = FactTimes.parseLocal("2026-11-25T09:00")
+        store.replace(key, RelationFacts.merge(emptyList(), listOf(
+            RelationFact("约定", "周五一起吃饭", occurredAt = soon),
+            RelationFact("重要日期", "生日", occurredAt = later),
+            RelationFact("约定", "有空一起爬山"),
+            RelationFact("城市", "在杭州"),
+        ), 1000))
+
+        val todos = store.todos(key)
+        assertEquals(2, todos.size)
+        assertEquals(soon, todos.first().occurredAt)
+        assertEquals(later, todos.last().occurredAt)
+    }
+
+    @Test fun `manual status changes stick and superseded stays read only`() {
+        val key = ReplyContactKey("e".repeat(64))
+        val store = RelationFactStore(db())
+        val at = FactTimes.parseLocal("2026-11-20T19:00")
+        store.replace(key, listOf(RelationFact("约定", "周五一起吃饭", occurredAt = at)))
+        val id = store.todos(key).single().factId
+
+        assertTrue(store.setStatus(key, id, RelationFact.STATUS_DONE))
+        assertEquals(RelationFact.STATUS_DONE, store.listAll(key).single().status)
+        assertEquals(0, store.todos(key).size)
+
+        assertTrue(store.setStatus(key, id, RelationFact.STATUS_ACTIVE))
+        assertEquals(1, store.todos(key).size)
+
+        assertFalse(store.setStatus(key, id, RelationFact.STATUS_SUPERSEDED))
+        assertFalse(store.setStatus(key, id, "unknown"))
+        assertFalse(store.setStatus(key, "0".repeat(16), RelationFact.STATUS_DONE))
+        assertEquals(RelationFact.STATUS_ACTIVE, store.listAll(key).single().status)
     }
 
     @Test fun `clear removes everything`() {

@@ -125,6 +125,7 @@ class HostUi(private val activity: Activity) {
             onTopics = { replyUi.open(autoTopics = true) },
             onStats = { showStats() },
             onFacts = { replyUi.open() },
+            onTodos = { RelationTodoUi(activity, current).show() },
             onAnalysisChanged = { value ->
                 if (current != null) {
                     val saved = ModulePrefs.setChatEnabled(current, value)

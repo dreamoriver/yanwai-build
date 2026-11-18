@@ -59,6 +59,9 @@ data class RelationFact(
         const val STATUS_SUPERSEDED = "superseded"
         val STATUSES = setOf(STATUS_ACTIVE, STATUS_DONE, STATUS_CANCELLED, STATUS_SUPERSEDED)
 
+        /** 手动能改的只有这三种；superseded 是自动合并的结论，手改会让待办和档案对不上。 */
+        val MANUAL_STATUSES = setOf(STATUS_ACTIVE, STATUS_DONE, STATUS_CANCELLED)
+
         const val MAX_TEXT = 60
         internal val ID_PATTERN = Regex("[0-9a-f]{16}")
 
@@ -199,6 +202,33 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
     fun replace(key: ReplyContactKey, facts: List<RelationFact>) {
         db.execute("DELETE FROM relation_fact_items WHERE contact_key = ?", listOf(key.value))
         facts.forEach { upsert(key.value, it) }
+    }
+
+    /**
+     * 手动改一条事实的状态（完成、否掉、恢复），返回是否真的写进去。
+     *
+     * 只按 fact_id + contact_key 精确匹配，不做模糊匹配；superseded 保持只读，
+     * 否则会把已作废的旧约定重新翻出来，和新的那条同时出现在待办里。
+     */
+    fun setStatus(key: ReplyContactKey, factId: String, status: String): Boolean {
+        if (status !in RelationFact.MANUAL_STATUSES || !factId.matches(RelationFact.ID_PATTERN)) return false
+        val payload = db.query("SELECT payload FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?",
+            listOf(factId, key.value)) ?: return false
+        val fact = runCatching { RelationFact.decode(JSONObject(payload)) }.getOrNull() ?: return false
+        if (fact.status == RelationFact.STATUS_SUPERSEDED) return false
+        // 已经处于目标状态就不重复写，避免每次点都刷新 updated_at 把排序搅乱。
+        if (fact.status == status) return true
+        upsert(key.value, fact.copy(status = status, updatedAt = now()))
+        return true
+    }
+
+    /** 待办：带绝对时间的约定与重要日期，按时间先后排；过期不等于无效，由界面决定怎么显示。 */
+    fun todos(key: ReplyContactKey): List<RelationFact> {
+        val placeholders = RelationFact.TIMED_KINDS.joinToString(",") { "?" }
+        return db.queryRows("SELECT payload FROM relation_fact_items WHERE contact_key = ? AND status = 'active' " +
+            "AND kind IN ($placeholders) AND occurred_at > 0 ORDER BY occurred_at ASC",
+            listOf(key.value) + RelationFact.TIMED_KINDS.toList())
+            .mapNotNull { payload -> runCatching { RelationFact.decode(JSONObject(payload)) }.getOrNull() }
     }
 
     fun clear(key: ReplyContactKey) {
