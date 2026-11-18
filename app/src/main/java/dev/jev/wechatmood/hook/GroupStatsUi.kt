@@ -93,7 +93,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             analysisText = text
             analysisBox.removeAllViews()
             analysisBox.visibility = View.VISIBLE
-            val sections = splitSections(text)
+            val parsed = splitSections(text)
+            // 模型没按标签写时，本地按句子切成几块，至少不是一整段。
+            val sections = parsed.ifEmpty {
+                val sentences = text.split("。", "！", "？").map { it.trim() }.filter { it.isNotEmpty() }
+                sentences.chunked(2).mapIndexed { index, chunk ->
+                    "要点 ${index + 1}" to (chunk.joinToString("。") + "。")
+                }
+            }
             if (sections.isEmpty()) {
                 analysisBox.addView(panel("分析", text))
                 return
@@ -210,35 +217,32 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             .show()
     }
 
-    /** 按标签把分析拆成独立板块，模型没按格式写时整段作为一个板块。 */
+    /**
+     * 按标签把分析拆成板块。模型经常不换行，所以按关键词出现的位置切，
+     * 而不是按行切；没出现任何标签就返回空，交给句子兜底。
+     */
     private fun splitSections(text: String): List<Pair<String, String>> {
         val labels = listOf("氛围" to "群氛围", "话题" to "核心话题", "角色" to "成员角色",
             "互动" to "互动关系", "风险" to "风险提示", "建议" to "沟通建议")
+        val hits = mutableListOf<Triple<Int, Int, Pair<String, String>>>()
+        for ((key, label) in labels) {
+            val regex = Regex("[【\\[]?$key[】\\]]?[：:， ]")
+            var match = regex.find(text)
+            while (match != null) {
+                hits += Triple(match.range.first, match.range.last + 1, key to label)
+                match = regex.find(text, match.range.last + 1)
+            }
+        }
+        if (hits.isEmpty()) return emptyList()
+        val sorted = hits.sortedBy { it.first }
         val result = mutableListOf<Pair<String, String>>()
-        var currentLabel: String? = null
-        val buffer = StringBuilder()
-        fun flush() {
-            val label = currentLabel ?: return
-            val body = buffer.toString().trim()
-            if (body.isNotBlank()) result += label to body
-            buffer.clear()
+        for ((index, hit) in sorted.withIndex()) {
+            val start = hit.second
+            val end = sorted.getOrNull(index + 1)?.first ?: text.length
+            if (end <= start) continue
+            val body = text.substring(start, end).trim().trimStart('：', ':', '，', ' ')
+            if (body.isNotBlank()) result += hit.third.second to body
         }
-        for (line in text.lines()) {
-            var clean = line.trim()
-            for (emoji in listOf("📊", "💬", "👥", "🤝", "⚠️", "⚠", "💡", "🟢", "🟡", "🔵")) {
-                clean = clean.removePrefix(emoji).trim()
-            }
-            val hit = labels.firstOrNull { (key, _) -> clean.startsWith(key) }
-            if (hit != null) {
-                flush()
-                currentLabel = hit.second
-                buffer.append(clean.removePrefix(hit.first).trimStart('：', ':', ' '))
-            } else if (currentLabel != null && clean.isNotEmpty()) {
-                if (buffer.isNotEmpty()) buffer.append('\n')
-                buffer.append(clean)
-            }
-        }
-        flush()
         return result
     }
 
@@ -278,14 +282,16 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
      * 3. 空白或纯符号，标成「匿名成员#N」，多个空名也能区分
      */
     private fun displayName(raw: String, index: Int, names: Map<String, String>): String {
-        val resolved = names[raw]?.trim()?.takeIf { it.count { ch -> ch.isLetterOrDigit() } >= 2 }
-        if (resolved != null) return if (resolved.length > 12) resolved.take(12) + "…" else resolved
+        // 数据库里有名字就用，符号开头的昵称也算可用。
+        names[raw]?.trim()?.takeIf { it.isNotEmpty() }?.let { return shorten(it) }
         val clean = raw.trim()
+        if (clean.isEmpty()) return "匿名成员#$index"
         val looksLikeId = clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))
         if (looksLikeId) return "未获取昵称#$index"
-        if (clean.count { it.isLetterOrDigit() } < 2) return "匿名成员#$index"
-        return if (clean.length > 12) clean.take(12) + "…" else clean
+        return shorten(clean)
     }
+
+    private fun shorten(text: String): String = if (text.length > 10) text.take(10) + "…" else text
 
     private fun tableRow(name: String, count: String, percent: String, media: String, hours: String) = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -346,8 +352,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             .put("max_tokens", 700).put("temperature", 0.4)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content",
-                    "你在读一个微信群。根据统计和最近消息，按六段写观察，每段不超过 60 字，" +
-                        "分别以「氛围」「话题」「角色」「互动」「风险」「建议」开头：\n" +
+                    "你在读一个微信群。根据统计和最近消息，按六个板块写观察，每段不超过 60 字，" +
+                        "严格用【氛围】【话题】【角色】【互动】【风险】【建议】作小标题，每块单独一行：\n" +
                         "氛围：活跃度、关系亲疏、轻松还是严肃\n" +
                         "话题：主要在聊什么，可归到日常闲聊、工作业务、生活琐事、八卦吐槽、事务通知\n" +
                         "角色：谁发起话题、谁接话、谁潜水、谁起哄\n" +

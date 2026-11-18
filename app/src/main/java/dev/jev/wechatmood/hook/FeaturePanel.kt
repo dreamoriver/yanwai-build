@@ -29,9 +29,10 @@ internal class FeaturePanel(
     private val onAnalysisChanged: (Boolean) -> Unit,
 ) {
     private val theme = ReplyTheme(activity)
+    private var dialog: Dialog? = null
 
     fun show() {
-        val dialog = Dialog(activity)
+        val dialog = Dialog(activity).also { this.dialog = it }
         val body = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(theme.dp(20), theme.dp(16), theme.dp(20), theme.dp(20))
@@ -104,8 +105,9 @@ internal class FeaturePanel(
             isClickable = true
             isFocusable = true
             setOnClickListener {
+                // 先收起面板，再执行动作，否则统计窗口会叠在它上面。
+                dialog?.dismiss()
                 action()
-                (parent as? View)?.let { }
             }
         }
         val texts = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
