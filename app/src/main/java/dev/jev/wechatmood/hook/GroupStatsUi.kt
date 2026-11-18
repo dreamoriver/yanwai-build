@@ -150,13 +150,20 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }, LinearLayout.LayoutParams(0, theme.dp(44), 1f))
         actions.addView(theme.action("关闭", quiet = true) { dialog.dismiss() },
             LinearLayout.LayoutParams(0, theme.dp(44), 1f))
-        body.addView(actions)
+        actions.setPadding(theme.dp(20), theme.dp(8), theme.dp(20), theme.dp(14))
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = theme.shape(theme.surface, 22, theme.border)
+        }
+        body.background = null
 
         val scroll = android.widget.ScrollView(activity).apply {
             isFillViewport = false
             addView(body)
         }
-        dialog.setContentView(scroll)
+        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(actions, LinearLayout.LayoutParams(-1, -2))
+        dialog.setContentView(root)
         val screenHeight = activity.resources.displayMetrics.heightPixels
         dialog.window?.apply {
             setBackgroundDrawableResource(android.R.color.transparent)
@@ -184,19 +191,81 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             topContainer.addView(caption("没有可统计的发言"))
             return
         }
-        val shown = stats.members.take(10)
-        val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(shown.map { it.count })
-        shown.forEachIndexed { index, member ->
-            val name = displayName(member.name, index + 1, names)
-            val media = member.media + member.voice
-            val hourText = member.hours.joinToString(",") { "$it" }.ifBlank { "-" }
-            val row = tableRow(name, "${member.count} 条", "${percents[index]}%", if (media > 0) "$media" else "-", hourText)
-            row.setOnClickListener { showMemberDetail(member, name) }
-            topContainer.addView(row, LinearLayout.LayoutParams(-1, theme.dp(34)))
+        val merged = LinkedHashMap<String, Int>()
+        var anonymous = 0
+        var unknown = 0
+        for (member in stats.members) {
+            val resolved = resolveName(member.name, names)
+            val shown = when {
+                resolved != null -> resolved
+                member.name.trim().let { it.startsWith("wxid_") || it.matches(Regex("[A-Za-z0-9_-]{16,}")) } ->
+                    "未获取昵称#${++unknown}"
+                else -> "匿名成员#${++anonymous}"
+            }
+            merged[shown] = (merged[shown] ?: 0) + member.count
         }
-        if (stats.members.size > shown.size) {
-            topContainer.addView(caption("另有 ${stats.members.size - shown.size} 位成员未列出"))
+        topContainer.addView(headerRow(), LinearLayout.LayoutParams(-1, theme.dp(28)))
+        val ordered = merged.entries.sortedByDescending { it.value }
+        val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(ordered.map { it.value })
+        ordered.take(12).forEachIndexed { index, entry ->
+            topContainer.addView(tableRow(entry.key, "${entry.value}", "${percents[index]}%"),
+                LinearLayout.LayoutParams(-1, theme.dp(34)))
         }
+        if (ordered.size > 12) topContainer.addView(caption("另有 ${ordered.size - 12} 位成员未列出"))
+    }
+
+    private fun resolveName(raw: String, names: Map<String, String>): String? {
+        names[raw]?.trim()?.takeIf { it.isNotEmpty() }?.let { return shorten(it) }
+        val clean = raw.trim()
+        if (clean.isEmpty()) return null
+        if (clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))) return null
+        return shorten(clean)
+    }
+
+    private fun headerRow() = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(TextView(activity).apply {
+            text = "成员"
+            textSize = 11f
+            setTextColor(theme.muted)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        addView(TextView(activity).apply {
+            text = "条数"
+            textSize = 11f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(56), -2))
+        addView(TextView(activity).apply {
+            text = "占比"
+            textSize = 11f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(52), -2))
+    }
+
+    private fun tableRow(name: String, count: String, percent: String) = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(TextView(activity).apply {
+            text = name
+            textSize = 13f
+            setTextColor(theme.ink)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        addView(TextView(activity).apply {
+            text = count
+            textSize = 13f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(56), -2))
+        addView(TextView(activity).apply {
+            text = percent
+            textSize = 13f
+            setTextColor(theme.muted)
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(theme.dp(52), -2))
     }
 
     /** 点成员看他自己最近说了什么，不展示全员明细。 */
@@ -281,53 +350,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
      * 2. 查不到且看着像 wxid，标成「未获取昵称#N」，不裸奔原始 id
      * 3. 空白或纯符号，标成「匿名成员#N」，多个空名也能区分
      */
-    private fun displayName(raw: String, index: Int, names: Map<String, String>): String {
-        // 数据库里有名字就用，符号开头的昵称也算可用。
-        names[raw]?.trim()?.takeIf { it.isNotEmpty() }?.let { return shorten(it) }
-        val clean = raw.trim()
-        if (clean.isEmpty()) return "匿名成员#$index"
-        val looksLikeId = clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))
-        if (looksLikeId) return "未获取昵称#$index"
-        return shorten(clean)
-    }
-
     private fun shorten(text: String): String = if (text.length > 10) text.take(10) + "…" else text
-
-    private fun tableRow(name: String, count: String, percent: String, media: String, hours: String) = LinearLayout(activity).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        addView(TextView(activity).apply {
-            text = name
-            textSize = 13f
-            setTextColor(theme.ink)
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        addView(TextView(activity).apply {
-            text = count
-            textSize = 13f
-            setTextColor(theme.muted)
-            gravity = Gravity.END
-        }, LinearLayout.LayoutParams(theme.dp(64), -2))
-        addView(TextView(activity).apply {
-            text = percent
-            textSize = 13f
-            setTextColor(theme.muted)
-            gravity = Gravity.END
-        }, LinearLayout.LayoutParams(theme.dp(52), -2))
-        addView(TextView(activity).apply {
-            text = media
-            textSize = 13f
-            setTextColor(theme.muted)
-            gravity = Gravity.END
-        }, LinearLayout.LayoutParams(theme.dp(40), -2))
-        addView(TextView(activity).apply {
-            text = hours
-            textSize = 12f
-            setTextColor(theme.muted)
-            gravity = Gravity.END
-        }, LinearLayout.LayoutParams(theme.dp(64), -2))
-    }
 
     private fun exportText(analysis: String): String = buildString {
         appendLine("群聊统计 · 最近 ${context.messages.size} 条")
