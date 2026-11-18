@@ -3,6 +3,15 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.60
+
+六个板块都返回空
+- 推理型模型会把内容放在 reasoning_content，content 字段是空的
+- 解析改成 content 为空时读 reasoning_content
+- 新增 STATS_RAW 日志：记录 content 长度、reasoning 长度与 finish_reason
+- 输出上限从 220 提到 400
+- 数据库里的昵称如果是纯符号（例如 @），也不再单独显示
+
 ## 2.9.59
 
 群里分析六块全是空的

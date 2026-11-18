@@ -238,7 +238,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {
-        names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
+        names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }
+            ?.takeIf { it.isNotEmpty() && it.any { ch -> ch.isLetterOrDigit() } }
             ?.let { return shorten(it) }
         val clean = raw.replace(Regex("[\\u200B-\\u200F\\uFEFF]"), "").trim()
         if (clean.isEmpty() || clean.none { it.isLetterOrDigit() }) return null
@@ -434,7 +435,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         val sample = context.messages.takeLast(24).joinToString("\n") { "${it.speaker}: ${it.text.take(60)}" }
         val payload = JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 220).put("temperature", 0.6)
+            .put("max_tokens", 400).put("temperature", 0.6)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content",
                     "$instruction 要求：口语化、有细节，不复述数字，不写 Markdown，不用星号，不超过 60 字。"))
@@ -443,8 +444,15 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val client = ReplyHttpClient()
         val raw = withContext(Dispatchers.IO) {
             client.request(settings, payload, parse = { body ->
-                JSONObject(body).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content").trim()
+                val choice = JSONObject(body).getJSONArray("choices").getJSONObject(0)
+                val message = choice.getJSONObject("message")
+                val content = message.optString("content").trim()
+                val finish = choice.optString("finish_reason")
+                // 推理型模型常把内容放在 reasoning_content，content 为空。
+                val text = content.ifBlank { message.optString("reasoning_content").trim() }
+                dev.jev.wechatmood.core.MoodLog.i(
+                    "STATS_RAW $label content=${content.length} reasoning=${message.optString("reasoning_content").length} finish=$finish")
+                text
             })
         }
         val clean = TextClean.plain(raw).take(220)
