@@ -116,7 +116,9 @@ class HostUi(private val activity: Activity) {
     /** ＋面板里「附加」弹出的功能面板。 */
     private fun showFeaturePanel() {
         val current = talker
-        FeaturePanel(activity, current, topicsAvailable = current != null,
+        // 关系档案只针对私聊：群聊没有联系人档案，显示出来只会误导。
+        val factsAvailable = current != null && !current.endsWith("@chatroom")
+        FeaturePanel(activity, current, topicsAvailable = current != null, factsAvailable = factsAvailable,
             analysisEnabled = ModulePrefs.isChatEnabled(current),
             onReply = { replyUi.open() },
             onTopics = { replyUi.open(autoTopics = true) },

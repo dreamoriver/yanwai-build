@@ -147,6 +147,33 @@ object ReplyDatabaseHistory {
         }
     }.getOrNull()
 
+    /** 群成员昵称：把 wxid 换成备注或昵称，查不到就保持原样。 */
+    suspend fun displayNames(usernames: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
+        val wanted = usernames.filter { it.isNotBlank() }.distinct()
+        if (wanted.isEmpty()) return@withContext emptyMap()
+        val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        val result = mutableMapOf<String, String>()
+        for (db in databases) {
+            runCatching {
+                val placeholders = wanted.joinToString(",") { "?" }
+                val cursor = query(db, "SELECT username, nickname, remark FROM rcontact WHERE username IN ($placeholders)",
+                    wanted.toTypedArray())
+                cursor.use {
+                    while (it.moveToNext()) {
+                        val username = runCatching { it.getString(0) }.getOrNull() ?: continue
+                        val nickname = runCatching { it.getString(1) }.getOrNull()
+                        val remark = runCatching { it.getString(2) }.getOrNull()
+                        val display = remark?.takeIf { value -> value.isNotBlank() }
+                            ?: nickname?.takeIf { value -> value.isNotBlank() }
+                            ?: username
+                        result[username] = display
+                    }
+                }
+            }
+        }
+        result
+    }
+
     suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES): ReplyContext = withContext(Dispatchers.IO) {
         require(limit in 1..ReplyContext.MAX_MESSAGES)
         val startedAt = android.os.SystemClock.elapsedRealtime()

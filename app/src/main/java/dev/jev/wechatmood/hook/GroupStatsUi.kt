@@ -28,17 +28,22 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 群聊统计窗口：数字 + 活跃成员 + 可选的一次 AI 解读，结果可复制。 */
+/** 群聊统计窗口：数字 + 活跃成员 + 一次 AI 解读，结果可复制。 */
 internal class GroupStatsUi(private val activity: Activity, private val context: ReplyContext) {
     private val theme = ReplyTheme(activity)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val stats: GroupStats
+    private val topContainer = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+    private var currentNames: Map<String, String> = emptyMap()
 
     init {
         val records = context.messages.map {
             StatRecord(it.time, if (it.speaker == "我") 1 else 0, 1, it.text, it.speaker)
         }
-        stats = GroupStatsCalculator.compute(records, sampled = context.trimmed)
+        val base = GroupStatsCalculator.compute(records, sampled = context.trimmed)
+        // 媒体不在回复上下文里，用漏掉的条数补上，否则永远是 0。
+        val voices = context.messages.count { it.voiceState == dev.jev.wechatmood.voice.VoiceState.READY }
+        stats = base.copy(media = context.omittedMedia, voice = voices)
     }
 
     fun show() {
@@ -49,7 +54,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             background = theme.shape(theme.surface, 22, theme.border)
         }
         body.addView(title("群聊统计"))
-        body.addView(caption("最近 ${context.messages.size} 条消息 · 只在本机计算"))
+        val first = context.messages.firstOrNull { it.time > 0 }?.time
+        val last = context.messages.lastOrNull { it.time > 0 }?.time
+        val span = if (first != null && last != null) {
+            val format = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+            " · " + format.format(java.util.Date(first)) + "–" + format.format(java.util.Date(last))
+        } else ""
+        body.addView(caption("最近 ${context.messages.size} 条消息$span · 只在本机计算"))
 
         val numbers = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -57,23 +68,17 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         numbers.addView(number("${stats.total}", "条消息"), weight())
         numbers.addView(number("${stats.senders}", "人发言"), weight())
-        numbers.addView(number("${stats.mine}", "我发的"), weight())
         numbers.addView(number("${stats.media + stats.voice}", "图片语音"), weight())
+        numbers.addView(number("${stats.activeHours.size}", "个时段"), weight())
         body.addView(numbers)
 
-        if (stats.topSenders.isNotEmpty()) {
-            body.addView(section("最活跃"))
-            stats.topSenders.forEach { (name, count) ->
-                body.addView(row("${name}", "${count} 条"))
-            }
-        }
+        body.addView(section("最活跃"))
+        body.addView(topContainer)
+        renderTop(emptyMap())
+
         if (stats.activeHours.isNotEmpty()) {
             body.addView(section("活跃时段"))
             body.addView(caption(stats.activeHours.joinToString("、") { "${it} 点" }))
-        }
-        if (stats.links > 0) {
-            body.addView(section("链接"))
-            body.addView(caption("${stats.links} 条"))
         }
 
         val analysis = TextView(activity).apply {
@@ -82,7 +87,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
             background = theme.shape(theme.card, 14, theme.border)
             visibility = View.GONE
-            setLineSpacing(0f, 1.2f)
+            setLineSpacing(0f, 1.25f)
         }
         body.addView(analysis, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
 
@@ -107,8 +112,18 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, theme.dp(10), 0, 0)
         }
-        actions.addView(theme.action("复制统计", quiet = true) {
+        actions.addView(theme.action("复制", quiet = true) {
             copy(exportText(analysis.text?.toString().orEmpty()))
+        }, LinearLayout.LayoutParams(0, theme.dp(44), 1f))
+        actions.addView(theme.action("生成图片", quiet = true) {
+            val summary = analysis.text?.toString()?.takeIf {
+                it.isNotBlank() && !it.startsWith("正在") && !it.startsWith("分析失败")
+            }
+            val bitmap = StatsImage.render(stats, currentNames, summary, "群聊统计")
+            val uri = StatsImage.save(activity, bitmap)
+            Toast.makeText(activity,
+                if (uri != null) "已保存到相册，可在相册里发送" else "保存失败，检查相册权限",
+                Toast.LENGTH_LONG).show()
         }, LinearLayout.LayoutParams(0, theme.dp(44), 1f))
         actions.addView(theme.action("关闭", quiet = true) { dialog.dismiss() },
             LinearLayout.LayoutParams(0, theme.dp(44), 1f))
@@ -124,11 +139,31 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         dialog.setOnDismissListener { scope.cancel() }
         dialog.show()
+
+        // 昵称在数据库里，异步查一次再替换 wxid。
+        scope.launch {
+            val names = runCatching {
+                ReplyDatabaseHistory.displayNames(stats.topSenders.map { it.first })
+            }.getOrDefault(emptyMap())
+            if (names.isNotEmpty()) renderTop(names)
+        }
+    }
+
+    private fun renderTop(names: Map<String, String>) {
+        currentNames = names
+        topContainer.removeAllViews()
+        if (stats.topSenders.isEmpty()) {
+            topContainer.addView(caption("没有可统计的发言"))
+            return
+        }
+        stats.topSenders.forEach { (name, count) ->
+            topContainer.addView(row(names[name] ?: name, "$count 条"))
+        }
     }
 
     private fun exportText(analysis: String): String = buildString {
         appendLine("群聊统计 · 最近 ${context.messages.size} 条")
-        appendLine("共 ${stats.total} 条 · ${stats.senders} 人发言 · 我发了 ${stats.mine} 条")
+        appendLine("共 ${stats.total} 条 · ${stats.senders} 人发言")
         if (stats.topSenders.isNotEmpty()) {
             appendLine("最活跃：" + stats.topSenders.joinToString("、") { "${it.first} ${it.second}" })
         }
@@ -144,13 +179,15 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private suspend fun analyze(context: ReplyContext): String {
         val settings = ModulePrefs.replySettings()
         check(settings.isConfigured) { "先在言外「回复」里配置模型" }
-        val sample = context.messages.takeLast(12).joinToString("\n") { "${it.speaker}: ${it.text.take(60)}" }
+        val sample = context.messages.takeLast(20).joinToString("\n") { "${it.speaker}: ${it.text.take(80)}" }
         val payload = JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 300).put("temperature", 0.4)
+            .put("max_tokens", 600).put("temperature", 0.5)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content",
-                    "你在读一个微信群。根据给出的统计和最近几条消息，用三句话概括这个群在聊什么、气氛如何、" +
-                        "有什么值得注意的。直接说话，不要 Markdown，不要星号，不要编号，不超过 120 字。"))
+                    "你在读一个微信群。根据统计和最近的聊天内容，写一段 150–220 字的观察：" +
+                        "这个群在聊什么话题、谁在主导、气氛偏什么、有没有值得注意的事。\n" +
+                        "要求：像人说话，分段自然；不要 Markdown，不要星号井号，不要编号列表；" +
+                        "只依据给出的内容，不编造没出现的事。"))
                 .put(JSONObject().put("role", "user").put("content",
                     "统计：${stats.lines().joinToString("；")}\n最近消息：\n$sample")))
         val client = ReplyHttpClient()
@@ -159,7 +196,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 JSONObject(body).getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").getString("content").trim()
             })
-        }.let(TextClean::plain).take(200)
+        }.let(TextClean::plain).take(500)
     }
 
     private fun copy(text: String) {
@@ -179,7 +216,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         this.text = text
         textSize = 12f
         setTextColor(theme.muted)
-        setPadding(0, theme.dp(12), 0, theme.dp(4))
+        setPadding(0, theme.dp(14), 0, theme.dp(4))
     }
     private fun caption(text: String) = TextView(activity).apply {
         this.text = text

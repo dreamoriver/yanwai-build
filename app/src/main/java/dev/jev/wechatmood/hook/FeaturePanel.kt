@@ -20,6 +20,7 @@ internal class FeaturePanel(
     private val activity: Activity,
     private val talker: String?,
     private val topicsAvailable: Boolean,
+    private val factsAvailable: Boolean,
     private val analysisEnabled: Boolean,
     private val onReply: () -> Unit,
     private val onTopics: () -> Unit,
@@ -55,7 +56,7 @@ internal class FeaturePanel(
             body.addView(item("找找话题", "聊不下去时给几个新方向", onTopics))
         }
         body.addView(item("群聊统计", "消息量、活跃成员与时段", onStats))
-        body.addView(item("关系档案", "整理过的事实，可删除", onFacts))
+        if (factsAvailable) body.addView(item("关系档案", "整理过的事实，可删除", onFacts))
 
         body.addView(View(activity).apply { setBackgroundColor(theme.border) },
             LinearLayout.LayoutParams(-1, 1).apply { topMargin = theme.dp(12) })
