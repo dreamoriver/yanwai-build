@@ -3,7 +3,7 @@ package dev.jev.wechatmood.reply
 import java.util.Calendar
 
 /** 一条参与聚合的消息，只保留统计需要的字段。 */
-data class StatRecord(val time: Long, val send: Int, val type: Int, val content: String)
+data class StatRecord(val time: Long, val send: Int, val type: Int, val content: String, val speaker: String = "")
 
 /** 群聊统计结果，只放聚合数字，不保留任何聊天正文。 */
 data class GroupStats(
@@ -61,7 +61,7 @@ object GroupStatsCalculator {
             if (record.type == 1 && LINK.containsMatchIn(record.content)) links++
             calendar.timeInMillis = record.time
             hours[calendar.get(Calendar.HOUR_OF_DAY)] = (hours[calendar.get(Calendar.HOUR_OF_DAY)] ?: 0) + 1
-            if (record.send == 0) senderOf(record.content)?.let { top[it] = (top[it] ?: 0) + 1 }
+            if (record.send == 0) senderName(record)?.let { top[it] = (top[it] ?: 0) + 1 }
         }
         return GroupStats(
             total = records.size,
@@ -76,10 +76,11 @@ object GroupStatsCalculator {
         )
     }
 
-    /** 群聊正文形如「昵称:\n内容」，取冒号前的昵称；超过 140 字的不是昵称。 */
-    private fun senderOf(content: String): String? {
-        val head = content.substringBefore(":\n", "").takeIf { it.isNotEmpty() } ?: return null
-        if (head.length > 140 || head.contains('\n')) return null
-        return head.trim().takeIf { it.isNotEmpty() }
+    /** 优先用已解析的 speaker；旧数据再从正文前缀里取昵称。 */
+    private fun senderName(record: StatRecord): String? {
+        val name = record.speaker.trim().takeIf { it.isNotEmpty() && it != "对方" && it != "对方（群成员未知）" }
+            ?: record.content.substringBefore(":\n", "").takeIf { it.isNotEmpty() }
+        if (name == null || name.length > 140 || name.contains('\n')) return null
+        return name.trim().takeIf { it.isNotEmpty() }
     }
 }

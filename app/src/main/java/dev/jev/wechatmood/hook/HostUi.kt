@@ -121,7 +121,7 @@ class HostUi(private val activity: Activity) {
             onReply = { replyUi.open() },
             onTopics = { replyUi.open(autoTopics = true) },
             onStats = { showStats() },
-            onFacts = { Toast.makeText(activity, "在「帮我回」抽屉的「更新关系档案」旁查看", Toast.LENGTH_SHORT).show() },
+            onFacts = { replyUi.open() },
             onAnalysisChanged = { value ->
                 if (current != null) {
                     val saved = ModulePrefs.setChatEnabled(current, value)
@@ -129,31 +129,16 @@ class HostUi(private val activity: Activity) {
                 }
             }).show()
     }
-
-    /** 群聊统计：只聚合本地最近读取到的消息，不联网。 */
+    /** 群聊统计：本地聚合 + 可选的一次 AI 解读。 */
     private fun showStats() {
         val context = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
-        if (context == null) {
-            Toast.makeText(activity, "先在聊天页打开一次「附加」再试", Toast.LENGTH_SHORT).show()
+        if (context == null || context.messages.isEmpty()) {
+            Toast.makeText(activity, "先在聊天页等一会儿，再打开统计", Toast.LENGTH_SHORT).show()
             return
         }
-        val records = context.messages.map {
-            dev.jev.wechatmood.reply.StatRecord(it.time, if (it.speaker == "我") 1 else 0, 1, it.text)
-        }
-        val stats = dev.jev.wechatmood.reply.GroupStatsCalculator.compute(records)
-        val text = stats.lines().joinToString("\n")
-        AlertDialog.Builder(activity)
-            .setTitle("最近 ${context.messages.size} 条消息")
-            .setMessage(text)
-            .setPositiveButton("复制") { _, _ ->
-                val clipboard = activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                    as android.content.ClipboardManager
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("言外统计", text))
-                Toast.makeText(activity, "已复制", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("关闭", null)
-            .show()
+        GroupStatsUi(activity, context).show()
     }
+
     fun hide() { replyUi.hide(); removeControl(); dialog?.dismiss(); messages = emptyList(); talker = null }
     fun dispose() { hide(); replyUi.dispose() }
     private fun removeControl() {
