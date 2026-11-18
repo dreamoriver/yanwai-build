@@ -7,6 +7,7 @@ import android.view.View
 
 import android.widget.Switch
 import android.widget.Toast
+import kotlinx.coroutines.launch
 
 import dev.jev.wechatmood.analysis.SignalAnalyzer
 import dev.jev.wechatmood.core.ModulePrefs
@@ -131,14 +132,27 @@ class HostUi(private val activity: Activity) {
                 }
             }).show()
     }
-    /** 群聊统计：本地聚合 + 可选的一次 AI 解读。 */
+    private val statsScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
+
+    /** 群聊统计：按选择的时段从数据库取，不再只看已加载的几十条。 */
     private fun showStats() {
         val context = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
         if (context == null || context.messages.isEmpty()) {
             Toast.makeText(activity, "先在聊天页等一会儿，再打开统计", Toast.LENGTH_SHORT).show()
             return
         }
-        GroupStatsUi(activity, context).show()
+        statsScope.launch {
+            val since = StatsFilter.sinceMillis()
+            val rows = runCatching {
+                ReplyDatabaseHistory.statMessages(context.talker, since, StatsFilter.limit)
+            }.getOrDefault(emptyList())
+            val mapped = rows.map {
+                dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
+                    it.analysisText() ?: "[媒体]")
+            }
+            GroupStatsUi(activity, context, mapped).show()
+        }
     }
 
     fun hide() { replyUi.hide(); removeControl(); dialog?.dismiss(); messages = emptyList(); talker = null }

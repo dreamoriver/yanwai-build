@@ -147,6 +147,23 @@ object ReplyDatabaseHistory {
         }
     }.getOrNull()
 
+    /** 按时间范围取统计用消息（不限已加载页），用于「今天 / 最近 N 小时」。 */
+    suspend fun statMessages(talker: String, since: Long, limit: Int): List<MessageMetadata> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<MessageMetadata>()
+        val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        for (db in databases) {
+            runCatching {
+                query(db, "SELECT msgId, type, isSend, content, talker, createTime, imgPath, msgSvrId FROM message " +
+                    "WHERE talker = ? AND createTime >= ? ORDER BY createTime DESC LIMIT ?",
+                    arrayOf(talker, since.toString(), limit.coerceAtLeast(1).toString())).use { cursor ->
+                    while (cursor.moveToNext()) out += metadata(cursor)
+                }
+            }
+        }
+        dev.jev.wechatmood.core.MoodLog.i("STATS_RANGE talker=${talker.hashCode()} since=$since count=${out.size}")
+        out.reversed()
+    }
+
     /** 诊断用：列出主库的表名，便于确认群昵称实际存在哪张表。 */
     suspend fun tableNames(): List<String> = withContext(Dispatchers.IO) {
         val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
@@ -160,6 +177,7 @@ object ReplyDatabaseHistory {
                 }
             }
         }
+        dev.jev.wechatmood.core.MoodLog.i("STATS_TABLES_RAW count=${names.size} sample=${names.take(12)}")
         val related = names.filter {
             it.contains("contact", true) || it.contains("stranger", true) || it.contains("nick", true) ||
                 it.contains("userinfo", true) || it.contains("friend", true)

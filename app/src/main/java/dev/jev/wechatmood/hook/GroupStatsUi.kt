@@ -41,10 +41,22 @@ object StatsFilter {
     var range: Range = Range.TODAY
     var limit: Int = 20
     val limitLabel: String get() = "最近 $limit 条"
+
+    fun sinceMillis(now: Long = System.currentTimeMillis()): Long = when (range) {
+        Range.HOUR -> now - Range.HOUR.millis
+        Range.HOUR3 -> now - Range.HOUR3.millis
+        Range.TODAY -> java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            timeInMillis
+        }.timeInMillis
+    }
 }
 
 /** 群聊统计窗口：数字 + 活跃成员 + 一次 AI 解读，结果可复制。 */
-internal class GroupStatsUi(private val activity: Activity, private val context: ReplyContext) {
+internal class GroupStatsUi(private val activity: Activity, private val context: ReplyContext,
+    private val dbMessages: List<dev.jev.wechatmood.reply.ReplyMessage> = emptyList()) {
     private val theme = ReplyTheme(activity)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val stats: GroupStats
@@ -67,7 +79,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 calendar.timeInMillis
             }
         }
-        val byTime = context.messages.filter { it.time >= since }
+        // 优先用数据库按时间查到的消息，页面上下文只有最近几十条。
+        val source = dbMessages.ifEmpty { context.messages }
+        val byTime = source.filter { it.time >= since }
         return if (StatsFilter.limit > 0) byTime.takeLast(StatsFilter.limit) else byTime
     }
 
