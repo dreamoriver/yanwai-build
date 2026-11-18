@@ -171,7 +171,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             analysisBox.visibility = View.VISIBLE
             analysisBox.removeAllViews()
             val bodies = LinkedHashMap<String, TextView>()
-            sections.forEach { (label, _) ->
+            // 结果到了再建卡片，保证一块一块出现且顺序固定。
+            val cards = LinkedHashMap<String, LinearLayout>()
+            fun card(label: String): LinearLayout = cards.getOrPut(label) {
                 val body = TextView(activity).apply {
                     text = "…"
                     textSize = 13f
@@ -179,10 +181,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                     setPadding(0, theme.dp(4), 0, 0)
                     setLineSpacing(0f, 1.25f)
                 }
-                analysisBox.addView(panelWith(label, body),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
                 bodies[label] = body
+                panelWith(label, body).also {
+                    analysisBox.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
+                }
             }
+            sections.forEach { (label, _) -> card(label) }
             scope.launch {
                 val finished = java.util.concurrent.atomic.AtomicInteger(0)
                 val gate = kotlinx.coroutines.sync.Semaphore(3)
@@ -295,8 +299,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val fromDb = names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
         val clean = (fromDb ?: raw).trim()
         // 空白、零宽、格式控制符都算「没有名字」，避免表格里出现空行。
+        val blanks = setOf('\u115F', '\u1160', '\u3164', '\uFFA0', '\u2800', '\u3000', '\u00A0')
         val visible = clean.any { ch ->
-            !ch.isWhitespace() && !ch.isISOControl() && Character.getType(ch) != Character.FORMAT.toInt()
+            ch !in blanks && !ch.isWhitespace() && !ch.isISOControl() &&
+                Character.getType(ch) != Character.FORMAT.toInt()
         }
         if (!visible || clean == "对方（群成员未知）") return null
         return shorten(clean)
