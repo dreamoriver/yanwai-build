@@ -275,34 +275,23 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         var unknown = 0
         for (member in stats.members) {
             val resolved = resolveName(member.name, names)
-            val candidate = when {
-                resolved != null -> resolved
-                member.name.trim().let { it.startsWith("wxid_") || it.matches(Regex("[A-Za-z0-9_-]{16,}")) } ->
-                    "未获取昵称#${++unknown}"
-                else -> "匿名成员#${++anonymous}"
-            }
-            // 兜底：显示名不可见或没有实际字符时，也不要留空行。
-            val shown = candidate.takeIf { it.any { ch -> ch.isLetterOrDigit() } }
-                ?: "匿名成员#${++anonymous}"
+            val shown = resolved ?: "未获取昵称#${++unknown}"
             merged[shown] = (merged[shown] ?: 0) + member.count
         }
         topContainer.addView(headerRow(), LinearLayout.LayoutParams(-1, theme.dp(24)))
         val ordered = merged.entries.sortedByDescending { it.value }
         val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(ordered.map { it.value })
-        ordered.take(12).forEachIndexed { index, entry ->
+        ordered.forEachIndexed { index, entry ->
             topContainer.addView(tableRow(entry.key, "${entry.value}", "${percents[index]}%"),
                 LinearLayout.LayoutParams(-1, theme.dp(26)))
         }
-        if (ordered.size > 12) topContainer.addView(caption("另有 ${ordered.size - 12} 位成员未列出"))
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {
-        names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }
-            ?.takeIf { it.isNotEmpty() && it.any { ch -> ch.isLetterOrDigit() } }
-            ?.let { return shorten(it) }
-        val clean = raw.replace(Regex("[\\u200B-\\u200F\\uFEFF]"), "").trim()
-        if (clean.isEmpty() || clean.none { it.isLetterOrDigit() }) return null
-        if (clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))) return null
+        // 数据库里有名字优先用；没有就用原始名字。只要不是空白就显示，截断即可。
+        val fromDb = names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
+        val clean = (fromDb ?: raw).replace(Regex("[\\u200B-\\u200F\\uFEFF]"), "").trim()
+        if (clean.isEmpty() || clean == "对方（群成员未知）") return null
         return shorten(clean)
     }
 
