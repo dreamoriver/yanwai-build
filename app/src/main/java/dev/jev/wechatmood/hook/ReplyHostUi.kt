@@ -231,12 +231,18 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val roleRow = LinearLayout(activity).apply { gravity = Gravity.CENTER_VERTICAL }
         fun roleLabel() = if (composition.relationship == ReplyRelationship.UNSPECIFIED) "选择对方身份 ▾"
             else "${composition.relationship.displayLabel(composition.customRelationship)} ▾"
-        val rolePicker = action(roleLabel()).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        val rolePicker = action(roleLabel()).apply { maxLines = 1 }
         rolePicker.contentDescription = "选择对方身份，当前${composition.relationship.displayLabel(composition.customRelationship)}"
-        val historyPicker = action("参考最近 ${composition.historyLimit} 条 ▾")
-        listOf(rolePicker, historyPicker).forEach { it.textSize = 13f; it.setPadding(dp(8), dp(6), dp(8), dp(6)) }
+        val historyPicker = action("参考最近 ${composition.historyLimit} 条 ▾").apply { maxLines = 1 }
+        // 两格等宽；字号在 10–13sp 之间自适应，避免长身份名被截断。
+        listOf(rolePicker, historyPicker).forEach { button ->
+            button.textSize = 12f
+            button.setPadding(dp(6), dp(6), dp(4), dp(6))
+            androidx.core.widget.TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
+                button, 10, 13, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+        }
         roleRow.addView(rolePicker, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
-        roleRow.addView(historyPicker, LinearLayout.LayoutParams(0, -2, 1.2f))
+        roleRow.addView(historyPicker, LinearLayout.LayoutParams(0, -2, 1f))
         results.addView(roleRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         var roleExpanded = composition.relationship == ReplyRelationship.OTHER && composition.customRelationship.isBlank()
         var instructionExpanded = false
