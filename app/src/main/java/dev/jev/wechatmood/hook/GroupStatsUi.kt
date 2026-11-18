@@ -66,6 +66,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private val stats: GroupStats
     private val topContainer = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
     private var currentNames: Map<String, String> = emptyMap()
+    /** 成员原始名 → 表格里显示的文本，生成图片时复用同一套规则。 */
+    private val displayedNames = mutableMapOf<String, String>()
     private var analysisText: String = ""
     private var dialog: Dialog? = null
 
@@ -217,7 +219,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             val summary = analysisText.takeIf {
                 it.isNotBlank() && !it.startsWith("分析失败")
             }
-            val bitmap = StatsImage.render(stats, currentNames, summary, "群聊统计")
+            val bitmap = StatsImage.render(stats, displayedNames, summary, "群聊统计")
             val uri = StatsImage.save(activity, bitmap)
             Toast.makeText(activity,
                 if (uri != null) "已保存到相册，可在相册里发送" else "保存失败，检查相册权限",
@@ -276,6 +278,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         for (member in stats.members) {
             val resolved = resolveName(member.name, names)
             val shown = resolved ?: "未获取昵称#${++unknown}"
+            displayedNames[member.name] = shown
             merged[shown] = (merged[shown] ?: 0) + member.count
         }
         topContainer.addView(headerRow(), LinearLayout.LayoutParams(-1, theme.dp(24)))

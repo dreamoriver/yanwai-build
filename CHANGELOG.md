@@ -3,6 +3,13 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.71
+
+生成图片与昵称
+- 图片里不再出现空名字：不可见字符用「未获取昵称」占位
+- 图片数字块补上「个时段」，四个指标完整
+- 昵称查询改成逐个 wxid 查 rcontact / stranger，并记录 STATS_NAMES wanted/found/errors，能区分查不到还是查询报错
+
 ## 2.9.70
 
 切换时段/条数后列表不刷新

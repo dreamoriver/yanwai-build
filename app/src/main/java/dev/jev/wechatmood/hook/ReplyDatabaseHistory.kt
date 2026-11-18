@@ -186,44 +186,42 @@ object ReplyDatabaseHistory {
         names
     }
 
-    /** 群成员昵称：把 wxid 换成备注或昵称，查不到就保持原样。 */
+    /** 群成员昵称：逐个 wxid 查 rcontact / stranger，查不到就返回空。 */
     suspend fun displayNames(usernames: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
         val wanted = usernames.filter { it.isNotBlank() }.distinct()
         if (wanted.isEmpty()) return@withContext emptyMap()
         val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
         val result = mutableMapOf<String, String>()
-        for (db in databases) {
-            val placeholders = wanted.joinToString(",") { "?" }
-            // 好友在 rcontact；群里的非好友通常在 stranger，两级兜底。
-            runCatching {
-                query(db, "SELECT username, nickname, conRemark FROM rcontact WHERE username IN ($placeholders)",
-                    wanted.toTypedArray()).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val username = runCatching { cursor.getString(0) }.getOrNull() ?: continue
-                        val nickname = runCatching { cursor.getString(1) }.getOrNull()
-                        val remark = runCatching { cursor.getString(2) }.getOrNull()
-                        val display = remark?.takeIf { it.isNotBlank() }
-                            ?: nickname?.takeIf { it.isNotBlank() }
-                        if (display != null) result[username] = display
-                    }
-                }
-            }
-            val remaining = wanted.filter { it !in result }
-            if (remaining.isNotEmpty()) {
-                runCatching {
-                    val marks = remaining.joinToString(",") { "?" }
-                    query(db, "SELECT username, nickname FROM stranger WHERE username IN ($marks)",
-                        remaining.toTypedArray()).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            val username = runCatching { cursor.getString(0) }.getOrNull() ?: continue
-                            val nickname = runCatching { cursor.getString(1) }.getOrNull()
-                            if (!nickname.isNullOrBlank()) result[username] = nickname
+        var errors = 0
+        for (name in wanted) {
+            for (db in databases) {
+                // 单条查询，避免 IN 参数或字段名差异导致整批失败。
+                val found = runCatching {
+                    var value: String? = null
+                    query(db, "SELECT conRemark, nickname FROM rcontact WHERE username = ?", arrayOf(name)).use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            value = runCatching { cursor.getString(0) }.getOrNull()?.takeIf { it.isNotBlank() }
+                                ?: runCatching { cursor.getString(1) }.getOrNull()?.takeIf { it.isNotBlank() }
                         }
                     }
+                    value
+                }.onFailure { errors++ }.getOrNull()
+                if (found != null) { result[name] = found; break }
+            }
+            if (name !in result) {
+                for (db in databases) {
+                    val found = runCatching {
+                        var value: String? = null
+                        query(db, "SELECT nickname FROM stranger WHERE username = ?", arrayOf(name)).use { cursor ->
+                            if (cursor.moveToFirst()) value = runCatching { cursor.getString(0) }.getOrNull()?.takeIf { it.isNotBlank() }
+                        }
+                        value
+                    }.onFailure { errors++ }.getOrNull()
+                    if (found != null) { result[name] = found; break }
                 }
             }
         }
-        dev.jev.wechatmood.core.MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size}")
+        dev.jev.wechatmood.core.MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size} errors=$errors")
         result
     }
 

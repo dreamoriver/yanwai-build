@@ -54,6 +54,7 @@ object StatsImage {
             stats.total.toString() to "条消息",
             stats.senders.toString() to "人发言",
             (stats.media + stats.voice).toString() to "图片语音",
+            stats.activeHours.size.toString() to "个时段",
         )
         val cellWidth = (WIDTH - PAD * 2) / cells.size
         cells.forEachIndexed { index, (value, label) ->
@@ -68,7 +69,7 @@ object StatsImage {
             y += 36
             val max = stats.topSenders.first().second.coerceAtLeast(1)
             stats.topSenders.forEach { (name, count) ->
-                val shown = names[name] ?: name
+                val shown = names[name] ?: fallbackName(name)
                 canvas.drawText(shown.take(14), PAD, y, rowPaint)
                 val value = "$count 条"
                 canvas.drawText(value, WIDTH - PAD - rowValuePaint.measureText(value), y, rowValuePaint)
@@ -109,6 +110,15 @@ object StatsImage {
         resolver.openOutputStream(uri)?.use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
         uri
     }.getOrNull()
+
+    /** 名字不可见时用占位，避免图片里出现空行。 */
+    private fun fallbackName(raw: String): String {
+        val visible = raw.trim().any { ch ->
+            !ch.isWhitespace() && !ch.isISOControl() && Character.getType(ch) != Character.FORMAT.toInt()
+        }
+        if (!visible) return "未获取昵称"
+        return if (raw.length > 10) raw.take(10) + "…" else raw
+    }
 
     private fun text(size: Float, color: Int, style: Int = Typeface.NORMAL) = Paint().apply {
         textSize = size
