@@ -14,6 +14,8 @@ object ModulePrefs {
     const val KEY_RELATION_FACTS = "relation_facts_auto"
     /** 一次整理读多少条聊天；只存在微信进程本地，不参与设置同步。 */
     const val KEY_RELATION_FACT_LIMIT = "relation_fact_limit"
+    const val KEY_RELATION_FACT_INCREMENTAL = "relation_fact_incremental"
+    const val KEY_RELATION_SHOW_UPDATED = "relation_show_updated"
     val RELATION_FACT_LIMIT_VALUES = intArrayOf(30, 50)
     const val RELATION_FACT_LIMIT_DEFAULT = 50
     private const val LOCAL_REPLY_FILE = "yanwai_reply_local"
@@ -213,19 +215,36 @@ object ModulePrefs {
         saved
     }.onFailure { MoodLog.e("CHAT_SWITCH_SAVE_FAILED 本地会话开关保存失败", it) }.getOrDefault(false)
 
+    private fun localPrefs(): android.content.SharedPreferences? =
+        context?.getSharedPreferences(LOCAL_REPLY_FILE, Context.MODE_PRIVATE)
+
     /** 采集范围：默认最近 50 条。30 条更快更省，50 条覆盖更全，再往上推理模型容易返回空。 */
     fun relationFactLimit(): Int = runCatching {
-        val ctx = context ?: return RELATION_FACT_LIMIT_DEFAULT
-        ctx.getSharedPreferences(LOCAL_REPLY_FILE, Context.MODE_PRIVATE)
-            .getInt(KEY_RELATION_FACT_LIMIT, RELATION_FACT_LIMIT_DEFAULT)
-            .takeIf { it in RELATION_FACT_LIMIT_VALUES } ?: RELATION_FACT_LIMIT_DEFAULT
+        localPrefs()?.getInt(KEY_RELATION_FACT_LIMIT, RELATION_FACT_LIMIT_DEFAULT)
+            ?.takeIf { it in RELATION_FACT_LIMIT_VALUES } ?: RELATION_FACT_LIMIT_DEFAULT
     }.getOrDefault(RELATION_FACT_LIMIT_DEFAULT)
 
     fun setRelationFactLimit(value: Int): Boolean = runCatching {
         if (value !in RELATION_FACT_LIMIT_VALUES) return false
-        val ctx = context ?: return false
-        ctx.getSharedPreferences(LOCAL_REPLY_FILE, Context.MODE_PRIVATE).edit()
-            .putInt(KEY_RELATION_FACT_LIMIT, value).commit()
+        localPrefs()?.edit()?.putInt(KEY_RELATION_FACT_LIMIT, value)?.commit() ?: false
+    }.getOrDefault(false)
+
+    /** 默认只整理上次水位之后的新消息：日常更新快很多，首次没有水位时自动等于全量。 */
+    fun relationFactIncremental(): Boolean = runCatching {
+        localPrefs()?.getBoolean(KEY_RELATION_FACT_INCREMENTAL, true) ?: true
+    }.getOrDefault(true)
+
+    fun setRelationFactIncremental(value: Boolean): Boolean = runCatching {
+        localPrefs()?.edit()?.putBoolean(KEY_RELATION_FACT_INCREMENTAL, value)?.commit() ?: false
+    }.getOrDefault(false)
+
+    /** 档案条目是否附带「整理于」时间，默认关闭。 */
+    fun relationShowUpdated(): Boolean = runCatching {
+        localPrefs()?.getBoolean(KEY_RELATION_SHOW_UPDATED, false) ?: false
+    }.getOrDefault(false)
+
+    fun setRelationShowUpdated(value: Boolean): Boolean = runCatching {
+        localPrefs()?.edit()?.putBoolean(KEY_RELATION_SHOW_UPDATED, value)?.commit() ?: false
     }.getOrDefault(false)
 
     fun report(status: String) = bridge.report(status)

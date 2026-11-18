@@ -524,23 +524,23 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 return@doRefreshFacts
             }
             if (!auto) state.text = "正在整理关系档案…"
-            scope.launch {
-                try {
-                    val saved = RelationFactRefresher.refresh(activity, key, settings)
-                    if (saved.isEmpty()) {
-                        if (!auto && ownsDrawer()) state.text = "这次没有提取到新的事实"
-                        return@launch
+            // 独立 scope：关掉抽屉或切走聊天都不会把这次请求掐断。
+            val started = RelationFactRefresher.launch(activity, key, settings) { result, error ->
+                when {
+                    error != null -> {
+                        MoodLog.w("RELATION_FACTS_FAILED " + error.javaClass.simpleName)
+                        if (!auto && ownsDrawer()) state.text = "关系档案更新失败：" + (error.message ?: "请重试")
                     }
-                    if (ownsDrawer()) {
-                        facts = saved
-                        if (!auto) state.text = "关系档案已更新：${saved.size} 条"
+                    result == null -> Unit
+                    result.nothingNew -> if (!auto && ownsDrawer()) state.text = "最近没有新消息，不用整理"
+                    result.facts.isEmpty() -> if (!auto && ownsDrawer()) state.text = "这次没有提取到新的事实"
+                    else -> if (ownsDrawer()) {
+                        facts = result.facts
+                        if (!auto) state.text = "关系档案已更新：${result.facts.size} 条"
                     }
-                } catch (e: CancellationException) { throw e }
-                catch (e: Exception) {
-                    MoodLog.w("RELATION_FACTS_FAILED " + e.javaClass.simpleName)
-                    if (!auto && ownsDrawer()) state.text = "关系档案更新失败：" + (e.message ?: "请重试")
                 }
             }
+            if (!started && !auto && ownsDrawer()) state.text = "正在整理，稍等…"
         }
         fun showDraftCheck(check: DraftCheck) {
             if (!check.parsed) {

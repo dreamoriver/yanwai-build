@@ -59,8 +59,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         })
         column.addView(summaryText.apply {
             isClickable = true; isFocusable = true
-            contentDescription = "采集范围，点击修改"
-            setOnClickListener { pickLimit() }
+            contentDescription = "整理设置，点击修改"
+            setOnClickListener { openSettings() }
         })
 
         val actions = LinearLayout(activity).apply {
@@ -148,6 +148,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             append(if (items.isEmpty()) "还没有整理过" else "有效 ${active.size} 条")
             if (meta.lastAt > 0) append(" · 最近整理 ").append(FactTimes.formatLocal(meta.lastAt, "MM-dd HH:mm"))
             append(" · 采集最近 ").append(ModulePrefs.relationFactLimit()).append(" 条")
+            if (ModulePrefs.relationFactIncremental()) append("（仅新增）")
         }
 
         if (active.isEmpty()) {
@@ -179,6 +180,10 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         val removed = fact.status == RelationFact.STATUS_CANCELLED
         val note = buildString {
             if (removed) append("已移出") else append(if (fact.source == "manual") "手动添加" else "自动整理")
+            if (!removed && ModulePrefs.relationShowUpdated() && fact.updatedAt > 0) {
+                if (isNotEmpty()) append(" · ")
+                append("整理于 ").append(FactTimes.formatLocal(fact.updatedAt, "MM-dd HH:mm"))
+            }
             if (fact.occurredAt > 0) {
                 if (isNotEmpty()) append(" · ")
                 append(FactTimes.label(fact.occurredAt))
@@ -227,6 +232,45 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         // 只放一个选项，取消交给 picker 自带的居中按钮，不再出现两个「取消」。
         kit.picker("彻底删除「${fact.text}」？", listOf("删除，以后整理也不再出现")) { index ->
             if (index == 0) remove(fact)
+        }
+    }
+
+    /** 整理设置：范围、方式、是否显示整理时间。都只存在本机微信进程里。 */
+    private fun openSettings() {
+        val items = listOf(
+            "采集范围 · 最近 ${ModulePrefs.relationFactLimit()} 条",
+            "整理方式 · ${if (ModulePrefs.relationFactIncremental()) "仅新增" else "全量重看"}",
+            "显示整理时间 · ${if (ModulePrefs.relationShowUpdated()) "开" else "关"}"
+        )
+        kit.picker("整理设置", items) { index ->
+            when (index) {
+                0 -> pickLimit()
+                1 -> pickMode()
+                2 -> toggleUpdated()
+            }
+        }
+    }
+
+    private fun pickMode() {
+        val options = listOf("仅新增（快，默认）", "全量重看（慢，能补漏）")
+        val current = if (ModulePrefs.relationFactIncremental()) 0 else 1
+        kit.picker("整理方式", options, current) { index ->
+            if (ModulePrefs.setRelationFactIncremental(index == 0)) {
+                render()
+                showStatus(if (index == 0) "之后只整理新消息" else "之后每次重看最近 ${ModulePrefs.relationFactLimit()} 条", theme.muted)
+            } else {
+                showStatus("设置没保存成功，重试一次", theme.error)
+            }
+        }
+    }
+
+    private fun toggleUpdated() {
+        val next = !ModulePrefs.relationShowUpdated()
+        if (ModulePrefs.setRelationShowUpdated(next)) {
+            render()
+            showStatus(if (next) "条目会显示整理时间" else "已隐藏整理时间", theme.muted)
+        } else {
+            showStatus("设置没保存成功，重试一次", theme.error)
         }
     }
 
@@ -297,25 +341,28 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             return
         }
         if (refreshing) return
+        val limit = ModulePrefs.relationFactLimit()
+        val incremental = ModulePrefs.relationFactIncremental()
         refreshing = true
-        showStatus("正在整理关系档案…", theme.muted)
-        scope.launch {
-            try {
-                val saved = RelationFactRefresher.refresh(activity, key, settings)
-                refreshing = false
-                if (saved.isEmpty()) {
-                    showStatus("这次没有提取到新的事实", theme.muted)
-                    return@launch
+        showStatus(if (incremental) "正在整理新消息…" else "正在整理最近 $limit 条…", theme.muted)
+        // 独立 scope：关掉窗口或切去别的聊天，这次整理仍会跑完并落库。
+        val started = RelationFactRefresher.launch(activity, key, settings, limit, incremental) { result, error ->
+            refreshing = false
+            when {
+                error != null -> {
+                    MoodLog.w("RELATION_ARCHIVE_REFRESH_FAILED " + error.javaClass.simpleName)
+                    showStatus("整理失败：" + (error.message ?: "请重试"), theme.error)
                 }
-                load(key)
-                showStatus("已更新：有效 ${saved.size} 条", theme.success)
-            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: Exception) {
-                refreshing = false
-                MoodLog.w("RELATION_ARCHIVE_REFRESH_FAILED " + e.javaClass.simpleName)
-                showStatus("整理失败：" + (e.message ?: "请重试"), theme.error)
+                result == null -> Unit
+                result.nothingNew -> showStatus("最近没有新消息，不用整理", theme.muted)
+                result.facts.isEmpty() -> showStatus("这次没有提取到新的事实", theme.muted)
+                else -> {
+                    reload()
+                    showStatus("已更新：有效 ${result.facts.size} 条 · 看了 ${result.scanned} 条", theme.success)
+                }
             }
         }
+        if (!started) showStatus("正在整理，稍等…", theme.muted)
     }
 
     /** 手动补一条：先选类型，再填正文；约定和重要日期可以带一个绝对时间。 */
