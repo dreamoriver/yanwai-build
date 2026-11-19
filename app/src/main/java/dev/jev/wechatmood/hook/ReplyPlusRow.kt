@@ -19,6 +19,7 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
     private var observer: ViewTreeObserver? = null
     private var row: View? = null
     private var blockedPanel: ViewGroup? = null
+    private var entryView: android.widget.TextView? = null
     private var refreshing = false
     private var lastStatus: String? = null
     private var lastRefreshAt = 0L
@@ -67,10 +68,18 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
         if (lastStatus != value) { lastStatus = value; MoodLog.i("REPLY_PLUS_ROW_$value") }
     }
 
+    /** 入口文案带上这个聊天的状态：有今天到期或过期的写「提醒」，只有以后的写「待办」。 */
+    private fun updateEntryLabel() {
+        val view = entryView ?: return
+        val suffix = RelationBadge.label(activity, MessageSniffer.currentReplyTalker())
+        val text = if (suffix == null) "附加" else "附加（" + suffix + "）"
+        if (view.text?.toString() != text) view.text = text
+    }
+
     private fun refresh() {
         if (refreshing) return
         refreshing = true
-        try { syncRow() }
+        try { updateEntryLabel(); syncRow() }
         catch (error: Exception) {
             blockedPanel = panel
             runCatching { restoreContent() }
@@ -113,6 +122,8 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         row.addView(entry, LinearLayout.LayoutParams(-2, theme.dp(34)))
+        entryView = entry
+        updateEntryLabel()
         row.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
         val host = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         val params = content.layoutParams
@@ -134,7 +145,7 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
         observer?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
         observer = null
         footer?.removeOnAttachStateChangeListener(attachListener)
-        footer = null; blockedPanel = null; lastStatus = null
+        footer = null; blockedPanel = null; lastStatus = null; entryView = null
         restoreContent()
     }
 

@@ -471,6 +471,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 return@launch
             }
             load(key)
+            RelationReminder.refresh(activity, key, talker)
         }
     }
 
@@ -485,6 +486,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 return@launch
             }
             load(key)
+            RelationReminder.refresh(activity, key, talker)
         }
     }
 
@@ -499,6 +501,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 return@launch
             }
             load(key)
+            RelationReminder.refresh(activity, key, talker)
             showStatus("已彻底删除，之后的自动整理不会再抽回这条", theme.success)
         }
     }

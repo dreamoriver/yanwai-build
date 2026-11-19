@@ -120,6 +120,8 @@ class HookEntry : IXposedHookLoadPackage {
             registerClearReceiver(context)
             // 通知上的「标完成」按钮：动态注册才收得到（模块代码跑在微信进程里）。
             RelationTodoActions.register(context)
+            // 2.9.142 之前的提醒通知 id 是写死的 1101，升级后它留在栏里点不动，启动时清掉。
+            RelationReminder.cancelLegacy(context)
             installed = true
             MoodLog.i("微信主进程已加载模块 ${BuildConfig.VERSION_NAME}")
             // 环境采集、日志上报、WCDB 反射扫描都不参与首帧，放后台线程。

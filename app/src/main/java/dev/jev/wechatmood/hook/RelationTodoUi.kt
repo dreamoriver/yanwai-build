@@ -226,6 +226,8 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
                 return@launch
             }
             load(key)
+            // 标完成的不该继续挂在通知栏里：重算一次，没了就撤，还有别的就重发。
+            RelationReminder.refresh(activity, key, talker)
         }
     }
 

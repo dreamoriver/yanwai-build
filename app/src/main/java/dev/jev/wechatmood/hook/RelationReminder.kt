@@ -36,6 +36,7 @@ internal object RelationReminder {
     private const val PREFS = "yanwai_relation_notice"
     private const val KEY_LAST_SCAN = "last_global_scan"
     private const val NOTICE_BASE = 1100
+    private const val LEGACY_NOTICE_ID = 1101
     private const val MAX_NOTICES = 5
     private const val GLOBAL_THROTTLE_MS = 15 * 60_000L
     private const val GLOBAL_DELAY_MS = 3_000L
@@ -49,12 +50,48 @@ internal object RelationReminder {
     suspend fun check(context: Context, key: ReplyContactKey, talker: String?, facts: List<RelationFact>) {
         val now = System.currentTimeMillis()
         val due = RelationDue.select(facts, now)
+        RelationBadge.update(context, talker, due.size, openTimed(facts))
         if (due.isEmpty()) {
             cancel(context, key)
             return
         }
         if (!markNotified(context, key.value, due, now)) return
         notify(context, key.value, talker, nameFor(talker).orEmpty(), due, now)
+    }
+
+    /**
+     * 状态被改过之后重算一次：全部完成了就把通知撤掉，还有别的就按新内容重发。
+     *
+     * 之前只在「检查」时撤通知，所以在面板里把条目标成已完成，通知栏里那条会一直挂着。
+     */
+    suspend fun refresh(context: Context, key: ReplyContactKey, talker: String?) {
+        val facts = withContext(Dispatchers.IO) {
+            runCatching { RelationFactBridge.load(context, key) }.getOrDefault(emptyList())
+        }
+        val now = System.currentTimeMillis()
+        val due = RelationDue.select(facts, now)
+        RelationBadge.update(context, talker, due.size, openTimed(facts))
+        if (due.isEmpty()) {
+            cancel(context, key)
+            clearNotified(context, key.value)
+            return
+        }
+        notify(context, key.value, talker, nameFor(talker).orEmpty(), due, now)
+    }
+
+    /** 2.9.142 之前的通知 id 固定 1101，升级后旧通知留在栏里点不动，启动时清掉。 */
+    fun cancelLegacy(context: Context) {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        runCatching { manager.cancel(LEGACY_NOTICE_ID) }
+    }
+
+    private fun openTimed(facts: List<RelationFact>): Int =
+        facts.count { it.isOpen && it.isTimed && it.occurredAt > 0 }
+
+    private fun clearNotified(context: Context, contactKey: String) {
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(contactKey).apply()
+        }
     }
 
     /**
@@ -75,6 +112,7 @@ internal object RelationReminder {
         var posted = 0
         for (group in groups) {
             if (posted >= MAX_NOTICES) break
+            RelationBadge.update(context, group.talker, group.facts.size, group.facts.size)
             if (!markNotified(context, group.key, group.facts, now)) continue
             notify(context, group.key, group.talker, group.name.ifBlank { group.talker?.let { names[it] } ?: "" },
                 group.facts, now)
