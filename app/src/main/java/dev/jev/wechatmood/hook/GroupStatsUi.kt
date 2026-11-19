@@ -86,6 +86,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private var pageNames: Map<String, String> = emptyMap()
     /** wxid → 引用消息里带出来的昵称，补上库里没有的非好友。 */
     private var quotedNames: Map<String, String> = emptyMap()
+    /** wxid → @ 提及里带出来的昵称。 */
+    private var atNames: Map<String, String> = emptyMap()
     /** wxid → 手动补的昵称，优先级最高，点未获取昵称那一行就能填。 */
     private var manualNames: Map<String, String> = emptyMap()
     /** 一次分析的结果，附带用了多少素材，界面上要看得出覆盖范围。 */
@@ -335,23 +337,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val dir = activity.getExternalFilesDir(null) ?: return
         val file = java.io.File(dir, "yanwai-names-diag.txt")
         val tail = "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers +
-            "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size + " manual=" + manualNames.size +
+            "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size + " at=" + atNames.size +
+            " manual=" + manualNames.size +
             "\nmsg_fields=" + MessageMetadata.lastFields.take(80).joinToString(",") + "\n"
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             val body = runCatching {
                 ReplyDatabaseHistory.diagNames(context.talker, accountScope, raws)
             }.getOrNull().orEmpty()
             runCatching { file.writeText(body + tail) }
-            // 类名探测放在全库搜索前面：搜索很容易超时，探测更值钱。
-            // 用微信自己的联系人实体解码 lvbuff，昵称在新版可能只存在那儿。
-            runCatching {
-                file.appendText(ReplyDatabaseHistory.diagRcontact(accountScope, raws, activity.classLoader))
-            }
-            runCatching {
-                ReplyDatabaseHistory.diagSearch(accountScope, raws.firstOrNull { it.startsWith("wxid") }.orEmpty())
-            }.getOrNull()?.let { extra ->
-                runCatching { file.appendText(extra) }
-            }
             dev.jev.wechatmood.core.MoodLog.i("STATS_DIAG_WRITTEN " + file.absolutePath)
         }
     }
@@ -423,8 +416,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             ReplyDatabaseHistory.quotedNames(context.talker, StatsFilter.sinceMillis(), accountScope)
         }.getOrDefault(emptyMap())
         quotedNames = quoted
+        val at = runCatching {
+            ReplyDatabaseHistory.atNames(context.talker, StatsFilter.sinceMillis(), accountScope)
+        }.getOrDefault(emptyMap())
+        atNames = at
         // 手动补的名字放最后，覆盖前面所有的自动结果。
-        return db + quoted + pageNames + manualNames
+        return db + quoted + at + pageNames + manualNames
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {

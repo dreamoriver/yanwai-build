@@ -377,6 +377,46 @@ object ReplyDatabaseHistory {
             }
         }
 
+    /**
+     * 群里的 @ 消息带 <atuserlist>（wxid 列表）和 @昵称。
+     * 只在「@ 了一个人、正文里也只有一个 @」时配对，宁可少认也不认错。
+     */
+    suspend fun atNames(talker: String, sinceMillis: Long, accountScope: String? = null): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            if (!talker.endsWith("@chatroom")) return@withContext emptyMap()
+            val databases = databasesForScope(
+                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+            val out = LinkedHashMap<String, String>()
+            for (db in databases) {
+                val sample = runCatching {
+                    var value = 0L
+                    query(db, "SELECT createTime FROM message WHERE talker = ? LIMIT 1", arrayOf(talker)).use { cursor ->
+                        if (cursor.moveToFirst()) value = cursor.getLong(0)
+                    }
+                    value
+                }.getOrDefault(0L)
+                val since = if (sample > 1_000_000_000_000L) sinceMillis else sinceMillis / 1000
+                runCatching {
+                    query(db, "SELECT content FROM message WHERE talker = ? AND type = 1 AND content LIKE '%atuserlist%' " +
+                        "AND createTime >= ? ORDER BY createTime DESC LIMIT 500",
+                        arrayOf(talker, since.toString())).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            val content = runCatching { cursor.getString(0) }.getOrNull().orEmpty()
+                            val list = dev.jev.wechatmood.reply.GroupMemberList.field(content, "atuserlist")
+                                ?.split(",")?.map { it.trim() }?.filter { it.startsWith("wxid") } ?: continue
+                            if (list.size != 1) continue
+                            val mentions = Regex("@([^\\s\\u2005@]{1,32})[\\u2005\\s]").findAll(content).toList()
+                            if (mentions.size != 1) continue
+                            val name = dev.jev.wechatmood.core.TextClean.name(mentions.first().groupValues[1])
+                            if (name.isNotEmpty() && list[0] !in out) out[list[0]] = name
+                        }
+                    }
+                }
+            }
+            if (out.isNotEmpty()) MoodLog.i("STATS_AT_NAMES count=" + out.size)
+            out
+        }
+
     /** 全库搜索单独一段跑：慢，但不该拖住面板和上一步的诊断。 */
     suspend fun diagSearch(accountScope: String?, target: String): String = withContext(Dispatchers.IO) {
         val databases = databasesForScope(
