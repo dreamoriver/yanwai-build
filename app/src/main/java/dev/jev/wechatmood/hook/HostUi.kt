@@ -162,7 +162,7 @@ class HostUi(private val activity: Activity) {
                 }.getOrDefault(emptyList())
                 rows.map {
                     dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
-                        it.analysisText() ?: "[媒体]")
+                        it.analysisText() ?: "[媒体]", senderId = it.senderId())
                 }
             }
             GroupStatsUi(activity, context, mapped, account) { showStats() }.show()

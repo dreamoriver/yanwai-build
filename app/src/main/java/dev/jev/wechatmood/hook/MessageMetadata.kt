@@ -81,7 +81,8 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
         }
         .trim()
 
-    private fun groupSender(): String? {
+    /** 群消息正文前缀里的发送者 wxid / 微信号；私聊和自己发的返回 null。 */
+    internal fun groupSender(): String? {
         if (isSend != 0 || !talker.endsWith("@chatroom")) return null
         val separator = if (type == 34) ":" else ":\n"
         if (!content.contains(separator)) return null
@@ -91,6 +92,9 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
     }
     private fun body() = if (groupSender() != null && type != 34) content.substringAfter(":\n") else content
 
+    /** 发送者标识（wxid 或微信号），和 speaker 一起用就能把「显示名 → 原始 id」对上。 */
+    fun senderId(): String = if (isSend == 1) "" else groupSender().orEmpty()
+
     fun speaker(): String = when {
         isSend == 1 -> "我"
         talker.endsWith("@chatroom") -> displayName.takeIf { it.isNotBlank() } ?: groupSender() ?: "对方（群成员未知）"
@@ -99,6 +103,8 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
     companion object {
         private val fieldCache = java.util.concurrent.ConcurrentHashMap<Class<*>, Map<String, java.lang.reflect.Field?>>()
         private val dumped = java.util.concurrent.atomic.AtomicBoolean(false)
+        /** 最近一次探测到的消息对象字段名，诊断用。 */
+        @Volatile var lastFields: List<String> = emptyList()
 
         /** 一次性把消息对象的字段名写进日志，方便确认昵称到底存在哪个字段。 */
         private fun dumpFields(item: Any) {
@@ -106,6 +112,7 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
             runCatching {
                 val names = generateSequence(item.javaClass) { it.superclass }.takeWhile { it != Any::class.java }
                     .flatMap { clazz -> clazz.declaredFields.map { it.name } }.distinct().toList()
+                lastFields = names
                 dev.jev.wechatmood.core.MoodLog.i("MSG_FIELDS count=${names.size} names=${names.take(60)}")
             }
         }

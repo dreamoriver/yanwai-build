@@ -249,37 +249,77 @@ object ReplyDatabaseHistory {
     }
 
     /**
-     * 昵称查不到时的现场诊断：群名片原文长什么样、rcontact 有哪些列、
-     * 抽几个没查到的 wxid 直接看那一行。写到微信自己的外部目录，用户可自行删除。
+     * 昵称查不到时的现场诊断：写清楚微信这版把名字放哪了。
+     * 1) chatroom 整行（memberlist 现在只是分号列表，昵称列另有其人）
+     * 2) 一个没命中的 wxid 在 rcontact 的整行
+     * 3) 全库定位这个 wxid 出现在哪些表、哪些列
      */
     suspend fun diagNames(chatroom: String?, accountScope: String?, raws: List<String>): String =
         withContext(Dispatchers.IO) {
             val databases = databasesForScope(
                 synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+            val target = raws.firstOrNull { it.startsWith("wxid") } ?: raws.firstOrNull().orEmpty()
             buildString {
                 appendLine("diag_names time=" + System.currentTimeMillis())
-                appendLine("chatroom=" + chatroom + " dbs=" + databases.size)
+                appendLine("chatroom=" + chatroom + " dbs=" + databases.size + " target=" + target)
                 appendLine("layers=" + lastLayers)
                 for (db in databases.take(1)) {
+                    val tables = tableNamesOf(db)
+                    appendLine("tables=" + tables.size + " " + tables.joinToString(",").take(4000))
                     val xml = runCatching { rawMemberlist(db, chatroom.orEmpty()) }.getOrDefault("")
                     appendLine("memberlist_len=" + xml.length)
                     appendLine("memberlist_head=" + xml.take(1500).replace("\n", "\\n"))
-                    val columns = tableColumns(db, "rcontact")
-                    appendLine("rcontact_columns=" + columns)
-                    for (name in raws.filter { it.isNotBlank() }.distinct().take(8)) {
-                        val row = runCatching {
-                            query(db, "SELECT * FROM rcontact WHERE username = ? OR alias = ? LIMIT 1",
-                                arrayOf(name, name)).use { cursor ->
-                                if (!cursor.moveToFirst()) "none" else columns.take(10).mapIndexed { index, column ->
-                                    column + "=" + runCatching { cursor.getString(index) }.getOrNull()
-                                }.joinToString("|")
+                    appendLine("chatroom_row=" + rowDump(db, "chatroom", "chatroomname", chatroom.orEmpty()))
+                    appendLine("rcontact_row=" + rowDump(db, "rcontact", "username", target))
+                    // 全库定位：只扫名字像联系人的表，避免把 message 这种大表翻一遍。
+                    var hits = 0
+                    for (table in tables) {
+                        if (hits >= 12) break
+                        val lower = table.lowercase()
+                        if (!(lower.contains("contact") || lower.contains("nick") || lower.contains("member") ||
+                                lower.contains("room") || lower.contains("user") || lower.contains("stranger") ||
+                                lower.contains("profile") || lower.contains("info") || lower.startsWith("openim"))) continue
+                        if (lower == "rcontact" || lower == "chatroom") continue
+                        val columns = tableColumns(db, table)
+                        val idColumns = columns.filter { it.lowercase() in ID_COLUMNS }
+                        for (column in idColumns) {
+                            val hit = runCatching {
+                                query(db, "SELECT * FROM " + table + " WHERE " + column + " = ? LIMIT 1",
+                                    arrayOf(target)).use { cursor ->
+                                    if (!cursor.moveToFirst()) null else columns.mapIndexed { index, name ->
+                                        name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
+                                    }.filter { it.second.isNotBlank() && it.second.length < 120 }
+                                        .joinToString("|") { it.first + "=" + it.second }
+                                }
+                            }.getOrNull()
+                            if (!hit.isNullOrBlank()) {
+                                appendLine("hit[" + table + "." + column + "]=" + hit.take(400))
+                                hits++
                             }
-                        }.getOrElse { "error " + it.message }
-                        appendLine("probe[" + name + "]=" + row.take(400))
+                        }
                     }
+                    appendLine("hits=" + hits)
                 }
             }
         }
+
+    /** 整行 dump：列名=值，只留非空且不太长的字段。 */
+    private fun rowDump(db: Any, table: String, keyColumn: String, key: String): String {
+        if (key.isBlank()) return "none"
+        val columns = tableColumns(db, table)
+        return runCatching {
+            query(db, "SELECT * FROM " + table + " WHERE " + keyColumn + " = ? LIMIT 1", arrayOf(key)).use { cursor ->
+                if (!cursor.moveToFirst()) return@use "none"
+                columns.mapIndexed { index, name ->
+                    name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
+                }.filter { it.second.isNotBlank() }
+                    .joinToString("|") { it.first + "=" + it.second.take(60) }
+            }
+        }.getOrDefault("error")
+    }
+
+    private val ID_COLUMNS = setOf("username", "user_name", "wxid", "alias", "userid", "user_id",
+        "contactid", "contact_id", "member", "membername")
 
     /** 单库表名列表，供昵称兜底扫描用。 */
     private fun tableNamesOf(db: Any): List<String> = runCatching {

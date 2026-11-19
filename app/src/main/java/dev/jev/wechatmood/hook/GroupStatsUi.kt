@@ -82,6 +82,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private var unknownNames = 0
     /** 素材正文的字符预算：小模型上下文也就 8k，素材撑太满直接 400。 */
     private val MATERIAL_CHARS = 9000
+    /** wxid → 微信页面上显示的昵称，来自消息对象自带的显示名，比库里的准。 */
+    private var pageNames: Map<String, String> = emptyMap()
     /** 一次分析的结果，附带用了多少素材，界面上要看得出覆盖范围。 */
     private data class Analysis(val text: String, val material: Int, val total: Int, val note: String = "")
 
@@ -146,7 +148,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         if (rows.isEmpty()) return
         dbMessages = rows.map {
             dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
-                it.analysisText() ?: "[媒体]")
+                it.analysisText() ?: "[媒体]", senderId = it.senderId())
         }
         stats = computeStats()
     }
@@ -184,7 +186,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
 
         body.addView(LinearLayout(activity), LinearLayout.LayoutParams(-1, theme.dp(6)))
         body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
-        renderTop(emptyMap())
+        pageNames = pageSpeakerNames()
+        renderTop(pageNames)
 
         val activeBox = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         body.addView(activeBox, LinearLayout.LayoutParams(-1, -2))
@@ -261,7 +264,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 val names = runCatching {
                     ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, context.talker, accountScope)
                 }.getOrDefault(emptyMap())
-                if (names.isNotEmpty()) renderTop(currentNames + names)
+                renderTop(currentNames + names + pageNames)
             }
         }
         val actions = LinearLayout(activity).apply {
@@ -317,7 +320,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             val names = runCatching {
                 ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, context.talker, accountScope)
             }.getOrDefault(emptyMap())
-            if (names.isNotEmpty()) renderTop(names)
+            renderTop(names + pageNames)
             dumpNameDiag()
         }
     }
@@ -333,7 +336,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         runCatching {
             val dir = activity.getExternalFilesDir(null) ?: return
             java.io.File(dir, "yanwai-names-diag.txt").writeText(
-                body + "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers + "\n")
+                body + "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers +
+                    "\npageNames=" + pageNames.size + " sample=" + pageNames.entries.take(5).joinToString(";") { it.key + ">" + it.value } +
+                    "\nmsg_fields=" + MessageMetadata.lastFields.take(80).joinToString(",") + "\n")
             dev.jev.wechatmood.core.MoodLog.i("STATS_DIAG_WRITTEN " + dir.absolutePath)
         }
     }
@@ -371,6 +376,21 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 setPadding(0, theme.dp(6), 0, 0)
             })
         }
+    }
+
+    /**
+     * 群聊页面上微信自己渲染的名字：消息对象带了显示名时 speaker 就是昵称，senderId 是 wxid。
+     * 非好友的昵称库里可能是空白，但页面上一定显示得出来。
+     */
+    private fun pageSpeakerNames(): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (message in context.messages) {
+            val id = message.senderId
+            if (id.isBlank() || message.speaker.isBlank() || message.speaker == id) continue
+            if (message.speaker == "我" || message.speaker == "对方") continue
+            out[id] = message.speaker
+        }
+        return out
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {
@@ -526,7 +546,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         // 用筛选后的消息做素材：以前只取页面里最近几条，统计一千多条却只总结十几条。
         val pool = selectedMessages().ifEmpty { context.messages }
-        val resolved = runCatching {
+        val resolved = pageNames + runCatching {
             ReplyDatabaseHistory.displayNames(pool.map { it.speaker }.distinct(), context.talker, accountScope)
         }.getOrDefault(emptyMap())
         // 按整段抽样：单条均匀抽会把对话抽成碎片，模型看不出谁在接谁。
