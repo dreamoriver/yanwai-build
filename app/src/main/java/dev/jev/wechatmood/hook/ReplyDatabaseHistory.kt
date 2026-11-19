@@ -304,13 +304,24 @@ object ReplyDatabaseHistory {
                         "Stranger", "ContactCmdBuf", "MsgQuote", "img_flag")) {
                         appendLine("schema[" + table + "]=" + tableColumns(db, table).joinToString(","))
                     }
-                    // 全库找这个 wxid：名字只要本地存过，总会被某一列命中。
-                    for (line in searchEverywhere(db, target)) appendLine(line)
+                    appendLine("contact_cmd_buf=" + rowDump(db, "ContactCmdBuf", "username", target))
                     // 群消息的 lvbuffer 里常带发送者附加信息，看看有没有可读内容。
                     appendLine("lvbuffer=" + lvbufferSample(db, chatroom.orEmpty()))
                 }
             }
         }
+
+    /** 全库搜索单独一段跑：慢，但不该拖住面板和上一步的诊断。 */
+    suspend fun diagSearch(accountScope: String?, target: String): String = withContext(Dispatchers.IO) {
+        val databases = databasesForScope(
+            synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+        buildString {
+            appendLine("diag_search target=" + target)
+            for (db in databases.take(1)) {
+                for (line in searchEverywhere(db, target)) appendLine(line)
+            }
+        }
+    }
 
     /** 跳过消息类大表：这些表几十万行，LIKE 全表扫会把统计面板拖死。 */
     private val BIG_TABLES = setOf("message", "fmessage_msginfo", "bizchatmessage", "appbrandmessage",
@@ -320,8 +331,10 @@ object ReplyDatabaseHistory {
     private fun searchEverywhere(db: Any, target: String): List<String> {
         if (target.isBlank()) return emptyList()
         val out = ArrayList<String>()
+        val deadline = System.currentTimeMillis() + 20_000
         for (table in tableNamesOf(db)) {
             if (out.size >= 16) break
+            if (System.currentTimeMillis() > deadline) { out += "search_timeout"; break }
             if (table in BIG_TABLES) continue
             val columns = tableColumns(db, table)
             if (columns.isEmpty() || columns.size > 40) continue

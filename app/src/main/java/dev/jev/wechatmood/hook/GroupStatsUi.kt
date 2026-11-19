@@ -321,21 +321,30 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
     }
 
-    /** 昵称查不到时的现场诊断：写到微信自己的外部目录，拷出来就能看是哪一层没命中。 */
-    private suspend fun dumpNameDiag() {
+    /**
+     * 昵称查不到时的现场诊断：写到微信自己的外部目录。
+     * 用独立的 scope，且快慢两段分开落盘——以前挂在面板协程上，用户一关面板就被取消，
+     * 全库搜索还没跑完文件根本没生成。
+     */
+    private fun dumpNameDiag() {
         if (unknownNames <= 0) return
         val raws = stats.members.map { it.name }.filter { it !in currentNames }
-        val body = runCatching {
-            ReplyDatabaseHistory.diagNames(context.talker, accountScope, raws)
-        }.getOrNull().orEmpty()
-        if (body.isBlank()) return
-        runCatching {
-            val dir = activity.getExternalFilesDir(null) ?: return
-            java.io.File(dir, "yanwai-names-diag.txt").writeText(
-                body + "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers +
-                    "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size + " sample=" + pageNames.entries.take(5).joinToString(";") { it.key + ">" + it.value } +
-                    "\nmsg_fields=" + MessageMetadata.lastFields.take(80).joinToString(",") + "\n")
-            dev.jev.wechatmood.core.MoodLog.i("STATS_DIAG_WRITTEN " + dir.absolutePath)
+        val dir = activity.getExternalFilesDir(null) ?: return
+        val file = java.io.File(dir, "yanwai-names-diag.txt")
+        val tail = "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers +
+            "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size +
+            "\nmsg_fields=" + MessageMetadata.lastFields.take(80).joinToString(",") + "\n"
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            val body = runCatching {
+                ReplyDatabaseHistory.diagNames(context.talker, accountScope, raws)
+            }.getOrNull().orEmpty()
+            runCatching { file.writeText(body + tail) }
+            runCatching {
+                ReplyDatabaseHistory.diagSearch(accountScope, raws.firstOrNull { it.startsWith("wxid") }.orEmpty())
+            }.getOrNull()?.let { extra ->
+                runCatching { file.appendText(extra) }
+            }
+            dev.jev.wechatmood.core.MoodLog.i("STATS_DIAG_WRITTEN " + file.absolutePath)
         }
     }
 
