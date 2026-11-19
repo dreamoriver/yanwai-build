@@ -104,8 +104,8 @@ object RelationFactBridge {
     }
 
     /** 记下"这个哈希键对应哪个聊天"，供到期提醒点进正确的会话。 */
-    fun rememberContact(context: Context, key: ReplyContactKey, talker: String) = runCatching {
-        store(context).rememberContact(key, talker)
+    fun rememberContact(context: Context, key: ReplyContactKey, talker: String, name: String = "") = runCatching {
+        store(context).rememberContact(key, talker, name)
     }.onFailure { MoodLog.w("RELATION_CONTACT_DIR_FAILED " + it.javaClass.simpleName) }
 
     /** 全部联系人的到期条目；读不到就返回空，宁可这次不提醒也不抛到界面。 */

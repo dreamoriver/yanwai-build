@@ -159,7 +159,7 @@ object FactTimes {
 }
 
 /** 一次提醒涉及的联系人：哈希键用于读写档案，talker 只用于点通知时进对那个聊天。 */
-data class DueContact(val key: String, val talker: String?, val facts: List<RelationFact>)
+data class DueContact(val key: String, val talker: String?, val name: String, val facts: List<RelationFact>)
 
 /**
  * 到期条目的筛选与写法。
@@ -205,7 +205,9 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
             "deleted_at INTEGER NOT NULL, PRIMARY KEY(contact_key, fact_id))")
         // 哈希键换不回聊天对象，提醒要点进那个聊天就得单独记一份；只在本机，不参与上传或分析。
         db.execute("CREATE TABLE IF NOT EXISTS relation_contact_dir (contact_key TEXT PRIMARY KEY NOT NULL, " +
-            "talker TEXT NOT NULL, updated_at INTEGER NOT NULL)")
+            "talker TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)")
+        // 旧库只有 talker 一列：补上名字，失败说明已经补过。
+        runCatching { db.execute("ALTER TABLE relation_contact_dir ADD COLUMN name TEXT NOT NULL DEFAULT ''") }
         migrateLegacy()
     }
 
@@ -419,11 +421,16 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
      * 记住哈希键对应的聊天对象。提醒要点进那个聊天，光有 64 位哈希做不到。
      * 只写在本机这个库里，不进提示词、不写日志、不上传。
      */
-    fun rememberContact(key: ReplyContactKey, talker: String) = synchronized(writeLock) {
+    fun rememberContact(key: ReplyContactKey, talker: String, name: String = "") = synchronized(writeLock) {
         if (talker.isBlank() || talker.length > 256) return@synchronized
-        db.execute("INSERT OR REPLACE INTO relation_contact_dir(contact_key, talker, updated_at) VALUES(?, ?, ?)",
-            listOf(key.value, talker, now().toString()))
+        // 名字查不到时保留上次存下的，不要用一个空串把备注名抹掉。
+        val kept = name.trim().take(64).ifEmpty { contactName(key.value) }
+        db.execute("INSERT OR REPLACE INTO relation_contact_dir(contact_key, talker, name, updated_at) " +
+            "VALUES(?, ?, ?, ?)", listOf(key.value, talker, kept, now().toString()))
     }
+
+    private fun contactName(contactKey: String): String =
+        db.query("SELECT name FROM relation_contact_dir WHERE contact_key = ?", listOf(contactKey)).orEmpty()
 
     fun contactTalker(key: ReplyContactKey): String? = contactTalker(key.value)
 
@@ -448,7 +455,7 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         return grouped.mapNotNull { (contactKey, facts) ->
             val due = RelationDue.select(facts, now)
             if (due.isEmpty()) return@mapNotNull null
-            DueContact(contactKey, contactTalker(contactKey), due)
+            DueContact(contactKey, contactTalker(contactKey), contactName(contactKey), due)
         }.sortedBy { it.facts.first().occurredAt }
     }
 

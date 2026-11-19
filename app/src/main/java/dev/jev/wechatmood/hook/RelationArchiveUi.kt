@@ -138,8 +138,13 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         scope.launch {
             val key = resolveKey(selected)
             contactKey = key
-            // 记下这条档案对应哪个聊天，到期通知点开才能进对会话。
-            if (key != null) RelationFactBridge.rememberContact(activity, key, selected)
+            // 记下这条档案对应哪个聊天和备注名，到期通知点开才能进对会话。
+            if (key != null) {
+                val name = withContext(Dispatchers.IO) {
+                    runCatching { ReplyDatabaseHistory.contactNames(listOf(selected))[selected] }.getOrNull()
+                }
+                RelationFactBridge.rememberContact(activity, key, selected, name.orEmpty())
+            }
             if (key == null) {
                 showStatus("没能确认是哪个账号的聊天，先回到聊天页等一会儿", theme.warning)
                 return@launch
@@ -545,8 +550,72 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         val text = input("例如：在游戏公司做运营")
         column.addView(text, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })
         val timed = kind in RelationFact.TIMED_KINDS
-        val at = if (timed) input("时间，如 2026-11-20 19:00；留空就只当信息") else null
-        at?.let { column.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) }) }
+        // 时间改成点选：日历 + 表盘滚轮，不再让人手打「2026-11-20 19:00」。
+        var occurredAt = 0L
+        if (timed) {
+            var dayOnly = kind == "重要日期"
+            val initial = java.util.Calendar.getInstance().apply {
+                add(java.util.Calendar.HOUR_OF_DAY, 1)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            val dateValue = theme.label("", ReplyMetrics.TEXT_BODY, theme.ink)
+            val timeValue = theme.label("", ReplyMetrics.TEXT_BODY, theme.ink)
+            val datePicker = android.widget.DatePicker(activity).apply { visibility = android.view.View.GONE }
+            val clock = android.widget.TimePicker(activity).apply { setIs24HourView(true) }
+            fun pickedMillis(): Long = java.util.Calendar.getInstance().apply {
+                set(datePicker.year, datePicker.month, datePicker.dayOfMonth,
+                    if (dayOnly) 0 else clock.hour, if (dayOnly) 0 else clock.minute, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            fun refresh() {
+                occurredAt = pickedMillis()
+                dateValue.text = FactTimes.label(occurredAt)
+                timeValue.text = if (dayOnly) "不写具体时刻" else FactTimes.formatLocal(occurredAt, "HH:mm")
+            }
+            fun pickerRow(title: String, value: TextView, toggle: () -> Unit): LinearLayout =
+                LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    minimumHeight = theme.dp(ReplyMetrics.TAP)
+                    background = theme.shape(theme.card, ReplyMetrics.RADIUS_BUTTON, theme.border)
+                    setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { toggle() }
+                    addView(theme.label(title, ReplyMetrics.TEXT_BODY, theme.muted))
+                    value.gravity = android.view.Gravity.END
+                    addView(value, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = theme.dp(10) })
+                }
+            datePicker.init(initial.get(java.util.Calendar.YEAR), initial.get(java.util.Calendar.MONTH),
+                initial.get(java.util.Calendar.DAY_OF_MONTH)) { _, _, _, _ -> refresh() }
+            clock.hour = initial.get(java.util.Calendar.HOUR_OF_DAY)
+            clock.minute = initial.get(java.util.Calendar.MINUTE)
+            clock.setOnTimeChangedListener { _, _, _ -> refresh() }
+            clock.visibility = android.view.View.GONE
+            column.addView(pickerRow("日期", dateValue) {
+                datePicker.visibility = if (datePicker.visibility == android.view.View.GONE)
+                    android.view.View.VISIBLE else android.view.View.GONE
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
+            column.addView(datePicker, LinearLayout.LayoutParams(-1, -2))
+            column.addView(pickerRow("时刻", timeValue) {
+                clock.visibility = if (clock.visibility == android.view.View.GONE)
+                    android.view.View.VISIBLE else android.view.View.GONE
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
+            column.addView(clock, LinearLayout.LayoutParams(-1, -2))
+            val dayOnlySwitch = android.widget.Switch(activity).apply {
+                // 不能写 text = ...：外层有个同名 val（正文输入框），会被解析成它。
+                setText("只到日期，不写几点")
+                isChecked = dayOnly
+                textSize = ReplyMetrics.TEXT_BODY
+                setTextColor(theme.ink)
+                minimumHeight = theme.dp(ReplyMetrics.TAP)
+                setPadding(0, theme.dp(8), 0, 0)
+                setOnCheckedChangeListener { _, value -> dayOnly = value; refresh() }
+            }
+            column.addView(dayOnlySwitch, LinearLayout.LayoutParams(-1, -2))
+            refresh()
+        }
         val hint = kit.caption("")
         column.addView(hint)
         column.addView(theme.action("保存", primary = true) {
@@ -555,10 +624,9 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 body.isEmpty() -> hint.text = "写一句再保存"
                 body.length > RelationFact.MAX_TEXT -> hint.text = "超过 ${RelationFact.MAX_TEXT} 个字了"
                 else -> {
-                    val occurredAt = at?.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(FactTimes::parseLocal) ?: 0
                     sheet.dismiss()
                     addDialog = null
-                    save(kind, body, occurredAt)
+                    save(kind, body, if (timed) occurredAt else 0)
                 }
             }
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })

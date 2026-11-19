@@ -40,6 +40,17 @@ class RelationDueStoreTest {
         assertNull(due.first().talker)
     }
 
+    @Test fun `empty name does not wipe the stored remark name`() {
+        val store = store()
+        val key = ReplyContactKey("e".repeat(64))
+        val today = FactTimes.startOfDay(System.currentTimeMillis()) + 19 * 3_600_000L
+        store.rememberContact(key, "wxid_x", "张三")
+        store.rememberContact(key, "wxid_x", "")
+        store.replace(key, listOf(RelationFact(kind = "约定", text = "吃饭", occurredAt = today, updatedAt = 1)))
+
+        assertEquals("张三", store.dueContacts().first().name)
+    }
+
     @Test fun `marking done clears it from the next reminder`() {
         val store = store()
         val key = ReplyContactKey("d".repeat(64))

@@ -54,7 +54,7 @@ internal object RelationReminder {
             return
         }
         if (!markNotified(context, key.value, due, now)) return
-        notify(context, key.value, talker, nameFor(talker), due, now)
+        notify(context, key.value, talker, nameFor(talker).orEmpty(), due, now)
     }
 
     /**
@@ -76,7 +76,8 @@ internal object RelationReminder {
         for (group in groups) {
             if (posted >= MAX_NOTICES) break
             if (!markNotified(context, group.key, group.facts, now)) continue
-            notify(context, group.key, group.talker, group.talker?.let { names[it] }, group.facts, now)
+            notify(context, group.key, group.talker, group.name.ifBlank { group.talker?.let { names[it] } ?: "" },
+                group.facts, now)
             posted++
         }
         MoodLog.i("RELATION_REMIND_ALL contacts=" + groups.size + " posted=" + posted)
@@ -107,7 +108,7 @@ internal object RelationReminder {
         runCatching { manager.cancel(noticeId(key.value)) }
     }
 
-    private fun notify(context: Context, contactKey: String, talker: String?, name: String?,
+    private fun notify(context: Context, contactKey: String, talker: String?, name: String,
         facts: List<RelationFact>, now: Long) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         ensureChannel(manager)
@@ -120,33 +121,38 @@ internal object RelationReminder {
         val noticeId = noticeId(contactKey)
         val builder = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(if (name != null) "待办 · " + name else "关系档案 · 有待办")
+            .setContentTitle(if (name.isNotBlank()) "待办 · " + name else "待办 · 未获取备注名")
             .setContentText(lines.firstOrNull().orEmpty())
             .setStyle(Notification.BigTextStyle().bigText(big))
             .setGroup(GROUP)
             .setAutoCancel(true)
-            .setContentIntent(chatIntent(context, talker, noticeId))
+            .setContentIntent(openIntent(context, contactKey, talker, noticeId))
         // 通知按钮在个别 ROM 上会抛错；抛了就退化成纯点击，不影响提醒本身。
         runCatching {
             builder.addAction(Notification.Action.Builder(
                 Icon.createWithResource("android", android.R.drawable.ic_menu_agenda),
-                if (facts.size > 1) "都标完成" else "标完成",
+                if (facts.size > 1) "全部标记完成" else "标记完成",
                 doneIntent(context, contactKey, facts, noticeId)).build())
         }.onFailure { MoodLog.w("RELATION_REMIND_ACTION_FAILED " + it.javaClass.simpleName) }
         runCatching { manager.notify(noticeId, builder.build()) }
             .onFailure { MoodLog.w("RELATION_REMIND_NOTIFY_FAILED " + it.javaClass.simpleName) }
-        MoodLog.i("RELATION_REMIND posted items=" + facts.size + " named=" + (name != null) +
+        MoodLog.i("RELATION_REMIND posted items=" + facts.size + " named=" + name.isNotBlank() +
             " talker=" + (talker != null))
     }
 
-    /** 点通知进那个聊天；微信不认这个 extra 时会停在首页，不会崩，也不会跳错人。 */
-    private fun chatIntent(context: Context, talker: String?, noticeId: Int): PendingIntent {
-        val intent = Intent().apply {
-            setClassName("com.tencent.mm", "com.tencent.mm.ui.LauncherUI")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            if (!talker.isNullOrBlank()) putExtra("Chat_User", talker)
-        }
-        return PendingIntent.getActivity(context, noticeId, intent,
+    /**
+     * 点通知进那个聊天。
+     *
+     * 先回到模块自己的接收器，再在微信进程里 startActivity：LauncherUI 那套
+     * 「带 Chat_User 的 extra」在这版微信上会被忽略，落到首页；ChattingUI 才是现在的入口。
+     */
+    private fun openIntent(context: Context, contactKey: String, talker: String?, noticeId: Int): PendingIntent {
+        val intent = Intent(RelationTodoActions.ACTION_OPEN)
+            .setPackage("com.tencent.mm")
+            .putExtra(RelationTodoActions.EXTRA_KEY, contactKey)
+            .putExtra(RelationTodoActions.EXTRA_TALKER, talker)
+            .putExtra(RelationTodoActions.EXTRA_NOTICE, noticeId)
+        return PendingIntent.getBroadcast(context, noticeId, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
