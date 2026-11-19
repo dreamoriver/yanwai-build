@@ -16,6 +16,7 @@ import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.TextClean
 import dev.jev.wechatmood.reply.GroupStats
 import dev.jev.wechatmood.reply.GroupStatsCalculator
+import dev.jev.wechatmood.reply.GroupTranscript
 import dev.jev.wechatmood.reply.ReplyContext
 import dev.jev.wechatmood.reply.ReplyHttpClient
 import dev.jev.wechatmood.reply.StatRecord
@@ -39,9 +40,9 @@ object StatsFilter {
         HOUR24("最近 24 小时", 24 * 60L * 60 * 1000),
         TODAY("今天", -1),
     }
-    // 默认给一个保守范围，避免误点就把整段聊天送去分析。
+    // 时段默认「今天」；条数默认全部，之前默认 20 条，总结就只能看到十几条消息。
     var range: Range = Range.TODAY
-    var limit: Int = 20
+    var limit: Int = 0
     val limitLabel: String get() = if (limit == 0) "该时段全部" else "最近 $limit 条"
 
     fun sinceMillis(now: Long = System.currentTimeMillis()): Long = when (range) {
@@ -75,8 +76,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     /** 成员原始名 → 表格里显示的文本，生成图片时复用同一套规则。 */
     private val displayedNames = mutableMapOf<String, String>()
     private var analysisText: String = ""
-    /** 总结一次最多喂多少条消息：均匀抽样，够覆盖整个时段又不会撑爆上下文。 */
-    private val SAMPLE_MESSAGES = 60
+    /** 一次分析的结果，附带用了多少素材，界面上要看得出覆盖范围。 */
+    private data class Analysis(val text: String, val material: Int, val total: Int)
 
     /** 看着有码点、渲染却是空白的字符。 */
     private val BLANK_CODES = setOf(
@@ -199,15 +200,21 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             analysisBox.addView(panelWith("群里在聊什么", kit.loading().apply { showLoading("正在分析最近聊天…") }),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
             scope.launch {
-                val text = runCatching { analyzeAll(context) }.getOrElse { error ->
+                val analysis = runCatching { analyzeAll(context) }.getOrElse { error ->
                     dev.jev.wechatmood.core.MoodLog.w("STATS_AI_FAILED " + error.message)
-                    "分析失败：" + (error.message ?: "请重试")
+                    Analysis("分析失败：" + (error.message ?: "请重试"), 0, 0)
                 }
-                val failed = text.startsWith("分析失败")
-                val shown = text.ifBlank { "（模型返回空内容）" }
-                analysisText = text
+                val failed = analysis.text.startsWith("分析失败")
+                val shown = analysis.text.ifBlank { "（模型返回空内容）" }
+                analysisText = analysis.text
                 analysisBox.removeAllViews()
-                val content = kit.body(shown).apply { if (failed) setTextColor(theme.error) }
+                val content = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    if (analysis.material > 0) {
+                        addView(kit.caption("素材 ${analysis.material}/${analysis.total} 条 · 按整段抽样"))
+                    }
+                    addView(kit.body(shown).apply { if (failed) setTextColor(theme.error) })
+                }
                 analysisBox.addView(panelWith("群里在聊什么", content),
                     LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
                 aiButton.text = "重新分析"
@@ -316,7 +323,6 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             return
         }
         val merged = LinkedHashMap<String, Int>()
-        var anonymous = 0
         var unknown = 0
         for (member in stats.members) {
             val resolved = resolveName(member.name, names)
@@ -331,11 +337,17 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             topContainer.addView(tableRow(entry.key, "${entry.value}", "${percents[index]}%"),
                 LinearLayout.LayoutParams(-1, -2))
         }
+        if (unknown > 0) {
+            // 查不到就说清楚查不到，别让人以为统计漏了人。
+            topContainer.addView(kit.caption("其中 $unknown 人没查到群昵称，先按序号显示").apply {
+                setPadding(0, theme.dp(6), 0, 0)
+            })
+        }
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {
         // 数据库里有名字优先用；没有就用原始名字。只要不是空白就显示，截断即可。
-        val fromDb = names[raw]?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }?.takeIf { it.isNotEmpty() }
+        val fromDb = names[raw]?.let { dev.jev.wechatmood.core.TextClean.name(it) }?.takeIf { it.isNotEmpty() }
         val clean = (fromDb ?: raw).trim()
         // 数据库里缺失的字段会写 null / uinull，那不是名字。
         if (clean.isEmpty() || clean.equals("null", true) || clean.equals("uinull", true)) return null
@@ -423,10 +435,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private fun shorten(text: String): String = if (text.length > 10) text.take(10) + "…" else text
 
     private fun exportText(analysis: String): String = buildString {
-        appendLine("群聊统计 · 最近 ${context.messages.size} 条")
+        appendLine("群聊统计 · ${summaryText()}")
+        appendLine("数据范围 ${spanText()}")
         appendLine("共 ${stats.total} 条 · ${stats.senders} 人发言")
         if (stats.topSenders.isNotEmpty()) {
-            appendLine("最活跃：" + stats.topSenders.joinToString("、") { "${it.first} ${it.second}" })
+            // 名字用表格里那套解析结果，复制出去别带 wxid。
+            appendLine("最活跃：" + stats.topSenders.joinToString("、") {
+                "${displayedNames[it.first] ?: it.first} ${it.second}"
+            })
         }
         if (stats.activeHours.isNotEmpty()) {
             appendLine("活跃时段：" + stats.activeHours.joinToString("、") { "${it} 点" })
@@ -438,41 +454,39 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }.trim()
 
     /**
-     * 群聊转述的提示词：先概括、再挑事举例、最后有梗收尾，写法照合并转发摘要。
+     * 群聊转述的提示词：先把主线说清，再把事一件件点到，最后收一句。
      * 素材里的 speaker 已经换成昵称，模型不该再看到 wxid。
      */
     private val summaryPrompt = """
-        你在一个微信群里蹲了一阵子，现在跟旁边的人聊起这个群最近在干嘛。
+        你在一个微信群里蹲了一整天，现在要跟旁边的人讲清楚这群人最近都聊了些什么。
 
-        按这个顺序写，分三段，段与段之间空一行：
-        第一段：一两句话概括这帮人最近主要在折腾什么，顺带一句你对他们状态的感觉（活跃、水、跑题、互相抬杠，挑一个说得准的）。
-        第二段：挑两到三件最有意思、最具体的事，说清是谁做的、说了什么。挑有画面感或者好笑的，不要按时间顺着讲。
-        第三段：一句收尾。可以是吐槽、可以埋个后续的梗，也可以一句话给这帮人定性。要有意思，但别喊口号。
+        素材是这个时段的消息，按时间顺序，可能只抽了一部分，也可能有上下文缺失。
 
-        说话方式：
+        怎么讲：
+        - 开头一句话说清主线：这帮人最近主要在忙什么、反复出现的是什么话题。
+        - 然后一件事一段。素材里能说清的事都要点到，通常三到六件，有几件写几件；
+          不要只挑两件好笑的，也不要把两件不同的事并成一件。
+        - 每件事都点出是谁说的、说了什么，能用原话就用原话，原话必须真的在素材里出现过。
+        - 顺序按有画面感或者好笑的来排，不要按时间顺着讲，那是记流水账。
+        - 结尾一句，可以吐槽，也可以给这帮人一句定性，别喊口号。
+        - 素材里叫「群友N」的是没查到昵称的人，别猜他们是谁；[图片] [语音] 只当占位，不要猜内容。
+
+        怎么说话：
         - 短句为主，可以有半截话，像边想边说。
         - 不要「首先、其次、最后」「虽然、但是」「不仅、而且」这类连接词，
           也不要「综上所述」「总而言之」「值得一提的是」「值得注意的是」。
         - 不分点、不编号、不加小标题、不用 Markdown、不用 emoji 当标题，
           不写「群氛围」「成员角色」「沟通建议」这种分析标题。
-        - 不要按时间一条条复述消息，那是记流水账；只挑值得说的。
-        - 引用的原话必须真的在消息里出现过，不要编。
-        - 群友的昵称照原样说，别人的话别改写成书面语。
-        - 如果只是普通闲聊没什么事，就照实说在聊什么，别硬编冲突，也别总结出什么群体规律。
-        - 写成 [图片] [语音] 的只当占位，不要猜内容。
         - 不复述统计数字，不评价这个群好还是不好。
-        - 全文 300 字左右，最多三段。
+        - 如果确实只是闲聊没什么事，就照实说在聊什么，别硬编冲突，也别总结出什么群体规律。
 
-        结构示例（只说明怎么组织，内容不要照搬）：
-        这帮人最近没干正事，全在折腾刷机，从模块冲突聊到开机卡在 logo，气氛是一边互相鼓励一边互相劝退。
-        最有意思的是老王，前脚说「再刷一次就退群」，后脚又贴了个新版本；小张在旁边专门泼冷水，「你上次也是这么说的」。
-        最后谁也没真刷，话题拐到外卖点什么去了，倒也挺和谐。
+        长度 500 字上下，最多八段。宁可把事说全，也不要为了短而漏掉明显的话题。
 
-        只输出这三段。
+        只输出正文，不要写「以下是总结」这类开场。
     """.trimIndent()
 
-    /** 一次请求拿到一段转述。 */
-    private suspend fun analyzeAll(context: ReplyContext): String {
+    /** 一次请求拿到一段转述，顺带回报用了多少素材。 */
+    private suspend fun analyzeAll(context: ReplyContext): Analysis {
         val settings = ModulePrefs.replySettings()
         if (!settings.isConfigured) {
             ModulePrefs.reload(force = true)
@@ -482,52 +496,62 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         check(current.isConfigured) {
             if (!ModulePrefs.bridgeAvailable) "设置服务未连接：先打开一次言外再回来分析" else "先在言外「回复」里配置模型"
         }
-        // speaker 是 wxid 或微信号，喂给模型之前换成群里的显示名；
-        // 查不到的按出现顺序编成「群友 N」，避免整段转述里全是 wxid。
         // 用筛选后的消息做素材：以前只取页面里最近几条，统计一千多条却只总结十几条。
         val pool = selectedMessages().ifEmpty { context.messages }
-        val rawSpeakers = pool.map { it.speaker }.distinct()
         val resolved = runCatching {
-            ReplyDatabaseHistory.displayNames(rawSpeakers, context.talker, accountScope)
+            ReplyDatabaseHistory.displayNames(pool.map { it.speaker }.distinct(), context.talker, accountScope)
         }.getOrDefault(emptyMap())
-        val labels = LinkedHashMap<String, String>()
-        fun speakerLabel(raw: String): String = labels.getOrPut(raw) {
-            val fromDb = resolved[raw]?.let { TextClean.plain(it).trim() }
-            fromDb?.takeIf { it.isNotEmpty() && !it.equals("null", true) }
-                ?: raw.takeIf { !it.startsWith("wxid") && !it.matches(Regex("[A-Za-z0-9_-]{14,}")) }
-                ?: "群友${labels.size + 1}"
+        // 按整段抽样：单条均匀抽会把对话抽成碎片，模型看不出谁在接谁。
+        val picked = GroupTranscript.pick(pool.size)
+        val (body, labels) = GroupTranscript.lines(picked, pool, resolved)
+        val unnamed = labels.values.count { it.startsWith("群友") }
+        dev.jev.wechatmood.core.MoodLog.i(
+            "STATS_AI_POOL pool=${pool.size} picked=${picked.size} lines=${body.size} " +
+                "speakers=${labels.size} unnamed=$unnamed")
+        // 统计行也换成昵称：以前直接把 wxid 喂给模型，转述里就冒出 wxid。
+        val statsLine = buildString {
+            append("共 ${stats.total} 条 · ${stats.senders} 人参与 · 人均 ${stats.perCapita} 条")
+            val top = stats.members.filter { it.name != "我" }.take(6)
+                .map { "${GroupTranscript.label(it.name, resolved[it.name]) ?: it.name} ${it.count} 条" }
+            if (top.isNotEmpty()) append("；发言最多：").append(top.joinToString("、"))
         }
-        // 在整个时段里均匀抽样，避免总结只覆盖最后十几分钟。
-        val picked = if (pool.size <= SAMPLE_MESSAGES) pool else {
-            val step = pool.size.toDouble() / SAMPLE_MESSAGES
-            (0 until SAMPLE_MESSAGES).map { index -> pool[(index * step).toInt().coerceIn(0, pool.size - 1)] }
-        }
-        val sample = picked.joinToString("\n") { "${speakerLabel(it.speaker)}: ${it.text.take(70)}" }
+        val sample = body.joinToString("\n")
         val client = ReplyHttpClient()
-        var limit = 3000
+        var maxTokens = 4000
+        var partial = ""
         repeat(2) { attempt ->
-            val payload = JSONObject().put("model", current.model).put("stream", false)
-                .put("max_tokens", limit).put("temperature", 0.35)
+            val payload = JSONObject().put("model", current.model).put("stream", true)
+                .put("max_tokens", maxTokens).put("temperature", 0.35)
                 .put("messages", JSONArray()
                     .put(JSONObject().put("role", "system").put("content", summaryPrompt))
                     .put(JSONObject().put("role", "user").put("content",
-                        "统计：${stats.lines().joinToString("；")}\n该时段消息（均匀抽样 ${picked.size}/${stats.total} 条）：\n$sample")))
-            val raw = withContext(Dispatchers.IO) {
-                client.request(current, payload, parse = { body ->
-                    val choice = JSONObject(body).getJSONArray("choices").getJSONObject(0)
+                        "统计：$statsLine\n该时段消息（原始 ${pool.size} 条，按时间顺序抽了 ${body.size} 条）：\n$sample")))
+            val answer = withContext(Dispatchers.IO) {
+                client.request(current, payload, parse = { raw ->
+                    val choice = JSONObject(raw).getJSONArray("choices").getJSONObject(0)
                     val message = choice.getJSONObject("message")
                     val content = message.optString("content").trim()
                     val reasoning = message.optString("reasoning_content").trim()
                     dev.jev.wechatmood.core.MoodLog.i(
                         "STATS_AI_RAW attempt=${attempt + 1} content=${content.length} reasoning=${reasoning.length} " +
                             "finish=${choice.optString("finish_reason")}")
-                    content
+                    content to choice.optString("finish_reason")
                 })
             }
-            val clean = TextClean.plain(raw).take(900)
-            dev.jev.wechatmood.core.MoodLog.i("STATS_AI_ALL attempt=${attempt + 1} chars=${clean.length}")
-            if (clean.isNotBlank()) return clean
-            limit = 4000
+            val clean = TextClean.plain(answer.first).trim()
+            dev.jev.wechatmood.core.MoodLog.i(
+                "STATS_AI_ALL attempt=${attempt + 1} chars=${clean.length} finish=${answer.second} " +
+                    "tokens=$maxTokens")
+            // finish_reason=length 说明话被掐在半路，直接重试要更多 token，不把半截文本当结果。
+            if (clean.isNotBlank() && answer.second != "length") {
+                return Analysis(clean.take(3000), body.size, pool.size)
+            }
+            if (clean.length > partial.length) partial = clean
+            maxTokens = 8000
+        }
+        if (partial.isNotBlank()) {
+            dev.jev.wechatmood.core.MoodLog.w("STATS_AI_TRUNCATED chars=${partial.length}")
+            return Analysis(partial.take(3000), body.size, pool.size)
         }
         throw IllegalStateException("模型两次都没返回正文，换一个非推理模型试试")
     }

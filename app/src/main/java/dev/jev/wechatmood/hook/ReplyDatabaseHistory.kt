@@ -238,16 +238,7 @@ object ReplyDatabaseHistory {
     suspend fun tableNames(accountScope: String? = null): List<String> = withContext(Dispatchers.IO) {
         val databases = databasesForScope(
             synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
-        val names = mutableListOf<String>()
-        for (db in databases) {
-            runCatching {
-                query(db, "SELECT name FROM sqlite_master WHERE type='table'", emptyArray()).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        cursor.getString(0)?.let { names += it }
-                    }
-                }
-            }
-        }
+        val names = databases.flatMap { tableNamesOf(it) }.distinct()
         dev.jev.wechatmood.core.MoodLog.i("STATS_TABLES_RAW count=${names.size} sample=${names.take(12)}")
         val related = names.filter {
             it.contains("contact", true) || it.contains("stranger", true) || it.contains("nick", true) ||
@@ -257,10 +248,20 @@ object ReplyDatabaseHistory {
         names
     }
 
-    /** 群成员昵称：逐个 wxid 查 rcontact / stranger，查不到就返回空。 */
+    /** 单库表名列表，供昵称兜底扫描用。 */
+    private fun tableNamesOf(db: Any): List<String> = runCatching {
+        query(db, "SELECT name FROM sqlite_master WHERE type='table'", emptyArray()).use { cursor ->
+            buildList { while (cursor.moveToNext()) cursor.getString(0)?.let { add(it) } }
+        }
+    }.getOrDefault(emptyList())
+
+    /** 每个库的列名缓存；库对象被回收时一起回收。 */
+    private val columnCache = java.util.WeakHashMap<Any, MutableMap<String, List<String>>>()
+
     /**
-     * 群成员昵称。先读 chatroom.memberlist 里的群昵称（群里显示的就是这个），
-     * 再逐个 wxid 回退到 rcontact / stranger；库按账号范围过滤。
+     * 群成员昵称。依次尝试：群名片（chatroom.memberlist）→ rcontact（备注 / 昵称）
+     * → rcontact.alias（群消息里 speaker 有时是微信号）→ stranger → 兜底扫描带用户名列的联系人类表。
+     * 每层只补还没查到的名字，前三层失败也不影响后面的来源。
      */
     suspend fun displayNames(usernames: List<String>, chatroom: String? = null,
         accountScope: String? = null): Map<String, String> = withContext(Dispatchers.IO) {
@@ -268,78 +269,174 @@ object ReplyDatabaseHistory {
         if (wanted.isEmpty()) return@withContext emptyMap()
         val databases = databasesForScope(
             synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
-        val result = mutableMapOf<String, String>()
-        var errors = 0
+        val result = LinkedHashMap<String, String>()
+        var memberlist = 0
+        var contact = 0
+        var byAlias = 0
+        var stranger = 0
+        var scanned = 0
         if (chatroom != null && chatroom.endsWith("@chatroom")) {
             for (db in databases) {
-                val parsed = runCatching { chatroomMemberNames(db, chatroom) }.getOrDefault(emptyMap())
+                val parsed = runCatching { chatroomMemberNames(db, chatroom) }
+                    .onFailure { MoodLog.w("STATS_MEMBERLIST_FAILED ${it.javaClass.simpleName} ${it.message}") }
+                    .getOrDefault(emptyMap())
                 if (parsed.isEmpty()) continue
-                parsed.forEach { (user, name) -> if (user in wanted) result[user] = name }
-                dev.jev.wechatmood.core.MoodLog.i(
-                    "STATS_CHATROOM members=${parsed.size} matched=${result.size} wanted=${wanted.size}")
-                if (result.size >= wanted.size) break
+                parsed.forEach { (user, name) -> if (user in wanted && user !in result) result[user] = name }
+                if (wanted.all { it in result }) break
             }
+            memberlist = result.size
+            MoodLog.i("STATS_MEMBERLIST wanted=${wanted.size} members=$memberlist")
         }
-        for (name in wanted) {
-            if (name in result) continue
-            for (db in databases) {
-                // 单条查询，避免 IN 参数或字段名差异导致整批失败。
-                val found = runCatching {
-                    var value: String? = null
-                    // 群消息里的 speaker 有时是微信号而不是 wxid，username 和 alias 一起查，
-                    // 备注、昵称、微信号依次回退，能多认出一批人。
-                    query(db, "SELECT conRemark, nickname, alias FROM rcontact WHERE username = ? OR alias = ? LIMIT 1",
-                        arrayOf(name, name)).use { cursor ->
-                        if (cursor.moveToFirst()) {
-                            value = (0..2).asSequence()
-                                .mapNotNull { index -> runCatching { cursor.getString(index) }.getOrNull() }
-                                .map { dev.jev.wechatmood.core.TextClean.plain(it).trim() }
-                                .firstOrNull { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
-                        }
-                    }
-                    value
-                }.onFailure { errors++ }.getOrNull()
-                if (found != null) { result[name] = found; break }
-            }
-            if (name !in result) {
-                for (db in databases) {
-                    val found = runCatching {
-                        var value: String? = null
-                        query(db, "SELECT nickname FROM stranger WHERE username = ?", arrayOf(name)).use { cursor ->
-                            if (cursor.moveToFirst()) value = runCatching { cursor.getString(0) }.getOrNull()
-                                ?.let { dev.jev.wechatmood.core.TextClean.plain(it).trim() }
-                                ?.takeIf { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
-                        }
-                        value
-                    }.onFailure { errors++ }.getOrNull()
-                    if (found != null) { result[name] = found; break }
-                }
-            }
+        if (result.size < wanted.size) {
+            for (db in databases) contact += fillFromTable(db, "rcontact", wanted, result, CONTACT_NAMES)
         }
-        dev.jev.wechatmood.core.MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size} errors=$errors")
+        if (result.size < wanted.size) {
+            for (db in databases) byAlias += fillByAlias(db, "rcontact", wanted, result)
+        }
+        if (result.size < wanted.size) {
+            for (db in databases) stranger += fillFromTable(db, "stranger", wanted, result, STRANGER_NAMES)
+        }
+        if (result.size < wanted.size) {
+            for (db in databases) scanned += fillFromAnyTable(db, wanted, result)
+        }
+        MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size} memberlist=$memberlist " +
+            "contact=$contact alias=$byAlias stranger=$stranger scanned=$scanned dbs=${databases.size}")
         result
     }
+
+    /** rcontact 的显示优先级：备注 > 备注字段别名 > 昵称。 */
+    private val CONTACT_NAMES = listOf("conRemark", "remark", "nickname", "nickName", "displayName")
+    private val STRANGER_NAMES = listOf("nickname", "nickName", "remark", "displayName")
+    private val USER_COLUMNS = listOf("username", "userName", "user_name")
+
+    /** 一次批量查一张表：以前逐个 wxid 拼 OR，一条列名对不上整批就全失败。 */
+    private fun fillFromTable(db: Any, table: String, wanted: List<String>,
+        result: MutableMap<String, String>, preferred: List<String>): Int {
+        val columns = tableColumns(db, table)
+        val userColumn = USER_COLUMNS.firstOrNull { it in columns } ?: return 0
+        val nameColumns = preferred.filter { it in columns && it != userColumn }
+        if (nameColumns.isEmpty()) {
+            MoodLog.w("STATS_NAMES_NO_COLUMN table=$table columns=${columns.take(12)}")
+            return 0
+        }
+        var filled = 0
+        for (chunk in wanted.filter { it !in result }.chunked(80)) {
+            runCatching {
+                query(db, "SELECT $userColumn, ${nameColumns.joinToString(",")} FROM $table " +
+                    "WHERE $userColumn IN (${chunk.joinToString(",") { "?" }})", chunk.toTypedArray()).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val user = cursor.getString(0)?.trim().orEmpty()
+                        if (user.isEmpty() || user in result) continue
+                        val name = bestName(cursor, 1, nameColumns.size) ?: continue
+                        result[user] = name
+                        filled++
+                    }
+                }
+            }.onFailure { MoodLog.w("STATS_NAMES_QUERY_FAILED table=$table ${it.javaClass.simpleName} ${it.message}") }
+        }
+        return filled
+    }
+
+    /** 群消息里的 speaker 有时是微信号（alias），拿 alias 再认一次。 */
+    private fun fillByAlias(db: Any, table: String, wanted: List<String>,
+        result: MutableMap<String, String>): Int {
+        val columns = tableColumns(db, table)
+        val userColumn = USER_COLUMNS.firstOrNull { it in columns } ?: return 0
+        if ("alias" !in columns) return 0
+        val nameColumns = listOf("conRemark", "remark", "nickname", "nickName").filter { it in columns }
+        if (nameColumns.isEmpty()) return 0
+        var filled = 0
+        for (chunk in wanted.filter { it !in result }.chunked(80)) {
+            runCatching {
+                query(db, "SELECT alias, ${nameColumns.joinToString(",")} FROM $table " +
+                    "WHERE alias IN (${chunk.joinToString(",") { "?" }})", chunk.toTypedArray()).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val alias = cursor.getString(0)?.trim().orEmpty()
+                        if (alias.isEmpty() || alias !in chunk || alias in result) continue
+                        val name = bestName(cursor, 1, nameColumns.size) ?: continue
+                        result[alias] = name
+                        filled++
+                    }
+                }
+            }.onFailure { MoodLog.w("STATS_ALIAS_QUERY_FAILED ${it.javaClass.simpleName} ${it.message}") }
+        }
+        return filled
+    }
+
+    /**
+     * 版本兜底：不同微信版本把群成员资料搬到过不同的表。
+     * 只碰名字里带 contact / nick / member / user 的表，且必须同时有用户名列和昵称列，最多 8 张。
+     */
+    private fun fillFromAnyTable(db: Any, wanted: List<String>,
+        result: MutableMap<String, String>): Int {
+        val tables = runCatching { tableNamesOf(db) }.getOrDefault(emptyList())
+        var filled = 0
+        val tries = tables.filter { table ->
+            val lower = table.lowercase()
+            lower != "rcontact" && lower != "stranger" && lower != "chatroom" &&
+                (lower.contains("contact") || lower.contains("nick") || lower.contains("member") ||
+                    lower.contains("user") || lower.contains("profile"))
+        }.take(8)
+        for (table in tries) {
+            val columns = tableColumns(db, table)
+            if (USER_COLUMNS.none { it in columns }) continue
+            if (CONTACT_NAMES.none { it in columns }) continue
+            val before = filled
+            filled += fillFromTable(db, table, wanted, result, CONTACT_NAMES)
+            if (filled > before) MoodLog.i("STATS_NAMES_SCAN table=$table hit=${filled - before}")
+        }
+        return filled
+    }
+
+    /** 列名探一次就缓存：不同微信用不同版本，靠 PRAGMA，读不到再退回 SELECT * LIMIT 1。 */
+    private fun tableColumns(db: Any, table: String): List<String> {
+        columnCache[db]?.get(table)?.let { return it }
+        var columns = runCatching {
+            query(db, "PRAGMA table_info($table)", emptyArray()).use { cursor ->
+                buildList { while (cursor.moveToNext()) cursor.getString(1)?.let { add(it) } }
+            }
+        }.getOrDefault(emptyList())
+        if (columns.isEmpty()) {
+            columns = runCatching {
+                query(db, "SELECT * FROM $table LIMIT 1", emptyArray()).use { it.columnNames.toList() }
+            }.getOrDefault(emptyList())
+        }
+        columnCache.getOrPut(db) { HashMap() }[table] = columns
+        return columns
+    }
+
+    private fun bestName(cursor: Cursor, offset: Int, count: Int): String? =
+        (0 until count).asSequence()
+            .mapNotNull { index -> runCatching { cursor.getString(offset + index) }.getOrNull() }
+            .map { dev.jev.wechatmood.core.TextClean.name(it) }
+            .firstOrNull { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
 
     /** chatroom.memberlist 是 XML，群昵称和群备注都写在里面。 */
     private fun chatroomMemberNames(db: Any, chatroom: String): Map<String, String> {
         var xml = ""
-        query(db, "SELECT memberlist FROM chatroom WHERE chatroomname = ? LIMIT 1", arrayOf(chatroom)).use { cursor ->
-            if (cursor.moveToFirst()) xml = runCatching { cursor.getString(0) }.getOrNull().orEmpty()
-        }
-        if (xml.isBlank()) return emptyMap()
-        val out = mutableMapOf<String, String>()
-        Regex("<member>(.*?)</member>", RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { match ->
-            val block = match.groupValues[1]
-            val user = Regex("<username>(.*?)</username>").find(block)?.groupValues?.get(1)?.trim()
-            if (user.isNullOrEmpty()) return@forEach
-            val display = Regex("<displayName>(.*?)</displayName>").find(block)?.groupValues?.get(1)?.trim()
-            val nick = Regex("<nick(?:name)?>(.*?)</nick(?:name)?>").find(block)?.groupValues?.get(1)?.trim()
-            val name = listOf(display, nick).firstOrNull {
-                !it.isNullOrEmpty() && !it.equals("null", true) && !it.equals("uinull", true)
+        runCatching {
+            query(db, "SELECT memberlist FROM chatroom WHERE chatroomname = ? LIMIT 1",
+                arrayOf(chatroom)).use { cursor -> if (cursor.moveToFirst()) xml = cursor.getString(0).orEmpty() }
+        }.onFailure { MoodLog.w("STATS_CHATROOM_QUERY_FAILED ${it.javaClass.simpleName} ${it.message}") }
+        if (xml.isBlank()) {
+            // 列名对不上时退回整行，找那个装着 <member> 的列。
+            runCatching {
+                query(db, "SELECT * FROM chatroom WHERE chatroomname = ? LIMIT 1",
+                    arrayOf(chatroom)).use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        for (index in 0 until cursor.columnCount) {
+                            val value = runCatching { cursor.getString(index) }.getOrNull().orEmpty()
+                            if (value.contains("<member")) { xml = value; break }
+                        }
+                    }
+                }
             }
-            if (name != null) out[user] = name
         }
-        return out
+        val parsed = dev.jev.wechatmood.reply.GroupMemberList.parse(xml)
+        if (parsed.isNotEmpty()) {
+            MoodLog.i("STATS_CHATROOM members=${parsed.size} xml=${xml.length}")
+        }
+        return parsed
     }
 
     suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES): ReplyContext = withContext(Dispatchers.IO) {
