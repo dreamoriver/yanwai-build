@@ -20,6 +20,8 @@ import dev.jev.wechatmood.core.RelationFactBridge
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.core.Diagnostics
 import dev.jev.wechatmood.hook.MessageSniffer
+import dev.jev.wechatmood.hook.RelationReminder
+import dev.jev.wechatmood.hook.RelationTodoActions
 import dev.jev.wechatmood.hook.ReplyDatabaseHistory
 
 /**
@@ -60,6 +62,11 @@ class HookEntry : IXposedHookLoadPackage {
                 }
                 runCatching { MessageSniffer.resume(activity) }
                     .onFailure { MoodLog.e("HOST_RESUME_FAILED", it) }
+                // 回到微信首页时顺手看一遍全部联系人的到期约定：不用先点进那个聊天。
+                if (activity.javaClass.name == "com.tencent.mm.ui.LauncherUI") {
+                    runCatching { RelationReminder.scheduleGlobalCheck(activity) }
+                        .onFailure { MoodLog.w("RELATION_REMIND_SCHEDULE_FAILED " + it.javaClass.simpleName) }
+                }
             }
         })
         XposedBridge.hookAllMethods(Instrumentation::class.java, "callActivityOnPause", object : XC_MethodHook() {
@@ -111,6 +118,8 @@ class HookEntry : IXposedHookLoadPackage {
             ModulePrefs.init(context)
             MessageSniffer.install(context)
             registerClearReceiver(context)
+            // 通知上的「标完成」按钮：动态注册才收得到（模块代码跑在微信进程里）。
+            RelationTodoActions.register(context)
             installed = true
             MoodLog.i("微信主进程已加载模块 ${BuildConfig.VERSION_NAME}")
             // 环境采集、日志上报、WCDB 反射扫描都不参与首帧，放后台线程。

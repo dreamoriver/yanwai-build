@@ -515,6 +515,24 @@ object ReplyDatabaseHistory {
         return parsed
     }
 
+    /**
+     * 通知标题用的显示名（备注优先，其次昵称），不按账号筛库。
+     * 只服务到期提醒的标题，不参与分析、不进缓存、日志里也不记内容。
+     */
+    suspend fun contactNames(wanted: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
+        val names = wanted.filter { it.isNotBlank() && it.length <= 256 }.distinct()
+        if (names.isEmpty()) return@withContext emptyMap()
+        val result = LinkedHashMap<String, String>()
+        val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        for (db in databases) {
+            if (result.size >= names.size) break
+            runCatching { fillFromTable(db, "rcontact", names, result, CONTACT_NAMES) }
+            if (result.size >= names.size) break
+            runCatching { fillByAlias(db, "rcontact", names, result) }
+        }
+        result
+    }
+
     suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES): ReplyContext = withContext(Dispatchers.IO) {
         require(limit in 1..ReplyContext.MAX_MESSAGES)
         val startedAt = android.os.SystemClock.elapsedRealtime()

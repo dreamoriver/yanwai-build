@@ -138,6 +138,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         scope.launch {
             val key = resolveKey(selected)
             contactKey = key
+            // 记下这条档案对应哪个聊天，到期通知点开才能进对会话。
+            if (key != null) RelationFactBridge.rememberContact(activity, key, selected)
             if (key == null) {
                 showStatus("没能确认是哪个账号的聊天，先回到聊天页等一会儿", theme.warning)
                 return@launch
