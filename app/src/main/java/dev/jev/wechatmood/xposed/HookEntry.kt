@@ -4,8 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.app.Instrumentation
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
+import android.widget.Toast
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -18,23 +17,17 @@ import dev.jev.wechatmood.core.Diagnostics
 import dev.jev.wechatmood.hook.MessageSniffer
 import dev.jev.wechatmood.hook.ReplyDatabaseHistory
 
-/** Direct package entry, independent of the optional initZygote callback. */
+/**
+ * 模块入口：微信主进程加载后直接初始化。
+ *
+ * 2.9.114/2.9.115 曾把初始化推到 resume 后、聊天页后，用来避开和 WeKit 抢首帧。
+ * 后来抓到的主线程堆栈显示白屏是 WeKit 自己在 Application.onCreate 的 hook 里
+ * 同步等待 native payload 加载（CompletableFuture.get），言外不在那条链上；
+ * 所以这里回到最初的写法，不再为第三方模块的启动问题做额外延迟。
+ */
 class HookEntry : IXposedHookLoadPackage {
-    @Volatile private var installed = false
-    @Volatile private var scheduled = false
-
-    private companion object {
-        /**
-         * 第一个页面 resume 之后再等这么久才装：此时首帧已经画完，
-         * 不会和 WeKit 这类重模块的启动初始化叠加。
-         */
-        const val RESUME_SETTLE_MS = 400L
-        /**
-         * 纯后台进程可能一直不 resume；等这么久兜底装一次。
-         * 12 秒已经越过系统的「surface 未绘制」判定窗口，不会造成白屏。
-         */
-        const val BACKGROUND_FALLBACK_MS = 12_000L
-    }
+    private var installed = false
+    private var failedAnnounced = false
 
     override fun handleLoadPackage(param: XC_LoadPackage.LoadPackageParam) {
         if (param.packageName != "com.tencent.mm" || param.processName != "com.tencent.mm") return
@@ -43,15 +36,7 @@ class HookEntry : IXposedHookLoadPackage {
         XposedHelpers.findAndHookMethod(Application::class.java, "attach", Context::class.java,
             object : XC_MethodHook() {
                 override fun afterHookedMethod(p: MethodHookParam) {
-                    // 启动路径上什么都不做，只排一个很晚的兜底。
-                    // 之前用主线程 idle 回调也会在冷启动时过早触发，正好压在首帧上。
-                    val context = p.args[0] as Context
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (!installed) {
-                            MoodLog.i("HOOK_INIT_FALLBACK 没有页面 resume，按兜底安装")
-                            initialize(context)
-                        }
-                    }, BACKGROUND_FALLBACK_MS)
+                    initialize(p.args[0] as Context)
                 }
             })
         // Covers module loaders that attach after Application.attach has already run.
@@ -59,8 +44,15 @@ class HookEntry : IXposedHookLoadPackage {
             override fun afterHookedMethod(p: MethodHookParam) {
                 val activity = p.args.firstOrNull() as? Activity ?: return
                 if (activity.packageName != "com.tencent.mm") return
-                scheduleFromResume(activity)
-                if (!installed) return
+                initialize(activity.application)
+                if (!installed) {
+                    // 每次切页都弹会烦人，失败只提示一次，细节进日志。
+                    if (!failedAnnounced) {
+                        failedAnnounced = true
+                        Toast.makeText(activity, "情绪助手初始化失败，请查看模块日志", Toast.LENGTH_LONG).show()
+                    }
+                    return
+                }
                 runCatching { MessageSniffer.resume(activity) }
                     .onFailure { MoodLog.e("HOST_RESUME_FAILED", it) }
             }
@@ -70,22 +62,6 @@ class HookEntry : IXposedHookLoadPackage {
                 (p.args.firstOrNull() as? Activity)?.let { MessageSniffer.pause(it) }
             }
         })
-    }
-
-    /**
-     * 等第一个页面真正展示出来（resume）之后，再延迟一点装 hook。
-     *
-     * 微信冷启动时，WeKit 这类模块的初始化已经吃掉大半预算；言外只要在主线程上做任何初始化，
-     * 两边时间相加就会超过系统的「surface 未绘制」阈值，表现为白屏或黑屏进不去。
-     * resume 之后首帧已经完成，再延迟 400ms 安装就不会落在判定窗口里。
-     */
-    private fun scheduleFromResume(context: Context) {
-        if (installed || scheduled) return
-        scheduled = true
-        Handler(Looper.getMainLooper()).postDelayed({
-            scheduled = false
-            if (!installed) initialize(context)
-        }, RESUME_SETTLE_MS)
     }
 
     @Synchronized private fun initialize(context: Context) {
