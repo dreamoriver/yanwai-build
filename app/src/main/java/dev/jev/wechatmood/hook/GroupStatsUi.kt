@@ -12,6 +12,7 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import dev.jev.wechatmood.core.HttpClients
 import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.TextClean
 import dev.jev.wechatmood.reply.GroupStats
@@ -30,6 +31,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 /** 分析范围：进程内记住上次选择，重开窗口沿用。 */
 object StatsFilter {
@@ -76,8 +78,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     /** 成员原始名 → 表格里显示的文本，生成图片时复用同一套规则。 */
     private val displayedNames = mutableMapOf<String, String>()
     private var analysisText: String = ""
+    /** 上一次表格里没查到昵称的人数，诊断导出要看。 */
+    private var unknownNames = 0
+    /** 素材正文的字符预算：小模型上下文也就 8k，素材撑太满直接 400。 */
+    private val MATERIAL_CHARS = 9000
     /** 一次分析的结果，附带用了多少素材，界面上要看得出覆盖范围。 */
-    private data class Analysis(val text: String, val material: Int, val total: Int)
+    private data class Analysis(val text: String, val material: Int, val total: Int, val note: String = "")
 
     /** 看着有码点、渲染却是空白的字符。 */
     private val BLANK_CODES = setOf(
@@ -213,6 +219,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                     if (analysis.material > 0) {
                         addView(kit.caption("素材 ${analysis.material}/${analysis.total} 条 · 按整段抽样"))
                     }
+                    if (analysis.note.isNotBlank()) addView(kit.caption(analysis.note))
                     addView(kit.body(shown).apply { if (failed) setTextColor(theme.error) })
                 }
                 analysisBox.addView(panelWith("群里在聊什么", content),
@@ -311,6 +318,23 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, context.talker, accountScope)
             }.getOrDefault(emptyMap())
             if (names.isNotEmpty()) renderTop(names)
+            dumpNameDiag()
+        }
+    }
+
+    /** 昵称查不到时的现场诊断：写到微信自己的外部目录，拷出来就能看是哪一层没命中。 */
+    private suspend fun dumpNameDiag() {
+        if (unknownNames <= 0) return
+        val raws = stats.members.map { it.name }.filter { it !in currentNames }
+        val body = runCatching {
+            ReplyDatabaseHistory.diagNames(context.talker, accountScope, raws)
+        }.getOrNull().orEmpty()
+        if (body.isBlank()) return
+        runCatching {
+            val dir = activity.getExternalFilesDir(null) ?: return
+            java.io.File(dir, "yanwai-names-diag.txt").writeText(
+                body + "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers + "\n")
+            dev.jev.wechatmood.core.MoodLog.i("STATS_DIAG_WRITTEN " + dir.absolutePath)
         }
     }
 
@@ -337,9 +361,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             topContainer.addView(tableRow(entry.key, "${entry.value}", "${percents[index]}%"),
                 LinearLayout.LayoutParams(-1, -2))
         }
+        unknownNames = unknown
         if (unknown > 0) {
-            // 查不到就说清楚查不到，别让人以为统计漏了人。
-            topContainer.addView(kit.caption("其中 $unknown 人没查到群昵称，先按序号显示").apply {
+            // 查不到就说清楚查不到，顺带报每层命中多少，方便判断是库的问题还是解析的问题。
+            val layers = ReplyDatabaseHistory.lastLayers
+            val detail = if (layers.isEmpty()) "" else "（群名片 ${layers["memberlist"] ?: 0} · 备注 " +
+                "${layers["contact"] ?: 0} · 微信号 ${layers["alias"] ?: 0} · 兜底 ${layers["scanned"] ?: 0}）"
+            topContainer.addView(kit.caption("其中 $unknown 人没查到群昵称$detail，先按序号显示").apply {
                 setPadding(0, theme.dp(6), 0, 0)
             })
         }
@@ -502,12 +530,15 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             ReplyDatabaseHistory.displayNames(pool.map { it.speaker }.distinct(), context.talker, accountScope)
         }.getOrDefault(emptyMap())
         // 按整段抽样：单条均匀抽会把对话抽成碎片，模型看不出谁在接谁。
-        val picked = GroupTranscript.pick(pool.size)
-        val (body, labels) = GroupTranscript.lines(picked, pool, resolved)
-        val unnamed = labels.values.count { it.startsWith("群友") }
-        dev.jev.wechatmood.core.MoodLog.i(
-            "STATS_AI_POOL pool=${pool.size} picked=${picked.size} lines=${body.size} " +
-                "speakers=${labels.size} unnamed=$unnamed")
+        // 抽完再按字符预算收缩，条数多到撑爆上下文会直接 400。
+        var picked = GroupTranscript.pick(pool.size)
+        var transcript = GroupTranscript.lines(picked, pool, resolved)
+        while (transcript.first.joinToString("\n").length > MATERIAL_CHARS && picked.size > 24) {
+            picked = GroupTranscript.pick(pool.size, limit = picked.size / 2)
+            transcript = GroupTranscript.lines(picked, pool, resolved)
+        }
+        var body = transcript.first
+        var labels = transcript.second
         // 统计行也换成昵称：以前直接把 wxid 喂给模型，转述里就冒出 wxid。
         val statsLine = buildString {
             append("共 ${stats.total} 条 · ${stats.senders} 人参与 · 人均 ${stats.perCapita} 条")
@@ -515,35 +546,55 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 .map { "${GroupTranscript.label(it.name, resolved[it.name]) ?: it.name} ${it.count} 条" }
             if (top.isNotEmpty()) append("；发言最多：").append(top.joinToString("、"))
         }
-        val sample = body.joinToString("\n")
-        val client = ReplyHttpClient()
+        // 长回答走非流式更稳：非流式只受读超时约束，这里单独放宽到 3 分钟。
+        val client = ReplyHttpClient(HttpClients.shared.newBuilder()
+            .connectTimeout(15, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).build())
         var maxTokens = 4000
         var partial = ""
+        var lastFinish = ""
         repeat(2) { attempt ->
-            val payload = JSONObject().put("model", current.model).put("stream", true)
+            val payload = JSONObject().put("model", current.model).put("stream", false)
                 .put("max_tokens", maxTokens).put("temperature", 0.35)
                 .put("messages", JSONArray()
                     .put(JSONObject().put("role", "system").put("content", summaryPrompt))
                     .put(JSONObject().put("role", "user").put("content",
-                        "统计：$statsLine\n该时段消息（原始 ${pool.size} 条，按时间顺序抽了 ${body.size} 条）：\n$sample")))
-            val answer = withContext(Dispatchers.IO) {
-                client.request(current, payload, parse = { raw ->
-                    val choice = JSONObject(raw).getJSONArray("choices").getJSONObject(0)
-                    val message = choice.getJSONObject("message")
-                    val content = message.optString("content").trim()
-                    val reasoning = message.optString("reasoning_content").trim()
-                    dev.jev.wechatmood.core.MoodLog.i(
-                        "STATS_AI_RAW attempt=${attempt + 1} content=${content.length} reasoning=${reasoning.length} " +
-                            "finish=${choice.optString("finish_reason")}")
-                    content to choice.optString("finish_reason")
-                })
+                        "统计：$statsLine\n该时段消息（原始 ${pool.size} 条，按时间顺序抽了 ${body.size} 条）：\n" +
+                            body.joinToString("\n"))))
+            val answer = try {
+                withContext(Dispatchers.IO) {
+                    client.request(current, payload, parse = { raw ->
+                        val choice = JSONObject(raw).getJSONArray("choices").getJSONObject(0)
+                        val message = choice.getJSONObject("message")
+                        val content = message.optString("content").trim()
+                        val reasoning = message.optString("reasoning_content").trim()
+                        val finish = choice.optString("finish_reason")
+                        dev.jev.wechatmood.core.MoodLog.i(
+                            "STATS_AI_RAW attempt=${attempt + 1} content=${content.length} " +
+                                "reasoning=${reasoning.length} finish=$finish")
+                        Triple(content, finish, reasoning.length)
+                    })
+                }
+            } catch (error: IllegalStateException) {
+                // 上下文超长：把素材砍一半再来一次，比让用户回去改筛选省事。
+                if (error.message?.contains("上下文超出") == true && attempt == 0 && body.size > 30) {
+                    picked = GroupTranscript.pick(pool.size, limit = body.size / 2)
+                    transcript = GroupTranscript.lines(picked, pool, resolved)
+                    body = transcript.first
+                    labels = transcript.second
+                    dev.jev.wechatmood.core.MoodLog.w("STATS_AI_SHRINK lines=${body.size}")
+                    return@repeat
+                }
+                throw error
             }
             val clean = TextClean.plain(answer.first).trim()
-            dev.jev.wechatmood.core.MoodLog.i(
-                "STATS_AI_ALL attempt=${attempt + 1} chars=${clean.length} finish=${answer.second} " +
-                    "tokens=$maxTokens")
+            lastFinish = "finish=${answer.second} reasoning=${answer.third} chars=${clean.length} tokens=$maxTokens"
+            dev.jev.wechatmood.core.MoodLog.i("STATS_AI_ALL attempt=${attempt + 1} $lastFinish")
             // finish_reason=length 说明话被掐在半路，直接重试要更多 token，不把半截文本当结果。
             if (clean.isNotBlank() && answer.second != "length") {
+                val unnamed = labels.values.count { it.startsWith("群友") }
+                dev.jev.wechatmood.core.MoodLog.i(
+                    "STATS_AI_POOL pool=${pool.size} lines=${body.size} speakers=${labels.size} unnamed=$unnamed")
                 return Analysis(clean.take(3000), body.size, pool.size)
             }
             if (clean.length > partial.length) partial = clean
@@ -551,9 +602,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         if (partial.isNotBlank()) {
             dev.jev.wechatmood.core.MoodLog.w("STATS_AI_TRUNCATED chars=${partial.length}")
-            return Analysis(partial.take(3000), body.size, pool.size)
+            return Analysis(partial.take(3000), body.size, pool.size, "输出被长度上限截断，可以再点一次重试")
         }
-        throw IllegalStateException("模型两次都没返回正文，换一个非推理模型试试")
+        throw IllegalStateException("模型没返回正文（$lastFinish，素材 ${body.size} 条）")
     }
 
     private fun copy(text: String) {

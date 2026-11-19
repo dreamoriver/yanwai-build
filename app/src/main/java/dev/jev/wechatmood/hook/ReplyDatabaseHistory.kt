@@ -248,6 +248,39 @@ object ReplyDatabaseHistory {
         names
     }
 
+    /**
+     * 昵称查不到时的现场诊断：群名片原文长什么样、rcontact 有哪些列、
+     * 抽几个没查到的 wxid 直接看那一行。写到微信自己的外部目录，用户可自行删除。
+     */
+    suspend fun diagNames(chatroom: String?, accountScope: String?, raws: List<String>): String =
+        withContext(Dispatchers.IO) {
+            val databases = databasesForScope(
+                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+            buildString {
+                appendLine("diag_names time=" + System.currentTimeMillis())
+                appendLine("chatroom=" + chatroom + " dbs=" + databases.size)
+                appendLine("layers=" + lastLayers)
+                for (db in databases.take(1)) {
+                    val xml = runCatching { rawMemberlist(db, chatroom.orEmpty()) }.getOrDefault("")
+                    appendLine("memberlist_len=" + xml.length)
+                    appendLine("memberlist_head=" + xml.take(1500).replace("\n", "\\n"))
+                    val columns = tableColumns(db, "rcontact")
+                    appendLine("rcontact_columns=" + columns)
+                    for (name in raws.filter { it.isNotBlank() }.distinct().take(8)) {
+                        val row = runCatching {
+                            query(db, "SELECT * FROM rcontact WHERE username = ? OR alias = ? LIMIT 1",
+                                arrayOf(name, name)).use { cursor ->
+                                if (!cursor.moveToFirst()) "none" else columns.take(10).mapIndexed { index, column ->
+                                    column + "=" + runCatching { cursor.getString(index) }.getOrNull()
+                                }.joinToString("|")
+                            }
+                        }.getOrElse { "error " + it.message }
+                        appendLine("probe[" + name + "]=" + row.take(400))
+                    }
+                }
+            }
+        }
+
     /** 单库表名列表，供昵称兜底扫描用。 */
     private fun tableNamesOf(db: Any): List<String> = runCatching {
         query(db, "SELECT name FROM sqlite_master WHERE type='table'", emptyArray()).use { cursor ->
@@ -257,6 +290,10 @@ object ReplyDatabaseHistory {
 
     /** 每个库的列名缓存；库对象被回收时一起回收。 */
     private val columnCache = java.util.WeakHashMap<Any, MutableMap<String, List<String>>>()
+
+    /** 最近一次昵称解析的分层命中数，给界面和诊断用。 */
+    @Volatile var lastLayers: Map<String, Int> = emptyMap()
+        private set
 
     /**
      * 群成员昵称。依次尝试：群名片（chatroom.memberlist）→ rcontact（备注 / 昵称）
@@ -299,6 +336,11 @@ object ReplyDatabaseHistory {
         if (result.size < wanted.size) {
             for (db in databases) scanned += fillFromAnyTable(db, wanted, result)
         }
+        lastLayers = linkedMapOf(
+            "memberlist" to memberlist, "contact" to contact, "alias" to byAlias,
+            "stranger" to stranger, "scanned" to scanned, "wanted" to wanted.size,
+            "found" to result.size,
+        )
         MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size} memberlist=$memberlist " +
             "contact=$contact alias=$byAlias stranger=$stranger scanned=$scanned dbs=${databases.size}")
         result
@@ -411,27 +453,34 @@ object ReplyDatabaseHistory {
             .map { dev.jev.wechatmood.core.TextClean.name(it) }
             .firstOrNull { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
 
-    /** chatroom.memberlist 是 XML，群昵称和群备注都写在里面。 */
-    private fun chatroomMemberNames(db: Any, chatroom: String): Map<String, String> {
+    /** 群名片原文：老版本是 XML，新版本可能换成别的编码，原样取出来交给上层判断。 */
+    private fun rawMemberlist(db: Any, chatroom: String): String {
+        if (chatroom.isBlank()) return ""
         var xml = ""
         runCatching {
             query(db, "SELECT memberlist FROM chatroom WHERE chatroomname = ? LIMIT 1",
                 arrayOf(chatroom)).use { cursor -> if (cursor.moveToFirst()) xml = cursor.getString(0).orEmpty() }
         }.onFailure { MoodLog.w("STATS_CHATROOM_QUERY_FAILED ${it.javaClass.simpleName} ${it.message}") }
         if (xml.isBlank()) {
-            // 列名对不上时退回整行，找那个装着 <member> 的列。
+            // 列名对不上时退回整行，找那个装着成员列表的列。
             runCatching {
                 query(db, "SELECT * FROM chatroom WHERE chatroomname = ? LIMIT 1",
                     arrayOf(chatroom)).use { cursor ->
                     if (cursor.moveToFirst()) {
                         for (index in 0 until cursor.columnCount) {
                             val value = runCatching { cursor.getString(index) }.getOrNull().orEmpty()
-                            if (value.contains("<member")) { xml = value; break }
+                            if (value.contains("<member") || value.contains("wxid")) { xml = value; break }
                         }
                     }
                 }
             }
         }
+        return xml
+    }
+
+    /** chatroom.memberlist 是 XML，群昵称和群备注都写在里面。 */
+    private fun chatroomMemberNames(db: Any, chatroom: String): Map<String, String> {
+        val xml = rawMemberlist(db, chatroom)
         val parsed = dev.jev.wechatmood.reply.GroupMemberList.parse(xml)
         if (parsed.isNotEmpty()) {
             MoodLog.i("STATS_CHATROOM members=${parsed.size} xml=${xml.length}")
