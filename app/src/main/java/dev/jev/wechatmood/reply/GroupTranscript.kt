@@ -89,8 +89,14 @@ object GroupMemberList {
         return out
     }
 
-    private fun field(block: String, name: String): String? =
-        Regex("<$name>(.*?)</$name>").find(block)?.groupValues?.get(1)
-            ?.let { dev.jev.wechatmood.core.TextClean.name(it) }
-            ?.takeIf { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
+    /** 取 XML 里一个字段的文本，兼容 CDATA 和常见实体。 */
+    fun field(block: String, name: String): String? {
+        val pattern = Regex("<" + name + ">(?:<!\\[CDATA\\[)?(.*?)(?:\\]\\]>)?</" + name + ">",
+            RegexOption.DOT_MATCHES_ALL)
+        val raw = pattern.find(block)?.groupValues?.getOrNull(1) ?: return null
+        val text = raw.replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", "\"").replace("&amp;", "&")
+        val clean = dev.jev.wechatmood.core.TextClean.name(text)
+        return clean.takeIf { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
+    }
 }

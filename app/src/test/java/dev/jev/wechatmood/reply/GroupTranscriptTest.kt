@@ -70,6 +70,20 @@ class GroupTranscriptTest {
         assertEquals(null, parsed["wxid_4"])
     }
 
+    @Test fun `refermsg gives wxid and nickname pair`() {
+        val xml = "<msg><appmsg><title>回复</title><refermsg><chatusr>wxid_hscabrw6u39122</chatusr>" +
+            "<displayname>阿理</displayname><content>原文</content></refermsg></appmsg></msg>"
+        assertEquals("wxid_hscabrw6u39122", GroupMemberList.field(xml, "chatusr"))
+        assertEquals("阿理", GroupMemberList.field(xml, "displayname"))
+        assertEquals(null, GroupMemberList.field(xml, "nothere"))
+    }
+
+    @Test fun `cdata and entities are unwrapped`() {
+        assertEquals("老王 & 小李", GroupMemberList.field("<displayname><![CDATA[老王 &amp; 小李]]></displayname>", "displayname"))
+        assertEquals("A<B>", GroupMemberList.field("<displayname>A&lt;B&gt;</displayname>", "displayname"))
+        assertEquals(null, GroupMemberList.field("<displayname>null</displayname>", "displayname"))
+    }
+
     @Test fun `memberlist parse tolerates junk`() {
         assertEquals(emptyMap<String, String>(), GroupMemberList.parse(""))
         assertEquals(emptyMap<String, String>(), GroupMemberList.parse("not xml"))

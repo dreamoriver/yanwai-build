@@ -3,6 +3,20 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.135
+
+非好友昵称改从引用消息里学
+- 群里的引用消息（refermsg）同时带 chatusr 和 displayname，正好配成 wxid → 昵称，库里查不到的人靠这个补
+- 名字来源排优先级：库里的备注/昵称 < 引用消息 < 微信页面上显示的昵称
+- 诊断文件加上这条来源的命中数
+
+## 2.9.134
+
+诊断再进一步：定位这个 wxid 到底存在哪
+- 诊断文件加上关键候选表（contact / contact_ext / getcontactinfov2 / ContactCmdBuf / MsgQuote）的列名
+- 全库按文本列搜这个 wxid，命中就打出那一行的非空字段，跳过 message 这类大表
+- 顺手抓一条群消息的 lvbuffer 可读片段，确认昵称是不是塞在消息缓冲里
+
 ## 2.9.133
 
 用微信页面上显示的名字补昵称

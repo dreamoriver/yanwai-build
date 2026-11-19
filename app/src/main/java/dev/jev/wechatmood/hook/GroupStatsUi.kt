@@ -84,6 +84,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private val MATERIAL_CHARS = 9000
     /** wxid → 微信页面上显示的昵称，来自消息对象自带的显示名，比库里的准。 */
     private var pageNames: Map<String, String> = emptyMap()
+    /** wxid → 引用消息里带出来的昵称，补上库里没有的非好友。 */
+    private var quotedNames: Map<String, String> = emptyMap()
     /** 一次分析的结果，附带用了多少素材，界面上要看得出覆盖范围。 */
     private data class Analysis(val text: String, val material: Int, val total: Int, val note: String = "")
 
@@ -261,10 +263,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 cells[3].second.text = "" + stats.activeHours.size
                 renderTop(currentNames)
                 renderActiveHours(activeBox)
-                val names = runCatching {
-                    ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, context.talker, accountScope)
-                }.getOrDefault(emptyMap())
-                renderTop(currentNames + names + pageNames)
+                renderTop(currentNames + namesFor(stats.members.map { it.name }))
             }
         }
         val actions = LinearLayout(activity).apply {
@@ -317,10 +316,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         // 昵称在数据库里，异步查一次再替换 wxid；顺便记一次表名，方便确认字段位置。
         scope.launch {
             runCatching { ReplyDatabaseHistory.tableNames(accountScope) }
-            val names = runCatching {
-                ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, context.talker, accountScope)
-            }.getOrDefault(emptyMap())
-            renderTop(names + pageNames)
+            renderTop(namesFor(stats.members.map { it.name }))
             dumpNameDiag()
         }
     }
@@ -337,7 +333,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             val dir = activity.getExternalFilesDir(null) ?: return
             java.io.File(dir, "yanwai-names-diag.txt").writeText(
                 body + "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers +
-                    "\npageNames=" + pageNames.size + " sample=" + pageNames.entries.take(5).joinToString(";") { it.key + ">" + it.value } +
+                    "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size + " sample=" + pageNames.entries.take(5).joinToString(";") { it.key + ">" + it.value } +
                     "\nmsg_fields=" + MessageMetadata.lastFields.take(80).joinToString(",") + "\n")
             dev.jev.wechatmood.core.MoodLog.i("STATS_DIAG_WRITTEN " + dir.absolutePath)
         }
@@ -391,6 +387,20 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             out[id] = message.speaker
         }
         return out
+    }
+
+    /**
+     * 三层名字来源合并，后面的覆盖前面的：
+     * 库里查到的（好友备注/昵称）< 引用消息里带的昵称 < 微信页面上显示的昵称。
+     */
+    private suspend fun namesFor(raws: List<String>): Map<String, String> {
+        val db = runCatching { ReplyDatabaseHistory.displayNames(raws, context.talker, accountScope) }
+            .getOrDefault(emptyMap())
+        val quoted = runCatching {
+            ReplyDatabaseHistory.quotedNames(context.talker, StatsFilter.sinceMillis(), accountScope)
+        }.getOrDefault(emptyMap())
+        quotedNames = quoted
+        return db + quoted + pageNames
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {
@@ -546,9 +556,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         // 用筛选后的消息做素材：以前只取页面里最近几条，统计一千多条却只总结十几条。
         val pool = selectedMessages().ifEmpty { context.messages }
-        val resolved = pageNames + runCatching {
-            ReplyDatabaseHistory.displayNames(pool.map { it.speaker }.distinct(), context.talker, accountScope)
-        }.getOrDefault(emptyMap())
+        val resolved = namesFor(pool.map { it.speaker }.distinct())
         // 按整段抽样：单条均匀抽会把对话抽成碎片，模型看不出谁在接谁。
         // 抽完再按字符预算收缩，条数多到撑爆上下文会直接 400。
         var picked = GroupTranscript.pick(pool.size)

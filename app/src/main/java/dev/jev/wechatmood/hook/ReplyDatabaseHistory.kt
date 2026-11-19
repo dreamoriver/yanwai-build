@@ -299,9 +299,60 @@ object ReplyDatabaseHistory {
                         }
                     }
                     appendLine("hits=" + hits)
+                    // 关键候选表的列名，先确认这版把昵称放哪了。
+                    for (table in listOf("contact", "contact_ext", "friend_ext", "getcontactinfov2",
+                        "Stranger", "ContactCmdBuf", "MsgQuote", "img_flag")) {
+                        appendLine("schema[" + table + "]=" + tableColumns(db, table).joinToString(","))
+                    }
+                    // 全库找这个 wxid：名字只要本地存过，总会被某一列命中。
+                    for (line in searchEverywhere(db, target)) appendLine(line)
+                    // 群消息的 lvbuffer 里常带发送者附加信息，看看有没有可读内容。
+                    appendLine("lvbuffer=" + lvbufferSample(db, chatroom.orEmpty()))
                 }
             }
         }
+
+    /** 跳过消息类大表：这些表几十万行，LIKE 全表扫会把统计面板拖死。 */
+    private val BIG_TABLES = setOf("message", "fmessage_msginfo", "bizchatmessage", "appbrandmessage",
+        "qmessage", "tmessage", "bottlemessage", "gamemessage", "AppMessage", "DelMessage", "OpLog")
+
+    /** 全库按文本列找目标 wxid，命中就把它那一行的非空字段打出来。 */
+    private fun searchEverywhere(db: Any, target: String): List<String> {
+        if (target.isBlank()) return emptyList()
+        val out = ArrayList<String>()
+        for (table in tableNamesOf(db)) {
+            if (out.size >= 16) break
+            if (table in BIG_TABLES) continue
+            val columns = tableColumns(db, table)
+            if (columns.isEmpty() || columns.size > 40) continue
+            val where = columns.joinToString(" OR ") { it + " LIKE ?" }
+            val args = Array(columns.size) { "%" + target + "%" }
+            val hit = runCatching {
+                query(db, "SELECT * FROM " + table + " WHERE " + where + " LIMIT 1", args).use { cursor ->
+                    if (!cursor.moveToFirst()) null else columns.mapIndexed { index, name ->
+                        name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
+                    }.filter { it.second.isNotBlank() }
+                        .joinToString("|") { it.first + "=" + it.second.take(80) }
+                }
+            }.getOrNull()
+            if (!hit.isNullOrBlank()) out += "search[" + table + "]=" + hit.take(300)
+        }
+        return out
+    }
+
+    /** 一条群消息的 lvbuffer：只留可读字符，用来判断昵称是不是塞在这里。 */
+    private fun lvbufferSample(db: Any, chatroom: String): String {
+        if (chatroom.isBlank()) return ""
+        return runCatching {
+            query(db, "SELECT lvbuffer FROM message WHERE talker = ? AND isSend = 0 " +
+                "ORDER BY createTime DESC LIMIT 1", arrayOf(chatroom)).use { cursor ->
+                if (!cursor.moveToFirst()) return@use ""
+                val bytes = runCatching { cursor.getBlob(0) }.getOrNull() ?: return@use ""
+                String(bytes, Charsets.ISO_8859_1).filter { it.code in 32..126 || it.code > 160 }
+                    .replace(Regex("[\\s]{2,}"), " ").take(300)
+            }
+        }.getOrDefault("")
+    }
 
     /** 整行 dump：列名=值，只留非空且不太长的字段。 */
     private fun rowDump(db: Any, table: String, keyColumn: String, key: String): String {
@@ -320,6 +371,46 @@ object ReplyDatabaseHistory {
 
     private val ID_COLUMNS = setOf("username", "user_name", "wxid", "alias", "userid", "user_id",
         "contactid", "contact_id", "member", "membername")
+
+    /**
+     * 群里的引用消息自带被引用人的资料：refermsg 里 chatusr 是 wxid，displayname 是昵称。
+     * 非好友的名字库里查不到，但引用里写着，直接拿来用。
+     */
+    suspend fun quotedNames(talker: String, sinceMillis: Long, accountScope: String? = null): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            if (!talker.endsWith("@chatroom")) return@withContext emptyMap()
+            val databases = databasesForScope(
+                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+            val out = LinkedHashMap<String, String>()
+            for (db in databases) {
+                val sample = runCatching {
+                    var value = 0L
+                    query(db, "SELECT createTime FROM message WHERE talker = ? LIMIT 1", arrayOf(talker)).use { cursor ->
+                        if (cursor.moveToFirst()) value = cursor.getLong(0)
+                    }
+                    value
+                }.getOrDefault(0L)
+                val since = if (sample > 1_000_000_000_000L) sinceMillis else sinceMillis / 1000
+                runCatching {
+                    query(db, "SELECT content FROM message WHERE talker = ? AND type IN (49, 822083633) " +
+                        "AND createTime >= ? ORDER BY createTime DESC LIMIT 400",
+                        arrayOf(talker, since.toString())).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            val content = runCatching { cursor.getString(0) }.getOrNull().orEmpty()
+                            val block = Regex("<refermsg>(.*?)</refermsg>", RegexOption.DOT_MATCHES_ALL)
+                                .find(content)?.groupValues?.get(1) ?: continue
+                            val user = dev.jev.wechatmood.reply.GroupMemberList.field(block, "chatusr")
+                                ?: dev.jev.wechatmood.reply.GroupMemberList.field(block, "fromusr") ?: continue
+                            val name = dev.jev.wechatmood.reply.GroupMemberList.field(block, "displayname")
+                                ?: continue
+                            if (user !in out) out[user] = name
+                        }
+                    }
+                }
+            }
+            if (out.isNotEmpty()) MoodLog.i("STATS_QUOTED_NAMES count=" + out.size)
+            out
+        }
 
     /** 单库表名列表，供昵称兜底扫描用。 */
     private fun tableNamesOf(db: Any): List<String> = runCatching {
