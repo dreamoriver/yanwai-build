@@ -319,6 +319,64 @@ object ReplyDatabaseHistory {
             }
         }
 
+    /**
+     * 用微信自己的联系人实体去解码 rcontact 行。
+     * 昵称列是空的，但 lvbuff 里可能塞着新版联系人资料（protobuf），
+     * 微信的 com.tencent.mm.storage.g 有 a(Cursor) 能解它，解完读 field_nickname 就行。
+     */
+    suspend fun diagRcontact(accountScope: String?, users: List<String>, loader: ClassLoader): String =
+        withContext(Dispatchers.IO) {
+            val databases = databasesForScope(
+                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+            buildString {
+                val cls = runCatching { Class.forName("com.tencent.mm.storage.g", false, loader) }.getOrNull()
+                appendLine("rcontact_class=" + (cls?.name ?: "none"))
+                if (cls == null) return@buildString
+                appendLine("rcontact_fields=" + runCatching { cls.declaredFields.map { it.name } }
+                    .getOrDefault(emptyList()).take(20))
+                val ctor = runCatching { cls.getDeclaredConstructor().apply { isAccessible = true } }.getOrNull()
+                val decoder = runCatching {
+                    cls.declaredMethods.firstOrNull {
+                        it.parameterCount == 1 && it.parameterTypes[0] == Cursor::class.java
+                    }?.apply { isAccessible = true }
+                }.getOrNull()
+                appendLine("rcontact_decoder=" + (decoder?.name ?: "none"))
+                for (db in databases.take(1)) {
+                    for (user in users.filter { it.startsWith("wxid") }.distinct().take(2)) {
+                        runCatching {
+                            query(db, "SELECT * FROM rcontact WHERE username = ? LIMIT 1", arrayOf(user)).use { cursor ->
+                                if (!cursor.moveToFirst()) return@use
+                                val index = cursor.getColumnIndex("lvbuff")
+                                val blob = if (index >= 0) runCatching { cursor.getBlob(index) }.getOrNull() else null
+                                appendLine("lvbuff[" + user + "]=len=" + (blob?.size ?: -1) +
+                                    " head=" + (blob?.take(60)?.joinToString("") { "%02x".format(it) } ?: ""))
+                                val obj = ctor?.newInstance()
+                                val decoded = runCatching { decoder?.invoke(obj, cursor) }.isSuccess
+                                val nick = runCatching {
+                                    cls.getDeclaredField("field_nickname").apply { isAccessible = true }
+                                        .get(obj) as? String
+                                }.getOrNull()
+                                val remark = runCatching {
+                                    cls.getDeclaredField("field_conRemark").apply { isAccessible = true }
+                                        .get(obj) as? String
+                                }.getOrNull()
+                                appendLine("decode[" + user + "] ok=" + decoded + " nickname=" + nick +
+                                    " conRemark=" + remark + " decoder=" + (decoder?.name ?: "none"))
+                                // 混淆后的三个 getter，谁返回名字就用谁。
+                                cls.declaredMethods.filter { it.parameterCount == 0 && it.returnType == String::class.java }
+                                    .take(8).forEach { method ->
+                                        runCatching {
+                                            method.isAccessible = true
+                                            appendLine("getter[" + user + "] " + method.name + "=" + method.invoke(obj))
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
     /** 全库搜索单独一段跑：慢，但不该拖住面板和上一步的诊断。 */
     suspend fun diagSearch(accountScope: String?, target: String): String = withContext(Dispatchers.IO) {
         val databases = databasesForScope(

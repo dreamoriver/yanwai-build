@@ -20,7 +20,6 @@ import dev.jev.wechatmood.core.RelationFactBridge
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.core.Diagnostics
 import dev.jev.wechatmood.hook.MessageSniffer
-import dev.jev.wechatmood.hook.WeChatClassProbe
 import dev.jev.wechatmood.hook.ReplyDatabaseHistory
 
 /**
@@ -120,8 +119,6 @@ class HookEntry : IXposedHookLoadPackage {
                     MoodLog.i("ENVIRONMENT\n${Diagnostics.environment(context)}")
                     ModulePrefs.report("模块 ${BuildConfig.VERSION_NAME} 已加载，等待打开聊天")
                     ReplyDatabaseHistory.install(context.classLoader)
-                    // 只记类名，不碰方法：用来定位内存里存昵称的类。
-                    WeChatClassProbe.install(context.classLoader)
                     // 旧版档案还在 App 的库里：搬到微信库一次，搬完让 App 删掉旧副本。
                     RelationFactBridge.migrateLegacy(context)
                     // 微信没运行时记下的清空请求，这里补执行并回执。

@@ -3,6 +3,13 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.139
+
+拆开微信 apk 定位联系人实体，改用它解码 lvbuff
+- 本地分析微信 base.apk（286MB / 18 个 dex）：核心层方法名基本混淆，但联系人实体 com.tencent.mm.storage.g 的字段名保留，含 field_nickname、field_conRemark、field_lvbuff
+- 诊断改成用这个实体类解 rcontact 行（a(Cursor) 构造后读 field_nickname），并把 lvbuff 的十六进制头一起打出来
+- 扫描 apk 的类名提取换成直接读 dex，不再依赖 ClassLoader hook（上次只收到 119 个类）
+
 ## 2.9.138
 
 探测微信内存里的昵称入口（只探测，不改行为）

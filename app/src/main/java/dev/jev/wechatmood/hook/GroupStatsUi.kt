@@ -343,7 +343,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             }.getOrNull().orEmpty()
             runCatching { file.writeText(body + tail) }
             // 类名探测放在全库搜索前面：搜索很容易超时，探测更值钱。
-            runCatching { file.appendText(WeChatClassProbe.scan()) }
+            // 用微信自己的联系人实体解码 lvbuff，昵称在新版可能只存在那儿。
+            runCatching {
+                file.appendText(ReplyDatabaseHistory.diagRcontact(accountScope, raws, activity.classLoader))
+            }
             runCatching {
                 ReplyDatabaseHistory.diagSearch(accountScope, raws.firstOrNull { it.startsWith("wxid") }.orEmpty())
             }.getOrNull()?.let { extra ->
