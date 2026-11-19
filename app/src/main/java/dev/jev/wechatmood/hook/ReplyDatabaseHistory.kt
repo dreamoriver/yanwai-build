@@ -230,7 +230,11 @@ object ReplyDatabaseHistory {
     }
 
     /** 群成员昵称：逐个 wxid 查 rcontact / stranger，查不到就返回空。 */
-    suspend fun displayNames(usernames: List<String>,
+    /**
+     * 群成员昵称。先读 chatroom.memberlist 里的群昵称（群里显示的就是这个），
+     * 再逐个 wxid 回退到 rcontact / stranger；库按账号范围过滤。
+     */
+    suspend fun displayNames(usernames: List<String>, chatroom: String? = null,
         accountScope: String? = null): Map<String, String> = withContext(Dispatchers.IO) {
         val wanted = usernames.filter { it.isNotBlank() }.distinct()
         if (wanted.isEmpty()) return@withContext emptyMap()
@@ -238,7 +242,18 @@ object ReplyDatabaseHistory {
             synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
         val result = mutableMapOf<String, String>()
         var errors = 0
+        if (chatroom != null && chatroom.endsWith("@chatroom")) {
+            for (db in databases) {
+                val parsed = runCatching { chatroomMemberNames(db, chatroom) }.getOrDefault(emptyMap())
+                if (parsed.isEmpty()) continue
+                parsed.forEach { (user, name) -> if (user in wanted) result[user] = name }
+                dev.jev.wechatmood.core.MoodLog.i(
+                    "STATS_CHATROOM members=${parsed.size} matched=${result.size} wanted=${wanted.size}")
+                if (result.size >= wanted.size) break
+            }
+        }
         for (name in wanted) {
+            if (name in result) continue
             for (db in databases) {
                 // 单条查询，避免 IN 参数或字段名差异导致整批失败。
                 val found = runCatching {
@@ -275,6 +290,28 @@ object ReplyDatabaseHistory {
         }
         dev.jev.wechatmood.core.MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size} errors=$errors")
         result
+    }
+
+    /** chatroom.memberlist 是 XML，群昵称和群备注都写在里面。 */
+    private fun chatroomMemberNames(db: Any, chatroom: String): Map<String, String> {
+        var xml = ""
+        query(db, "SELECT memberlist FROM chatroom WHERE chatroomname = ? LIMIT 1", arrayOf(chatroom)).use { cursor ->
+            if (cursor.moveToFirst()) xml = runCatching { cursor.getString(0) }.getOrNull().orEmpty()
+        }
+        if (xml.isBlank()) return emptyMap()
+        val out = mutableMapOf<String, String>()
+        Regex("<member>(.*?)</member>", RegexOption.DOT_MATCHES_ALL).findAll(xml).forEach { match ->
+            val block = match.groupValues[1]
+            val user = Regex("<username>(.*?)</username>").find(block)?.groupValues?.get(1)?.trim()
+            if (user.isNullOrEmpty()) return@forEach
+            val display = Regex("<displayName>(.*?)</displayName>").find(block)?.groupValues?.get(1)?.trim()
+            val nick = Regex("<nick(?:name)?>(.*?)</nick(?:name)?>").find(block)?.groupValues?.get(1)?.trim()
+            val name = listOf(display, nick).firstOrNull {
+                !it.isNullOrEmpty() && !it.equals("null", true) && !it.equals("uinull", true)
+            }
+            if (name != null) out[user] = name
+        }
+        return out
     }
 
     suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES): ReplyContext = withContext(Dispatchers.IO) {

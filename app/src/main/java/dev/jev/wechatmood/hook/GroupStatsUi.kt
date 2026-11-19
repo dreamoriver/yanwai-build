@@ -60,7 +60,7 @@ object StatsFilter {
 
 /** 群聊统计窗口：数字 + 活跃成员 + 一次 AI 解读，结果可复制。 */
 internal class GroupStatsUi(private val activity: Activity, private val context: ReplyContext,
-    private val dbMessages: List<dev.jev.wechatmood.reply.ReplyMessage> = emptyList(),
+    private var dbMessages: List<dev.jev.wechatmood.reply.ReplyMessage> = emptyList(),
     /** 当前登录账号；昵称查询只在这个账号的库里查，避免把另一个账号的资料算进来。 */
     private val accountScope: String? = null,
     private val reload: (() -> Unit)? = null) {
@@ -75,6 +75,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     /** 成员原始名 → 表格里显示的文本，生成图片时复用同一套规则。 */
     private val displayedNames = mutableMapOf<String, String>()
     private var analysisText: String = ""
+    /** 总结一次最多喂多少条消息：均匀抽样，够覆盖整个时段又不会撑爆上下文。 */
+    private val SAMPLE_MESSAGES = 60
 
     /** 看着有码点、渲染却是空白的字符。 */
     private val BLANK_CODES = setOf(
@@ -119,11 +121,27 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }
 
     private fun spanText(): String {
-        val first = context.messages.firstOrNull { it.time > 0 }?.time
-        val last = context.messages.lastOrNull { it.time > 0 }?.time
-        if (first == null || last == null) return "未知"
+        // 用筛选后的消息算范围：以前拿页面消息，会出现「1011 条却只有 18 分钟」这种对不上的显示。
+        val stamps = selectedMessages().map { if (it.time > 1_000_000_000_000L) it.time else it.time * 1000 }
+            .filter { it > 0 }
+        if (stamps.isEmpty()) return "暂无数据"
         val format = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
-        return format.format(java.util.Date(first)) + "–" + format.format(java.util.Date(last))
+        return format.format(java.util.Date(stamps.min())) + "–" + format.format(java.util.Date(stamps.max()))
+    }
+
+    /** 换筛选后按新条件重新查库。以前只重算内存里的旧数据，条数调大不会生效。 */
+    private suspend fun reloadDb() {
+        val limit = if (StatsFilter.limit == 0) 5000 else StatsFilter.limit
+        val rows = runCatching {
+            ReplyDatabaseHistory.statMessages(context.talker, StatsFilter.sinceMillis(), limit, accountScope)
+        }.getOrDefault(emptyList())
+        dev.jev.wechatmood.core.MoodLog.i("STATS_RELOAD rows=" + rows.size + " limit=" + limit + " range=" + StatsFilter.range)
+        if (rows.isEmpty()) return
+        dbMessages = rows.map {
+            dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
+                it.analysisText() ?: "[媒体]")
+        }
+        stats = computeStats()
     }
 
     fun show() {
@@ -216,8 +234,18 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             analysisText = ""
             aiButton.text = "让 AI 说说这群在聊什么"
             scope.launch {
+                // 新筛选可能要看更多消息：先重查，再刷新数字与表格。
+                reloadDb()
+                summaryLine.text = summaryText()
+                spanLine.text = "数据范围 " + spanText()
+                cells[0].second.text = "" + stats.total
+                cells[1].second.text = "" + stats.senders
+                cells[2].second.text = "" + (stats.media + stats.voice)
+                cells[3].second.text = "" + stats.activeHours.size
+                renderTop(currentNames)
+                renderActiveHours(activeBox)
                 val names = runCatching {
-                    ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, accountScope)
+                    ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, context.talker, accountScope)
                 }.getOrDefault(emptyMap())
                 if (names.isNotEmpty()) renderTop(currentNames + names)
             }
@@ -273,7 +301,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         scope.launch {
             runCatching { ReplyDatabaseHistory.tableNames(accountScope) }
             val names = runCatching {
-                ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, accountScope)
+                ReplyDatabaseHistory.displayNames(stats.members.map { it.name }, context.talker, accountScope)
             }.getOrDefault(emptyMap())
             if (names.isNotEmpty()) renderTop(names)
         }
@@ -456,8 +484,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         // speaker 是 wxid 或微信号，喂给模型之前换成群里的显示名；
         // 查不到的按出现顺序编成「群友 N」，避免整段转述里全是 wxid。
-        val rawSpeakers = context.messages.map { it.speaker }.distinct()
-        val resolved = runCatching { ReplyDatabaseHistory.displayNames(rawSpeakers, accountScope) }.getOrDefault(emptyMap())
+        // 用筛选后的消息做素材：以前只取页面里最近几条，统计一千多条却只总结十几条。
+        val pool = selectedMessages().ifEmpty { context.messages }
+        val rawSpeakers = pool.map { it.speaker }.distinct()
+        val resolved = runCatching {
+            ReplyDatabaseHistory.displayNames(rawSpeakers, context.talker, accountScope)
+        }.getOrDefault(emptyMap())
         val labels = LinkedHashMap<String, String>()
         fun speakerLabel(raw: String): String = labels.getOrPut(raw) {
             val fromDb = resolved[raw]?.let { TextClean.plain(it).trim() }
@@ -465,8 +497,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 ?: raw.takeIf { !it.startsWith("wxid") && !it.matches(Regex("[A-Za-z0-9_-]{14,}")) }
                 ?: "群友${labels.size + 1}"
         }
-        val sample = context.messages.takeLast(35)
-            .joinToString("\n") { "${speakerLabel(it.speaker)}: ${it.text.take(80)}" }
+        // 在整个时段里均匀抽样，避免总结只覆盖最后十几分钟。
+        val picked = if (pool.size <= SAMPLE_MESSAGES) pool else {
+            val step = pool.size.toDouble() / SAMPLE_MESSAGES
+            (0 until SAMPLE_MESSAGES).map { index -> pool[(index * step).toInt().coerceIn(0, pool.size - 1)] }
+        }
+        val sample = picked.joinToString("\n") { "${speakerLabel(it.speaker)}: ${it.text.take(70)}" }
         val client = ReplyHttpClient()
         var limit = 3000
         repeat(2) { attempt ->
@@ -475,7 +511,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 .put("messages", JSONArray()
                     .put(JSONObject().put("role", "system").put("content", summaryPrompt))
                     .put(JSONObject().put("role", "user").put("content",
-                        "统计：${stats.lines().joinToString("；")}\n最近消息：\n$sample")))
+                        "统计：${stats.lines().joinToString("；")}\n该时段消息（均匀抽样 ${picked.size}/${stats.total} 条）：\n$sample")))
             val raw = withContext(Dispatchers.IO) {
                 client.request(current, payload, parse = { body ->
                     val choice = JSONObject(body).getJSONArray("choices").getJSONObject(0)
