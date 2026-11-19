@@ -61,11 +61,19 @@ object ReplyDatabaseHistory {
 
     @Synchronized private fun observe(db: Any) {
         if (moduleQuery.get() == true) return
-        val main = known.getOrPut(db) {
-            val path = db.javaClass.getMethod("getPath").invoke(db) as? String
-            path?.replace('\\', '/')?.substringAfterLast('/') == "EnMicroMsg.db"
+        val rawPath = runCatching { db.javaClass.getMethod("getPath").invoke(db) as? String }.getOrNull()
+            ?.replace('\\', '/').orEmpty()
+        val main = known.getOrPut(db) { rawPath.substringAfterLast('/') == "EnMicroMsg.db" }
+        if (!main) {
+            // sfs.db 这类 KV 库微信自己也开着，群成员昵称有可能缓存在里面。
+            if (rawPath.contains("/MicroMsg/") && !rawPath.endsWith("EnMicroMsg.db")) {
+                extraPaths[db] = rawPath
+                extras.removeAll { it.get() == null || it.get() === db }
+                extras.add(0, WeakReference(db))
+                while (extras.size > 4) extras.removeAt(extras.lastIndex)
+            }
+            return
         }
-        if (!main) return
         val firstObservation = handles.none { it.get() === db }
         handles.removeAll { it.get() == null || it.get() === db }
         handles.add(0, WeakReference(db))
@@ -320,6 +328,18 @@ object ReplyDatabaseHistory {
             for (db in databases.take(1)) {
                 for (line in searchEverywhere(db, target)) appendLine(line)
             }
+            val others = synchronized(this@ReplyDatabaseHistory) { extras.mapNotNull { it.get() } }
+            for (db in others.take(3)) {
+                val path = extraPaths[db].orEmpty()
+                val tables = tableNamesOf(db)
+                appendLine("extra_db[" + path.substringAfterLast('/') + "] tables=" + tables.take(20))
+                for (table in tables.take(8)) {
+                    appendLine("extra_schema[" + table + "]=" +
+                        tableColumns(db, table).take(12).joinToString(","))
+                }
+                for (line in searchEverywhere(db, target)) appendLine("extra_" + line)
+                for (line in searchHex(db, target)) appendLine("extra_" + line)
+            }
         }
     }
 
@@ -349,6 +369,31 @@ object ReplyDatabaseHistory {
                 }
             }.getOrNull()
             if (!hit.isNullOrBlank()) out += "search[" + table + "]=" + hit.take(300)
+        }
+        return out
+    }
+
+    /** KV 库的 value 是 blob，LIKE 匹配不到，转成十六进制再比一次。 */
+    private fun searchHex(db: Any, target: String): List<String> {
+        if (target.isBlank()) return emptyList()
+        val hex = target.toByteArray(Charsets.UTF_8).joinToString("") { "%02X".format(it) }
+        val out = ArrayList<String>()
+        val deadline = System.currentTimeMillis() + 10_000
+        for (table in tableNamesOf(db)) {
+            if (out.size >= 6 || System.currentTimeMillis() > deadline) break
+            val columns = tableColumns(db, table)
+            if (columns.isEmpty() || columns.size > 10) continue
+            val where = columns.joinToString(" OR ") { "hex(" + it + ") LIKE ?" }
+            val args = Array(columns.size) { "%" + hex + "%" }
+            val hit = runCatching {
+                query(db, "SELECT * FROM " + table + " WHERE " + where + " LIMIT 1", args).use { cursor ->
+                    if (!cursor.moveToFirst()) null else columns.mapIndexed { index, name ->
+                        name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
+                    }.filter { it.second.isNotBlank() }
+                        .joinToString("|") { it.first + "=" + it.second.take(120) }
+                }
+            }.getOrNull()
+            if (!hit.isNullOrBlank()) out += "hex[" + table + "]=" + hit.take(300)
         }
         return out
     }
@@ -434,6 +479,10 @@ object ReplyDatabaseHistory {
 
     /** 每个库的列名缓存；库对象被回收时一起回收。 */
     private val columnCache = java.util.WeakHashMap<Any, MutableMap<String, List<String>>>()
+
+    /** 除主库之外微信打开的库（sfs.db 等），诊断时扫一遍。 */
+    private val extras = ArrayList<WeakReference<Any>>()
+    private val extraPaths = WeakHashMap<Any, String>()
 
     /** 最近一次昵称解析的分层命中数，给界面和诊断用。 */
     @Volatile var lastLayers: Map<String, Int> = emptyMap()

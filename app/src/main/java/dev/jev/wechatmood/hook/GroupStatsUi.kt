@@ -86,6 +86,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private var pageNames: Map<String, String> = emptyMap()
     /** wxid → 引用消息里带出来的昵称，补上库里没有的非好友。 */
     private var quotedNames: Map<String, String> = emptyMap()
+    /** wxid → 手动补的昵称，优先级最高，点未获取昵称那一行就能填。 */
+    private var manualNames: Map<String, String> = emptyMap()
     /** 一次分析的结果，附带用了多少素材，界面上要看得出覆盖范围。 */
     private data class Analysis(val text: String, val material: Int, val total: Int, val note: String = "")
 
@@ -189,7 +191,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         body.addView(LinearLayout(activity), LinearLayout.LayoutParams(-1, theme.dp(6)))
         body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
         pageNames = pageSpeakerNames()
-        renderTop(pageNames)
+        manualNames = GroupNameStore.load(activity, context.talker)
+        renderTop(pageNames + manualNames)
 
         val activeBox = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         body.addView(activeBox, LinearLayout.LayoutParams(-1, -2))
@@ -332,7 +335,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val dir = activity.getExternalFilesDir(null) ?: return
         val file = java.io.File(dir, "yanwai-names-diag.txt")
         val tail = "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers +
-            "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size +
+            "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size + " manual=" + manualNames.size +
             "\nmsg_fields=" + MessageMetadata.lastFields.take(80).joinToString(",") + "\n"
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             val body = runCatching {
@@ -357,19 +360,25 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             return
         }
         val merged = LinkedHashMap<String, Int>()
+        val rawByShown = LinkedHashMap<String, String>()
         var unknown = 0
         for (member in stats.members) {
             val resolved = resolveName(member.name, names)
             val shown = resolved ?: "未获取昵称#${++unknown}"
             displayedNames[member.name] = shown
             merged[shown] = (merged[shown] ?: 0) + member.count
+            rawByShown.putIfAbsent(shown, member.name)
         }
         topContainer.addView(headerRow(), LinearLayout.LayoutParams(-1, -2))
         val ordered = merged.entries.sortedByDescending { it.value }
         val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(ordered.map { it.value })
         ordered.forEachIndexed { index, entry ->
-            topContainer.addView(tableRow(entry.key, "${entry.value}", "${percents[index]}%"),
-                LinearLayout.LayoutParams(-1, -2))
+            val row = tableRow(entry.key, "${entry.value}", "${percents[index]}%")
+            val raw = rawByShown[entry.key]
+            if (entry.key.startsWith("未获取昵称") && raw != null) {
+                row.setOnClickListener { promptName(raw, entry.key) }
+            }
+            topContainer.addView(row, LinearLayout.LayoutParams(-1, -2))
         }
         unknownNames = unknown
         if (unknown > 0) {
@@ -409,7 +418,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             ReplyDatabaseHistory.quotedNames(context.talker, StatsFilter.sinceMillis(), accountScope)
         }.getOrDefault(emptyMap())
         quotedNames = quoted
-        return db + quoted + pageNames
+        // 手动补的名字放最后，覆盖前面所有的自动结果。
+        return db + quoted + pageNames + manualNames
     }
 
     private fun resolveName(raw: String, names: Map<String, String>): String? {
@@ -438,6 +448,17 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         if (clean.startsWith("wxid_") || clean.matches(Regex("[A-Za-z0-9_-]{16,}"))) return null
         return shorten(clean)
+    }
+
+    /** 点击「未获取昵称#N」补一个名字，存在本机，之后统计和总结都用这个。 */
+    private fun promptName(raw: String, shown: String) {
+        kit.input("给 $shown 填个名字", "这个人在群里的昵称", manualNames[raw].orEmpty()) { name ->
+            if (name.isBlank()) return@input
+            GroupNameStore.save(activity, context.talker, raw, name)
+            manualNames = GroupNameStore.load(activity, context.talker)
+            dev.jev.wechatmood.core.MoodLog.i("STATS_NAME_MANUAL count=" + manualNames.size)
+            renderTop(currentNames + mapOf(raw to name))
+        }
     }
 
     private fun headerRow() = LinearLayout(activity).apply {

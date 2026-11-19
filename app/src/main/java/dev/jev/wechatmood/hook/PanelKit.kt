@@ -177,6 +177,36 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
         dialog.show()
     }
 
+    /** 单行输入，替代宿主 AlertDialog 的 EditText：重命名群成员这类手填一次的操作。 */
+    fun input(title: String, hint: String, value: String = "", onConfirm: (String) -> Unit) {
+        val dialog = sheet()
+        val root = root()
+        val column = content(root)
+        column.addView(heading(title))
+        val field = android.widget.EditText(context).apply {
+            setText(value)
+            setHint(hint)
+            textSize = ReplyMetrics.TEXT_ITEM
+            setTextColor(theme.ink)
+            setHintTextColor(theme.muted)
+            setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
+            background = theme.shape(theme.card, ReplyMetrics.RADIUS_CARD, theme.border)
+            maxLines = 1
+            setSingleLine(true)
+        }
+        column.addView(field, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })
+        column.addView(theme.action("保存", primary = true) {
+            val text = field.text.toString().trim()
+            dialog.dismiss()
+            onConfirm(text)
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })
+        column.addView(theme.action("取消", quiet = true) { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
+        dialog.setContentView(root)
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        dialog.show()
+    }
+
     /** 只读详情，替代 AlertDialog 的 setMessage。 */
     fun info(title: String, message: String) {
         val dialog = sheet()
