@@ -36,12 +36,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val session = ReplySession()
     private val history = ReplyHistory.process
-    /** 横条上的按钮交给宿主面板：分析开关和档案、待办都在同一个入口里。 */
-    private fun open(): Boolean {
-        openPanel()
-        return true
-    }
-    private val plusEntry = ReplyPlusRow(activity, createAnalysisControl) { open() }
+    // 横条只留「附加」一个入口：分析开关、统计、档案、待办都在同一个面板里。
+    private val plusEntry = ReplyPlusRow(activity, createAnalysisControl) { openPanel(); true }
     private var job: Job? = null
     private var historyJob: Job? = null
     private var openingJob: Job? = null
