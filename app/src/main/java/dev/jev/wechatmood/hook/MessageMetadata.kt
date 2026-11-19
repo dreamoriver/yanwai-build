@@ -28,6 +28,35 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
         return MessagePolicy.textOrNull(text)
     }
 
+    /**
+     * 依据弹窗专用：type 49 的正文在 title/des 里。
+     * 只用于展示「这条依据到底说了什么」，不参与回复上下文，避免把链接标题当成对话。
+     */
+    fun evidenceBody(): String? {
+        if (type !in setOf(49, 822083633)) return null
+        val raw = body()
+        if (raw.isBlank()) return null
+        if (!raw.contains('<')) return MessagePolicy.textOrNull(raw)
+        val pattern = Regex("<(?:title|des)(?:\\s[^>]*)?>(.*?)</(?:title|des)>", RegexOption.DOT_MATCHES_ALL)
+        return pattern.findAll(raw).map { cleanXml(it.groupValues[1]) }
+            .firstOrNull { it.isNotBlank() }?.take(1000)
+    }
+
+    /** 去掉 appmsg 里的内层标签与实体，只留人能读的文字。 */
+    private fun cleanXml(value: String): String = value
+        .replace(Regex("<[^>]{1,300}>"), "")
+        .replace("<![CDATA[", "").replace("]]>", "")
+        .replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&apos;", "'")
+        .replace("&amp;", "&")
+        .replace(Regex("&#x([0-9a-fA-F]+);")) { match ->
+            runCatching { String(Character.toChars(match.groupValues[1].toInt(16))) }.getOrDefault("")
+        }
+        .replace(Regex("&#(\\d+);")) { match ->
+            runCatching { String(Character.toChars(match.groupValues[1].toInt())) }.getOrDefault("")
+        }
+        .trim()
+
     private fun groupSender(): String? {
         if (isSend != 0 || !talker.endsWith("@chatroom")) return null
         val separator = if (type == 34) ":" else ":\n"

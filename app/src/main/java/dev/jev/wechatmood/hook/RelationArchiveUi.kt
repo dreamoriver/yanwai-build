@@ -435,9 +435,10 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             }
             val time = if (message.createdAt > 0) FactTimes.formatLocal(message.createdAt, "MM-dd HH:mm") else "时间未知"
             // 把读到的真实类型写进日志：用户说那条明明是文字，得能看出到底读成了什么。
+            val extracted = message.analysisText() ?: message.evidenceBody()
             MoodLog.i("RELATION_EVIDENCE type=" + message.type + " send=" + message.isSend +
-                " len=" + message.content.length)
-            val body = message.analysisText()
+                " len=" + message.content.length + " shown=" + (extracted?.length ?: -1))
+            val body = extracted
             val kind = evidenceKind(message.type)
             val nearby = withContext(Dispatchers.IO) {
                 ReplyDatabaseHistory.nearbyText(selected, messageId, snapshot?.account)
