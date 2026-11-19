@@ -342,6 +342,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 ReplyDatabaseHistory.diagNames(context.talker, accountScope, raws)
             }.getOrNull().orEmpty()
             runCatching { file.writeText(body + tail) }
+            // 类名探测放在全库搜索前面：搜索很容易超时，探测更值钱。
+            runCatching { file.appendText(WeChatClassProbe.scan()) }
             runCatching {
                 ReplyDatabaseHistory.diagSearch(accountScope, raws.firstOrNull { it.startsWith("wxid") }.orEmpty())
             }.getOrNull()?.let { extra ->

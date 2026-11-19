@@ -3,6 +3,13 @@
 基于 [YIRC99/yanwai](https://github.com/YIRC99/yanwai) 的本地改动，仅供自己使用。
 原仓库未声明开源许可证，因此不对外分发安装包。
 
+## 2.9.138
+
+探测微信内存里的昵称入口（只探测，不改行为）
+- 模块初始化时挂 ClassLoader#loadClass，只记录 com.tencent.mm 下的类名（上限 4 万条）
+- 打开统计时按方法名/字段名扫一遍（getDisplayName、getNickName、conRemark 之类），命中结果写进诊断文件
+- 扫描限时 20 秒，排在慢的全库搜索前面，先保证探测结果能落盘
+
 ## 2.9.137
 
 查不到的名字可以直接点了填
