@@ -36,10 +36,34 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
         if (type !in setOf(49, 822083633)) return null
         val raw = body()
         if (raw.isBlank()) return null
+        // 合并转发：摊平成「谁说了什么」，能看到具体是哪几句支撑了这条事实。
+        if (dev.jev.wechatmood.reply.ForwardDigest.isForward(raw)) {
+            val digest = dev.jev.wechatmood.reply.ForwardDigest.parse(raw) ?: return null
+            return digest.transcript().take(1500).ifBlank { null }
+        }
         if (!raw.contains('<')) return MessagePolicy.textOrNull(raw)
         val pattern = Regex("<(?:title|des)(?:\\s[^>]*)?>(.*?)</(?:title|des)>", RegexOption.DOT_MATCHES_ALL)
         return pattern.findAll(raw).map { cleanXml(it.groupValues[1]) }
             .firstOrNull { it.isNotBlank() }?.take(1000)
+    }
+
+    /** 依据弹窗里显示的短类型：49 再按内容细分，不再一律写「链接、引用或转发」。 */
+    fun evidenceKind(): String = when (type) {
+        1 -> "文字"
+        3 -> "图片"
+        34 -> "语音"
+        42 -> "名片"
+        43 -> "视频"
+        47 -> "表情"
+        48 -> "位置"
+        49, 822083633 -> when {
+            dev.jev.wechatmood.reply.ForwardDigest.isForward(content) -> "合并转发"
+            quoteReply != null -> "引用回复"
+            content.contains("<url>") -> "链接"
+            else -> "链接、引用或转发"
+        }
+        10000, 10002 -> "系统消息"
+        else -> "类型 " + type
     }
 
     /** 去掉 appmsg 里的内层标签与实体，只留人能读的文字。 */

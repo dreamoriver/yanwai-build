@@ -439,33 +439,18 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             MoodLog.i("RELATION_EVIDENCE type=" + message.type + " send=" + message.isSend +
                 " len=" + message.content.length + " shown=" + (extracted?.length ?: -1))
             val body = extracted
-            val kind = evidenceKind(message.type)
+            val kind = message.evidenceKind()
             val nearby = withContext(Dispatchers.IO) {
                 ReplyDatabaseHistory.nearbyText(selected, messageId, snapshot?.account)
             }
             val around = if (nearby.isEmpty()) "" else "\n\n上下文：\n" + nearby.joinToString("\n") { item ->
                 val stamp = if (item.createdAt > 0) FactTimes.formatLocal(item.createdAt, "HH:mm") else "--:--"
-                val text = item.plainText()?.replace("\n", " ")?.take(40) ?: "[${evidenceKind(item.type)}]"
+                val text = item.plainText()?.replace("\n", " ")?.take(40) ?: "[${item.evidenceKind()}]"
                 "$stamp ${item.speaker()}：$text"
             }
             kit.info("依据消息", "${message.speaker()} · $time · $kind${around}\n\n" +
                 (body ?: "【这条被读成$kind，没有可显示的正文】"))
         }
-    }
-
-    /** 消息类型的中文名，依据弹窗和上下文都用它；数字对不上就直接写类型号。 */
-    private fun evidenceKind(type: Int): String = when (type) {
-        1 -> "文字"
-        3 -> "图片"
-        34 -> "语音"
-        42 -> "名片"
-        43 -> "视频"
-        47 -> "表情"
-        48 -> "位置"
-        49 -> "链接、引用或转发"
-        10000 -> "系统消息"
-        10002 -> "系统消息"
-        else -> "类型 " + type
     }
 
     private fun update(fact: RelationFact, status: String) {
