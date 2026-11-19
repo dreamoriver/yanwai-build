@@ -550,59 +550,41 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         val text = input("例如：在游戏公司做运营")
         column.addView(text, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(10) })
         val timed = kind in RelationFact.TIMED_KINDS
-        // 时间改成点选：日历 + 表盘滚轮，不再让人手打「2026-11-20 19:00」。
+        // 日期和时刻都用自绘刻度条滑选：系统日历+表盘又高又丑，底部还会被屏幕切掉。
         var occurredAt = 0L
         if (timed) {
+            val today = FactTimes.startOfDay(System.currentTimeMillis())
+            val soon = System.currentTimeMillis() + 3_600_000L
+            var dayMillis = FactTimes.startOfDay(soon)
+            var minuteOfDay = (((soon - dayMillis) / 60_000L).toInt()).let { it - it % 5 }
             var dayOnly = kind == "重要日期"
-            val initial = java.util.Calendar.getInstance().apply {
-                add(java.util.Calendar.HOUR_OF_DAY, 1)
-                set(java.util.Calendar.SECOND, 0)
-                set(java.util.Calendar.MILLISECOND, 0)
+            fun picked(): Long = if (dayOnly) dayMillis else dayMillis + minuteOfDay * 60_000L
+
+            val dayBack = 30
+            val dayForward = 90
+            fun dayAt(index: Int): Long = today + (index - dayBack) * 86_400_000L
+            val dayOffset = ((dayMillis - today) / 86_400_000L).toInt()
+
+            val dateRuler = RulerPicker(activity, theme, min = 0, max = dayBack + dayForward, step = 1,
+                value = dayBack + dayOffset, spacing = theme.dp(78),
+                label = { index -> FactTimes.label(dayAt(index)) }) { index ->
+                dayMillis = dayAt(index)
+                occurredAt = picked()
             }
-            val dateValue = theme.label("", ReplyMetrics.TEXT_BODY, theme.ink)
-            val timeValue = theme.label("", ReplyMetrics.TEXT_BODY, theme.ink)
-            val datePicker = android.widget.DatePicker(activity).apply { visibility = android.view.View.GONE }
-            val clock = android.widget.TimePicker(activity).apply { setIs24HourView(true) }
-            fun pickedMillis(): Long = java.util.Calendar.getInstance().apply {
-                set(datePicker.year, datePicker.month, datePicker.dayOfMonth,
-                    if (dayOnly) 0 else clock.hour, if (dayOnly) 0 else clock.minute, 0)
-                set(java.util.Calendar.MILLISECOND, 0)
-            }.timeInMillis
-            fun refresh() {
-                occurredAt = pickedMillis()
-                dateValue.text = FactTimes.label(occurredAt)
-                timeValue.text = if (dayOnly) "不写具体时刻" else FactTimes.formatLocal(occurredAt, "HH:mm")
+            val timeRuler = RulerPicker(activity, theme, min = 0, max = 24 * 60 / 5 - 1, step = 1,
+                value = minuteOfDay / 5, spacing = theme.dp(54),
+                label = { index -> String.format(java.util.Locale.CHINA, "%02d:%02d", index * 5 / 60, index * 5 % 60) }
+            ) { index ->
+                minuteOfDay = index * 5
+                occurredAt = picked()
             }
-            fun pickerRow(title: String, value: TextView, toggle: () -> Unit): LinearLayout =
-                LinearLayout(activity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    minimumHeight = theme.dp(ReplyMetrics.TAP)
-                    background = theme.shape(theme.card, ReplyMetrics.RADIUS_BUTTON, theme.border)
-                    setPadding(theme.dp(12), theme.dp(10), theme.dp(12), theme.dp(10))
-                    isClickable = true
-                    isFocusable = true
-                    setOnClickListener { toggle() }
-                    addView(theme.label(title, ReplyMetrics.TEXT_BODY, theme.muted))
-                    value.gravity = android.view.Gravity.END
-                    addView(value, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = theme.dp(10) })
-                }
-            datePicker.init(initial.get(java.util.Calendar.YEAR), initial.get(java.util.Calendar.MONTH),
-                initial.get(java.util.Calendar.DAY_OF_MONTH)) { _, _, _, _ -> refresh() }
-            clock.hour = initial.get(java.util.Calendar.HOUR_OF_DAY)
-            clock.minute = initial.get(java.util.Calendar.MINUTE)
-            clock.setOnTimeChangedListener { _, _, _ -> refresh() }
-            clock.visibility = android.view.View.GONE
-            column.addView(pickerRow("日期", dateValue) {
-                datePicker.visibility = if (datePicker.visibility == android.view.View.GONE)
-                    android.view.View.VISIBLE else android.view.View.GONE
-            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
-            column.addView(datePicker, LinearLayout.LayoutParams(-1, -2))
-            column.addView(pickerRow("时刻", timeValue) {
-                clock.visibility = if (clock.visibility == android.view.View.GONE)
-                    android.view.View.VISIBLE else android.view.View.GONE
-            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
-            column.addView(clock, LinearLayout.LayoutParams(-1, -2))
+            occurredAt = picked()
+
+            column.addView(kit.caption("日期 · 左右滑动").apply { setPadding(0, theme.dp(10), 0, 0) })
+            column.addView(dateRuler, LinearLayout.LayoutParams(-1, -2))
+            val timeCaption = kit.caption("时刻 · 左右滑动").apply { setPadding(0, theme.dp(6), 0, 0) }
+            column.addView(timeCaption)
+            column.addView(timeRuler, LinearLayout.LayoutParams(-1, -2))
             val dayOnlySwitch = android.widget.Switch(activity).apply {
                 // 不能写 text = ...：外层有个同名 val（正文输入框），会被解析成它。
                 setText("只到日期，不写几点")
@@ -611,10 +593,19 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 setTextColor(theme.ink)
                 minimumHeight = theme.dp(ReplyMetrics.TAP)
                 setPadding(0, theme.dp(8), 0, 0)
-                setOnCheckedChangeListener { _, value -> dayOnly = value; refresh() }
+                setOnCheckedChangeListener { _, value ->
+                    dayOnly = value
+                    val gone = if (value) android.view.View.GONE else android.view.View.VISIBLE
+                    timeCaption.visibility = gone
+                    timeRuler.visibility = gone
+                    occurredAt = picked()
+                }
             }
             column.addView(dayOnlySwitch, LinearLayout.LayoutParams(-1, -2))
-            refresh()
+            if (dayOnly) {
+                timeCaption.visibility = android.view.View.GONE
+                timeRuler.visibility = android.view.View.GONE
+            }
         }
         val hint = kit.caption("")
         column.addView(hint)
