@@ -61,19 +61,11 @@ object ReplyDatabaseHistory {
 
     @Synchronized private fun observe(db: Any) {
         if (moduleQuery.get() == true) return
-        val rawPath = runCatching { db.javaClass.getMethod("getPath").invoke(db) as? String }.getOrNull()
-            ?.replace('\\', '/').orEmpty()
-        val main = known.getOrPut(db) { rawPath.substringAfterLast('/') == "EnMicroMsg.db" }
-        if (!main) {
-            // sfs.db 这类 KV 库微信自己也开着，群成员昵称有可能缓存在里面。
-            if (rawPath.contains("/MicroMsg/") && !rawPath.endsWith("EnMicroMsg.db")) {
-                extraPaths[db] = rawPath
-                extras.removeAll { it.get() == null || it.get() === db }
-                extras.add(0, WeakReference(db))
-                while (extras.size > 4) extras.removeAt(extras.lastIndex)
-            }
-            return
+        val main = known.getOrPut(db) {
+            val path = db.javaClass.getMethod("getPath").invoke(db) as? String
+            path?.replace('\\', '/')?.substringAfterLast('/') == "EnMicroMsg.db"
         }
+        if (!main) return
         val firstObservation = handles.none { it.get() === db }
         handles.removeAll { it.get() == null || it.get() === db }
         handles.add(0, WeakReference(db))
@@ -243,144 +235,6 @@ object ReplyDatabaseHistory {
     }
 
     /** 诊断用：列出主库的表名，便于确认群昵称实际存在哪张表。 */
-    suspend fun tableNames(accountScope: String? = null): List<String> = withContext(Dispatchers.IO) {
-        val databases = databasesForScope(
-            synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
-        val names = databases.flatMap { tableNamesOf(it) }.distinct()
-        dev.jev.wechatmood.core.MoodLog.i("STATS_TABLES_RAW count=${names.size} sample=${names.take(12)}")
-        val related = names.filter {
-            it.contains("contact", true) || it.contains("stranger", true) || it.contains("nick", true) ||
-                it.contains("userinfo", true) || it.contains("friend", true)
-        }
-        dev.jev.wechatmood.core.MoodLog.i("STATS_TABLES count=${names.size} related=$related")
-        names
-    }
-
-    /**
-     * 昵称查不到时的现场诊断：写清楚微信这版把名字放哪了。
-     * 1) chatroom 整行（memberlist 现在只是分号列表，昵称列另有其人）
-     * 2) 一个没命中的 wxid 在 rcontact 的整行
-     * 3) 全库定位这个 wxid 出现在哪些表、哪些列
-     */
-    suspend fun diagNames(chatroom: String?, accountScope: String?, raws: List<String>): String =
-        withContext(Dispatchers.IO) {
-            val databases = databasesForScope(
-                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
-            val target = raws.firstOrNull { it.startsWith("wxid") } ?: raws.firstOrNull().orEmpty()
-            buildString {
-                appendLine("diag_names time=" + System.currentTimeMillis())
-                appendLine("chatroom=" + chatroom + " dbs=" + databases.size + " target=" + target)
-                appendLine("layers=" + lastLayers)
-                for (db in databases.take(1)) {
-                    val tables = tableNamesOf(db)
-                    appendLine("tables=" + tables.size + " " + tables.joinToString(",").take(4000))
-                    val xml = runCatching { rawMemberlist(db, chatroom.orEmpty()) }.getOrDefault("")
-                    appendLine("memberlist_len=" + xml.length)
-                    appendLine("memberlist_head=" + xml.take(1500).replace("\n", "\\n"))
-                    appendLine("chatroom_row=" + rowDump(db, "chatroom", "chatroomname", chatroom.orEmpty()))
-                    appendLine("rcontact_row=" + rowDump(db, "rcontact", "username", target))
-                    // 全库定位：只扫名字像联系人的表，避免把 message 这种大表翻一遍。
-                    var hits = 0
-                    for (table in tables) {
-                        if (hits >= 12) break
-                        val lower = table.lowercase()
-                        if (!(lower.contains("contact") || lower.contains("nick") || lower.contains("member") ||
-                                lower.contains("room") || lower.contains("user") || lower.contains("stranger") ||
-                                lower.contains("profile") || lower.contains("info") || lower.startsWith("openim"))) continue
-                        if (lower == "rcontact" || lower == "chatroom") continue
-                        val columns = tableColumns(db, table)
-                        val idColumns = columns.filter { it.lowercase() in ID_COLUMNS }
-                        for (column in idColumns) {
-                            val hit = runCatching {
-                                query(db, "SELECT * FROM " + table + " WHERE " + column + " = ? LIMIT 1",
-                                    arrayOf(target)).use { cursor ->
-                                    if (!cursor.moveToFirst()) null else columns.mapIndexed { index, name ->
-                                        name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
-                                    }.filter { it.second.isNotBlank() && it.second.length < 120 }
-                                        .joinToString("|") { it.first + "=" + it.second }
-                                }
-                            }.getOrNull()
-                            if (!hit.isNullOrBlank()) {
-                                appendLine("hit[" + table + "." + column + "]=" + hit.take(400))
-                                hits++
-                            }
-                        }
-                    }
-                    appendLine("hits=" + hits)
-                    // 关键候选表的列名，先确认这版把昵称放哪了。
-                    for (table in listOf("contact", "contact_ext", "friend_ext", "getcontactinfov2",
-                        "Stranger", "ContactCmdBuf", "MsgQuote", "img_flag")) {
-                        appendLine("schema[" + table + "]=" + tableColumns(db, table).joinToString(","))
-                    }
-                    appendLine("contact_cmd_buf=" + rowDump(db, "ContactCmdBuf", "username", target))
-                    // 群消息的 lvbuffer 里常带发送者附加信息，看看有没有可读内容。
-                    appendLine("lvbuffer=" + lvbufferSample(db, chatroom.orEmpty()))
-                }
-            }
-        }
-
-    /**
-     * 用微信自己的联系人实体去解码 rcontact 行。
-     * 昵称列是空的，但 lvbuff 里可能塞着新版联系人资料（protobuf），
-     * 微信的 com.tencent.mm.storage.g 有 a(Cursor) 能解它，解完读 field_nickname 就行。
-     */
-    suspend fun diagRcontact(accountScope: String?, users: List<String>, loader: ClassLoader): String =
-        withContext(Dispatchers.IO) {
-            val databases = databasesForScope(
-                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
-            buildString {
-                val cls = runCatching { Class.forName("com.tencent.mm.storage.g", false, loader) }.getOrNull()
-                appendLine("rcontact_class=" + (cls?.name ?: "none"))
-                if (cls == null) return@buildString
-                appendLine("rcontact_fields=" + runCatching { cls.declaredFields.map { it.name } }
-                    .getOrDefault(emptyList()).take(20))
-                val ctor = runCatching { cls.getDeclaredConstructor().apply { isAccessible = true } }.getOrNull()
-                val decoder = runCatching {
-                    cls.declaredMethods.firstOrNull {
-                        it.parameterCount == 1 && it.parameterTypes[0] == Cursor::class.java
-                    }?.apply { isAccessible = true }
-                }.getOrNull()
-                appendLine("rcontact_decoder=" + (decoder?.name ?: "none"))
-                for (db in databases.take(1)) {
-                    for (user in users.filter { it.startsWith("wxid") }.distinct().take(2)) {
-                        runCatching {
-                            query(db, "SELECT * FROM rcontact WHERE username = ? LIMIT 1", arrayOf(user)).use { cursor ->
-                                if (!cursor.moveToFirst()) return@use
-                                val index = cursor.getColumnIndex("lvbuff")
-                                val blob = if (index >= 0) runCatching { cursor.getBlob(index) }.getOrNull() else null
-                                appendLine("lvbuff[" + user + "]=len=" + (blob?.size ?: -1) +
-                                    " head=" + (blob?.take(60)?.joinToString("") { "%02x".format(it) } ?: ""))
-                                val obj = ctor?.newInstance()
-                                val decoded = runCatching { decoder?.invoke(obj, cursor) }.isSuccess
-                                val nick = runCatching {
-                                    cls.getDeclaredField("field_nickname").apply { isAccessible = true }
-                                        .get(obj) as? String
-                                }.getOrNull()
-                                val remark = runCatching {
-                                    cls.getDeclaredField("field_conRemark").apply { isAccessible = true }
-                                        .get(obj) as? String
-                                }.getOrNull()
-                                appendLine("decode[" + user + "] ok=" + decoded + " nickname=" + nick +
-                                    " conRemark=" + remark + " decoder=" + (decoder?.name ?: "none"))
-                                // 混淆后的三个 getter，谁返回名字就用谁。
-                                cls.declaredMethods.filter { it.parameterCount == 0 && it.returnType == String::class.java }
-                                    .take(8).forEach { method ->
-                                        runCatching {
-                                            method.isAccessible = true
-                                            appendLine("getter[" + user + "] " + method.name + "=" + method.invoke(obj))
-                                        }
-                                    }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-    /**
-     * 群里的 @ 消息带 <atuserlist>（wxid 列表）和 @昵称。
-     * 只在「@ 了一个人、正文里也只有一个 @」时配对，宁可少认也不认错。
-     */
     suspend fun atNames(talker: String, sinceMillis: Long, accountScope: String? = null): Map<String, String> =
         withContext(Dispatchers.IO) {
             if (!talker.endsWith("@chatroom")) return@withContext emptyMap()
@@ -418,120 +272,6 @@ object ReplyDatabaseHistory {
         }
 
     /** 全库搜索单独一段跑：慢，但不该拖住面板和上一步的诊断。 */
-    suspend fun diagSearch(accountScope: String?, target: String): String = withContext(Dispatchers.IO) {
-        val databases = databasesForScope(
-            synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
-        buildString {
-            appendLine("diag_search target=" + target)
-            for (db in databases.take(1)) {
-                for (line in searchEverywhere(db, target)) appendLine(line)
-            }
-            val others = synchronized(this@ReplyDatabaseHistory) { extras.mapNotNull { it.get() } }
-            for (db in others.take(3)) {
-                val path = extraPaths[db].orEmpty()
-                val tables = tableNamesOf(db)
-                appendLine("extra_db[" + path.substringAfterLast('/') + "] tables=" + tables.take(20))
-                for (table in tables.take(8)) {
-                    appendLine("extra_schema[" + table + "]=" +
-                        tableColumns(db, table).take(12).joinToString(","))
-                }
-                for (line in searchEverywhere(db, target)) appendLine("extra_" + line)
-                for (line in searchHex(db, target)) appendLine("extra_" + line)
-            }
-        }
-    }
-
-    /** 跳过消息类大表：这些表几十万行，LIKE 全表扫会把统计面板拖死。 */
-    private val BIG_TABLES = setOf("message", "fmessage_msginfo", "bizchatmessage", "appbrandmessage",
-        "qmessage", "tmessage", "bottlemessage", "gamemessage", "AppMessage", "DelMessage", "OpLog")
-
-    /** 全库按文本列找目标 wxid，命中就把它那一行的非空字段打出来。 */
-    private fun searchEverywhere(db: Any, target: String): List<String> {
-        if (target.isBlank()) return emptyList()
-        val out = ArrayList<String>()
-        val deadline = System.currentTimeMillis() + 20_000
-        for (table in tableNamesOf(db)) {
-            if (out.size >= 16) break
-            if (System.currentTimeMillis() > deadline) { out += "search_timeout"; break }
-            if (table in BIG_TABLES) continue
-            val columns = tableColumns(db, table)
-            if (columns.isEmpty() || columns.size > 40) continue
-            val where = columns.joinToString(" OR ") { it + " LIKE ?" }
-            val args = Array(columns.size) { "%" + target + "%" }
-            val hit = runCatching {
-                query(db, "SELECT * FROM " + table + " WHERE " + where + " LIMIT 1", args).use { cursor ->
-                    if (!cursor.moveToFirst()) null else columns.mapIndexed { index, name ->
-                        name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
-                    }.filter { it.second.isNotBlank() }
-                        .joinToString("|") { it.first + "=" + it.second.take(80) }
-                }
-            }.getOrNull()
-            if (!hit.isNullOrBlank()) out += "search[" + table + "]=" + hit.take(300)
-        }
-        return out
-    }
-
-    /** KV 库的 value 是 blob，LIKE 匹配不到，转成十六进制再比一次。 */
-    private fun searchHex(db: Any, target: String): List<String> {
-        if (target.isBlank()) return emptyList()
-        val hex = target.toByteArray(Charsets.UTF_8).joinToString("") { "%02X".format(it) }
-        val out = ArrayList<String>()
-        val deadline = System.currentTimeMillis() + 10_000
-        for (table in tableNamesOf(db)) {
-            if (out.size >= 6 || System.currentTimeMillis() > deadline) break
-            val columns = tableColumns(db, table)
-            if (columns.isEmpty() || columns.size > 10) continue
-            val where = columns.joinToString(" OR ") { "hex(" + it + ") LIKE ?" }
-            val args = Array(columns.size) { "%" + hex + "%" }
-            val hit = runCatching {
-                query(db, "SELECT * FROM " + table + " WHERE " + where + " LIMIT 1", args).use { cursor ->
-                    if (!cursor.moveToFirst()) null else columns.mapIndexed { index, name ->
-                        name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
-                    }.filter { it.second.isNotBlank() }
-                        .joinToString("|") { it.first + "=" + it.second.take(120) }
-                }
-            }.getOrNull()
-            if (!hit.isNullOrBlank()) out += "hex[" + table + "]=" + hit.take(300)
-        }
-        return out
-    }
-
-    /** 一条群消息的 lvbuffer：只留可读字符，用来判断昵称是不是塞在这里。 */
-    private fun lvbufferSample(db: Any, chatroom: String): String {
-        if (chatroom.isBlank()) return ""
-        return runCatching {
-            query(db, "SELECT lvbuffer FROM message WHERE talker = ? AND isSend = 0 " +
-                "ORDER BY createTime DESC LIMIT 1", arrayOf(chatroom)).use { cursor ->
-                if (!cursor.moveToFirst()) return@use ""
-                val bytes = runCatching { cursor.getBlob(0) }.getOrNull() ?: return@use ""
-                String(bytes, Charsets.ISO_8859_1).filter { it.code in 32..126 || it.code > 160 }
-                    .replace(Regex("[\\s]{2,}"), " ").take(300)
-            }
-        }.getOrDefault("")
-    }
-
-    /** 整行 dump：列名=值，只留非空且不太长的字段。 */
-    private fun rowDump(db: Any, table: String, keyColumn: String, key: String): String {
-        if (key.isBlank()) return "none"
-        val columns = tableColumns(db, table)
-        return runCatching {
-            query(db, "SELECT * FROM " + table + " WHERE " + keyColumn + " = ? LIMIT 1", arrayOf(key)).use { cursor ->
-                if (!cursor.moveToFirst()) return@use "none"
-                columns.mapIndexed { index, name ->
-                    name to runCatching { cursor.getString(index) }.getOrNull().orEmpty()
-                }.filter { it.second.isNotBlank() }
-                    .joinToString("|") { it.first + "=" + it.second.take(60) }
-            }
-        }.getOrDefault("error")
-    }
-
-    private val ID_COLUMNS = setOf("username", "user_name", "wxid", "alias", "userid", "user_id",
-        "contactid", "contact_id", "member", "membername")
-
-    /**
-     * 群里的引用消息自带被引用人的资料：refermsg 里 chatusr 是 wxid，displayname 是昵称。
-     * 非好友的名字库里查不到，但引用里写着，直接拿来用。
-     */
     suspend fun quotedNames(talker: String, sinceMillis: Long, accountScope: String? = null): Map<String, String> =
         withContext(Dispatchers.IO) {
             if (!talker.endsWith("@chatroom")) return@withContext emptyMap()
@@ -577,10 +317,6 @@ object ReplyDatabaseHistory {
 
     /** 每个库的列名缓存；库对象被回收时一起回收。 */
     private val columnCache = java.util.WeakHashMap<Any, MutableMap<String, List<String>>>()
-
-    /** 除主库之外微信打开的库（sfs.db 等），诊断时扫一遍。 */
-    private val extras = ArrayList<WeakReference<Any>>()
-    private val extraPaths = WeakHashMap<Any, String>()
 
     /** 最近一次昵称解析的分层命中数，给界面和诊断用。 */
     @Volatile var lastLayers: Map<String, Int> = emptyMap()

@@ -318,34 +318,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         dialog.setOnDismissListener { scope.cancel() }
         dialog.show()
 
-        // 昵称在数据库里，异步查一次再替换 wxid；顺便记一次表名，方便确认字段位置。
+        // 昵称在数据库里，异步查一次再替换 wxid。
         scope.launch {
-            runCatching { ReplyDatabaseHistory.tableNames(accountScope) }
             renderTop(namesFor(stats.members.map { it.name }))
-            dumpNameDiag()
-        }
-    }
-
-    /**
-     * 昵称查不到时的现场诊断：写到微信自己的外部目录。
-     * 用独立的 scope，且快慢两段分开落盘——以前挂在面板协程上，用户一关面板就被取消，
-     * 全库搜索还没跑完文件根本没生成。
-     */
-    private fun dumpNameDiag() {
-        if (unknownNames <= 0) return
-        val raws = stats.members.map { it.name }.filter { it !in currentNames }
-        val dir = activity.getExternalFilesDir(null) ?: return
-        val file = java.io.File(dir, "yanwai-names-diag.txt")
-        val tail = "\nunknown=" + unknownNames + " layers=" + ReplyDatabaseHistory.lastLayers +
-            "\npageNames=" + pageNames.size + " quoted=" + quotedNames.size + " at=" + atNames.size +
-            " manual=" + manualNames.size +
-            "\nmsg_fields=" + MessageMetadata.lastFields.take(80).joinToString(",") + "\n"
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            val body = runCatching {
-                ReplyDatabaseHistory.diagNames(context.talker, accountScope, raws)
-            }.getOrNull().orEmpty()
-            runCatching { file.writeText(body + tail) }
-            dev.jev.wechatmood.core.MoodLog.i("STATS_DIAG_WRITTEN " + file.absolutePath)
         }
     }
 
