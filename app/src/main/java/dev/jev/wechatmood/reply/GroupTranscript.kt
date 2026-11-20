@@ -6,7 +6,7 @@ package dev.jev.wechatmood.reply
  */
 object GroupTranscript {
     /** 一次喂给模型的素材上限：够覆盖一整天，又不至于撑爆上下文。 */
-    const val SAMPLE_LIMIT = 200
+    const val SAMPLE_LIMIT = 120
     /** 每段取几条连续消息：单条均匀抽会把对话抽成碎片，看不出谁在接谁。 */
     const val RUN = 4
     /** 单条消息留给模型的字数。 */

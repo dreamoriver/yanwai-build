@@ -81,7 +81,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     /** 上一次表格里没查到昵称的人数，诊断导出要看。 */
     private var unknownNames = 0
     /** 素材正文的字符预算：小模型上下文也就 8k，素材撑太满直接 400。 */
-    private val MATERIAL_CHARS = 9000
+    private val MATERIAL_CHARS = 6000
     /** wxid → 微信页面上显示的昵称，来自消息对象自带的显示名，比库里的准。 */
     private var pageNames: Map<String, String> = emptyMap()
     /** wxid → 引用消息里带出来的昵称，补上库里没有的非好友。 */
@@ -502,7 +502,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private fun exportText(analysis: String): String = buildString {
         appendLine("群聊统计 · ${summaryText()}")
         appendLine("数据范围 ${spanText()}")
-        appendLine("共 ${stats.total} 条 · ${stats.senders} 人发言")
+        appendLine("${stats.senders} 人发言")
         if (stats.topSenders.isNotEmpty()) {
             // 名字用表格里那套解析结果，复制出去别带 wxid。
             appendLine("最活跃：" + stats.topSenders.joinToString("、") {
@@ -519,35 +519,40 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }.trim()
 
     /**
-     * 群聊转述的提示词：先把主线说清，再把事一件件点到，最后收一句。
+     * 群聊转述的提示词：三十秒说清主线，只挑最大的两三个话题，不逐人报价。
+     * 早先那版要求「能说清的事都要点到、每件事都点出是谁说的、能说全就说全」，
+     * 模型照做就成了照抄聊天记录的流水账——要求写全，等于要求复述。
      * 素材里的 speaker 已经换成昵称，模型不该再看到 wxid。
      */
     private val summaryPrompt = """
-        你在一个微信群里蹲了一整天，现在要跟旁边的人讲清楚这群人最近都聊了些什么。
+        你在一个微信群里待了一整天，现在用三十秒跟没进群的人讲清楚这群人最近在聊什么。
 
-        素材是这个时段的消息，按时间顺序，可能只抽了一部分，也可能有上下文缺失。
+        只写三段，全文 250 到 400 字。超过 400 字这版就算废了。
 
-        怎么讲：
-        - 开头一句话说清主线：这帮人最近主要在忙什么、反复出现的是什么话题。
-        - 然后一件事一段。素材里能说清的事都要点到，通常三到六件，有几件写几件；
-          不要只挑两件好笑的，也不要把两件不同的事并成一件。
-        - 每件事都点出是谁说的、说了什么，能用原话就用原话，原话必须真的在素材里出现过。
-        - 顺序按有画面感或者好笑的来排，不要按时间顺着讲，那是记流水账。
-        - 结尾一句，可以吐槽，也可以给这帮人一句定性，别喊口号。
-        - 素材里叫「群友N」的是没查到昵称的人，别猜他们是谁；[图片] [语音] 只当占位，不要猜内容。
+        第一段，一到两句，直接说主线：这群人这阵子最集中折腾或者争论的是哪件事。
+        不要把后面要讲的话题列成清单，那等于把第二段又说了一遍。
+        第二段，只挑最大的两到三个话题，一个话题一到两句话，写话题本身和结论或者分歧。
+        第三段，一句话收尾，吐槽或者给这帮人定性都行，别喊口号。
 
-        怎么说话：
-        - 短句为主，可以有半截话，像边想边说。
-        - 不要「首先、其次、最后」「虽然、但是」「不仅、而且」这类连接词，
-          也不要「综上所述」「总而言之」「值得一提的是」「值得注意的是」。
-        - 不分点、不编号、不加小标题、不用 Markdown、不用 emoji 当标题，
-          不写「群氛围」「成员角色」「沟通建议」这种分析标题。
-        - 不复述统计数字，不评价这个群好还是不好。
-        - 如果确实只是闲聊没什么事，就照实说在聊什么，别硬编冲突，也别总结出什么群体规律。
+        硬性要求：
+        - 合并。十个人围着同一个话题说了十句，那是同一件事，不是十件。
+        - 不逐人报价。禁止「甲说……乙说……丙又接……」这种串行复述；
+          一个话题里最多出现两个昵称，只在这个人真的带着观点时才点名。
+        - 引用克制。全文最多三句原话，其余用自己的话概括；不引也能说清的地方就不要引。
+        - 小事不写。只有一两个人搭话、没结论的插科打诨，半句带过或者干脆不写。
+        - 宁可漏，不要全。漏掉边角话题没关系，主线错了才叫失败。
+        - [图片] [语音] 只当占位，不要猜内容；「群友N」是没查到昵称的人，别猜是谁。
+        - 不写统计数字，不评价这个群好不好，不用「首先/其次」「总而言之」「值得一提的是」，
+          不加小标题，不编号。
 
-        长度 500 字上下，最多八段。宁可把事说全，也不要为了短而漏掉明显的话题。
+        语气像边想边说的口头转述，短句，可以刻薄一点。
 
-        只输出正文，不要写「以下是总结」这类开场。
+        示范（只学密度和口吻，内容别照抄）：
+        这帮人最近全在折腾刷机，苹果安卓测试版两头试，顺手惦记着 iPhone17 什么时候买划算。
+        主力是折柳和「.」，一个劝人用平替别碰虚拟机，一个说没工夫踩坑，被追问急了才回一句你们也用不上。iPhone17 那边在算账，有人报 4999，茉莉拿 7399 除以 15 算出半个月不划算，团购就此作罢。
+        红包外挂倒是真吵起来了，四秒抢完二十个包，几个人挨个举报，剩下的都在骂挂币。
+
+        只输出正文，不要写「以下是总结」这类开场，也不要解释你是怎么写的。
     """.trimIndent()
 
     /** 一次请求拿到一段转述，顺带回报用了多少素材。 */
@@ -585,7 +590,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val client = ReplyHttpClient(HttpClients.shared.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
             .readTimeout(180, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).build())
-        var maxTokens = 4000
+        // 提示词要 250 到 400 字就够，token 上限也别给太松：给 4000 模型就真敢写到一千字。
+        var maxTokens = 1200
         var partial = ""
         var lastFinish = ""
         repeat(2) { attempt ->
@@ -630,7 +636,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 val unnamed = labels.values.count { it.startsWith("群友") }
                 dev.jev.wechatmood.core.MoodLog.i(
                     "STATS_AI_POOL pool=${pool.size} lines=${body.size} speakers=${labels.size} unnamed=$unnamed")
-                return Analysis(clean.take(3000), body.size, pool.size)
+                return Analysis(trimToLength(clean), body.size, pool.size)
             }
             if (clean.length > partial.length) partial = clean
             maxTokens = 8000
@@ -640,6 +646,17 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             return Analysis(partial.take(3000), body.size, pool.size, "输出被长度上限截断，可以再点一次重试")
         }
         throw IllegalStateException("模型没返回正文（$lastFinish，素材 ${body.size} 条）")
+    }
+
+    /**
+     * 提示词只是软约束，模型想写长还是会写长。超了就在句号处收口，
+     * 宁可少一个收尾，也不要留半句话。
+     */
+    private fun trimToLength(text: String, limit: Int = 420): String {
+        if (text.length <= limit) return text
+        val head = text.take(limit + 80)
+        val cut = head.indexOfLast { it in "。！？…\n" }
+        return if (cut >= limit / 2) head.take(cut + 1).trim() else head.take(limit).trim()
     }
 
     private fun copy(text: String) {
