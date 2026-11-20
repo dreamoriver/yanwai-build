@@ -4,6 +4,7 @@ import android.database.Cursor
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import dev.jev.wechatmood.core.MoodLog
+import dev.jev.wechatmood.reply.ReplyContactKey
 import dev.jev.wechatmood.reply.ReplyContext
 import dev.jev.wechatmood.reply.ReplyHistoryQuery
 import dev.jev.wechatmood.reply.ReplyHistoryReader
@@ -532,6 +533,90 @@ object ReplyDatabaseHistory {
         }
         result
     }
+
+    /**
+     * 把联系人的哈希键反解回聊天对象。
+     *
+     * contact_key 是「账号 + 聊天对象」的摘要，只有本机 rcontact 能对回去：提醒要显示名字、
+     * 点通知进会话，缺了它就只能写「未获取备注名」。旧档案没有目录记录时在这里补一次。
+     */
+    suspend fun resolveContacts(keys: Set<String>,
+        evidence: Map<String, List<Long>> = emptyMap()): Map<String, Pair<String, String>> =
+        withContext(Dispatchers.IO) {
+            if (keys.isEmpty()) return@withContext emptyMap()
+            val result = LinkedHashMap<String, Pair<String, String>>()
+            val opened = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+
+            fun scan(db: Any, account: String, keyColumns: IntArray, nameColumns: IntArray) {
+                runCatching {
+                    query(db, "SELECT username, conRemark, nickname, alias FROM rcontact", arrayOf()).use { cursor ->
+                        while (result.size < keys.size && cursor.moveToNext()) {
+                            // username 和 alias 都可能是消息里的 talker：对方改过微信号时，
+                            // 同一个 rcontact 行有两个可用标识，只按 username 算会永远对不上。
+                            val candidates = ArrayList<String>()
+                            for (index in keyColumns) {
+                                val value = runCatching { cursor.getString(index) }.getOrNull()?.trim()
+                                if (!value.isNullOrEmpty() && value.length <= 256 &&
+                                    value.matches(Regex("[A-Za-z0-9_@.\\-]{1,256}"))) candidates.add(value)
+                            }
+                            var matched: Pair<String, String>? = null
+                            for (candidate in candidates) {
+                                val key = ReplyContactKey.of(account, candidate)?.value ?: continue
+                                if (key in keys && key !in result) {
+                                    matched = key to candidate
+                                    break
+                                }
+                            }
+                            val hit = matched ?: continue
+                            val name = nameColumns.toList().asSequence()
+                                .mapNotNull { index -> runCatching { cursor.getString(index) }.getOrNull() }
+                                .map { dev.jev.wechatmood.core.TextClean.plain(it).trim() }
+                                .firstOrNull { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
+                                .orEmpty()
+                            result[hit.first] = hit.second to name
+                        }
+                    }
+                }.onFailure { MoodLog.w("RELATION_CONTACT_RESOLVE_FAILED " + it.javaClass.simpleName) }
+            }
+
+            for (db in opened) {
+                val account = runCatching { scope(db) }.getOrNull() ?: continue
+                scan(db, account, intArrayOf(0, 3), intArrayOf(1, 2, 3))
+            }
+            // 还认不出来的，用档案里存过的依据消息反推：拿到的 talker 算出的哈希必须一致才认。
+            if (result.size < keys.size && evidence.isNotEmpty()) {
+                val accounts = opened.mapNotNull { db -> runCatching { scope(db) }.getOrNull() }
+                for ((key, ids) in evidence) {
+                    if (key !in keys || key in result) continue
+                    for (id in ids.take(8)) {
+                        if (id <= 0) continue
+                        val talkers = opened.mapNotNull { db ->
+                            runCatching {
+                                query(db, "SELECT talker FROM message WHERE msgId = ? LIMIT 4", arrayOf(id.toString()))
+                                    .use { cursor ->
+                                        val list = ArrayList<String>(4)
+                                        while (cursor.moveToNext()) {
+                                            runCatching { cursor.getString(0) }.getOrNull()?.let { list.add(it) }
+                                        }
+                                        list
+                                    }
+                            }.getOrNull()
+                        }.flatten()
+                        val candidate = talkers.firstOrNull { talker ->
+                            accounts.any { account -> ReplyContactKey.of(account, talker)?.value == key }
+                        }
+                        if (candidate != null) {
+                            val name = contactNames(listOf(candidate))[candidate].orEmpty()
+                            result[key] = candidate to name
+                            MoodLog.i("RELATION_CONTACT_EVIDENCE_MATCH")
+                            break
+                        }
+                    }
+                }
+            }
+            MoodLog.i("RELATION_CONTACT_RESOLVE wanted=" + keys.size + " found=" + result.size)
+            result
+        }
 
     suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES): ReplyContext = withContext(Dispatchers.IO) {
         require(limit in 1..ReplyContext.MAX_MESSAGES)
