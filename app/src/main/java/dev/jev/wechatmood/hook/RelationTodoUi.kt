@@ -132,8 +132,12 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         val todos = items.filter { it.isOpen && it.isTimed && it.occurredAt > 0 }.sortedBy { it.occurredAt }
         val overdue = todos.filter { FactTimes.overdue(it.occurredAt, now) }
         val upcoming = todos.filter { !FactTimes.overdue(it.occurredAt, now) }
-        val handled = items.filter { it.status == RelationFact.STATUS_DONE || it.status == RelationFact.STATUS_CANCELLED }
-            .sortedByDescending { it.updatedAt }.take(HANDLED_LIMIT)
+        // 已处理也只收时间型条目：普通事实（工作、喜好）被移出后不属于待办，
+        // 它们只在关系档案页的「已移出 / 已作废」里出现。
+        val handled = items.filter {
+            (it.status == RelationFact.STATUS_DONE || it.status == RelationFact.STATUS_CANCELLED) &&
+                it.isTimed && it.occurredAt > 0
+        }.sortedByDescending { it.updatedAt }.take(HANDLED_LIMIT)
 
         if (todos.isEmpty()) {
             listContainer.addView(kit.body("这个联系人还没有带时间的约定"))

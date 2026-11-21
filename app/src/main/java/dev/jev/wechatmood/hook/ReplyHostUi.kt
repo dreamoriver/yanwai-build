@@ -114,6 +114,14 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val live = runCatching { MessageSniffer.replyContext(requireBottom = false, focusId = targetFocusId) }.getOrElse {
             toast(it.message ?: "读取聊天失败"); return true
         }
+        // 从附加面板进来没有长按目标：默认回对方最后一句。
+        // 否则 reply_target 是空的，提示词却写着「只回应用户长按的那条」，模型只能自己挑一个点接。
+        if (focusMessageId == null) {
+            live.messages.lastOrNull { it.speaker != "我" && it.text.isNotBlank() }?.let { target ->
+                targetFocusId = target.id
+                MoodLog.i("REPLY_AUTO_TARGET ready=${target.id > 0}")
+            }
+        }
         if (live.talker != selectedTalker) return false
         openingJob = scope.launch {
             try {
@@ -176,6 +184,18 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val initialEditor = editor()
         if (remembered == null && initialEditor == null) { toast("请先切换到文字输入"); return true }
         val focusId = remembered?.focusMessageId ?: focusMessageId
+        /** 「这一轮在回哪条」：有目标就写时间和摘要，没有就说自由发挥。 */
+        fun replyTargetText(ctx: ReplyContext): String {
+            val id = ctx.focusMessageId.takeIf { it > 0 } ?: targetFocusId
+            val target = ctx.messages.firstOrNull { it.id == id }
+                ?: ctx.messages.lastOrNull { it.speaker != "我" && it.text.isNotBlank() }
+            if (target == null) return "自由发挥：按最近对话接一句"
+            val clock = if (target.time > 0) java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+                .format(java.util.Date(target.time)) else ""
+            val text = target.text.replace("\n", " ").take(30)
+            return if (target.speaker == "我") "接着我${if (clock.isBlank()) "" else " $clock"}的话：$text"
+            else "回复${if (clock.isBlank()) "" else " $clock"}：$text"
+        }
         snapshot = reference.context
         initialEditor?.let { (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
             ?.hideSoftInputFromWindow(it.windowToken, 0) }
@@ -328,6 +348,13 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         draftPanel.addView(draftUse, LinearLayout.LayoutParams(-2, dp(44)).apply { topMargin = dp(10) })
         results.addView(draftPanel)
         val checkDraft = action("检查输入框这句") { checkDraftAction?.invoke() }.apply { visibility = View.GONE }
+        // 把「这一轮在回哪条」摆在按钮上方：没有长按的时候，用户也能看出默认目标是什么。
+        val targetLine = theme.label(replyTargetText(captured), 12f, theme.muted).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, dp(2), 0, dp(2))
+        }
+        results.addView(targetLine, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
         val generateButton = action("生成回复", primary = true)
         val topicButton = action("找找话题")
         val shorter = action("更简短", quiet = true)
@@ -929,6 +956,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     focusMessageId = if (ctx.focusMessageId > 0) ctx.focusMessageId else targetFocusId,
                     targetImageDataUri = ctx.targetImageDataUri ?: targetImage)
             } ?: run { prepareHistory(composition.historyLimit); return }
+            targetLine.text = replyTargetText(current)
             val latest = MessageSniffer.replyBoundary()
             if (latest != null && latest != current.latestLoadedId && current.messages.none { it.id == latest }) {
                 prepareHistory(composition.historyLimit); toast("聊天有更新，读取完成后再点生成"); return
@@ -1042,10 +1070,16 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             scope.launch {
                 val meta = withContext(Dispatchers.IO) { RelationFactBridge.meta(activity, factsKey) }
                 val gap = System.currentTimeMillis() - meta.lastAt
-                val fresh = live.messages.count { it.id > meta.lastMessageId }
+                // 页面只加载十几条，拿它数增量永远到不了 30 条；与进聊天那处统一，按库里的真实新增算。
+                val window = withContext(Dispatchers.IO) {
+                    runCatching { ReplyDatabaseHistory.load(live, ReplyContext.MAX_MESSAGES) }
+                        .getOrNull()?.messages
+                }.orEmpty()
+                val fresh = window.count { it.id > meta.lastMessageId }
                 // 之前先判「不到 24 小时就返回」，导致新增几十条也永远不抽；两个条件应当并列。
                 val due = gap > 3 * 24 * 3600_000L || fresh >= 30
-                MoodLog.i("RELATION_FACT_AUTO meta_last=${meta.lastAt} gap_hours=${gap / 3600_000L} fresh=$fresh due=$due")
+                MoodLog.i("RELATION_FACT_AUTO meta_last=${meta.lastAt} gap_hours=${gap / 3600_000L} " +
+                    "fresh=$fresh window=${window.size} due=$due")
                 if (due) refreshFacts(true)
             }
         }
