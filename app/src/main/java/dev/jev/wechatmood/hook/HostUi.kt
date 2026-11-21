@@ -117,20 +117,27 @@ class HostUi(private val activity: Activity) {
     /** ＋面板里「附加」弹出的功能面板。 */
     private fun showFeaturePanel() {
         val current = talker
-        // 关系档案只针对私聊：群聊没有联系人档案，显示出来只会误导。
-        val factsAvailable = current != null && !current.endsWith("@chatroom")
-        FeaturePanel(activity, current, topicsAvailable = current != null, factsAvailable = factsAvailable,
+        // 关系档案与待办只针对私聊：群聊没有联系人档案，摊开只会误导。
+        val privateChat = current != null && !current.endsWith("@chatroom")
+        FeaturePanel(activity, current, replyAvailable = current != null, factsAvailable = privateChat,
             analysisEnabled = ModulePrefs.isChatEnabled(current),
-            onReply = { replyUi.open() },
-            onTopics = { replyUi.open(autoTopics = true) },
+            onReply = {
+                // 抽屉要求还停在这个聊天上；切走了就说清楚，别让按钮看起来没反应。
+                if (!replyUi.open()) {
+                    Toast.makeText(activity, "先回到这个聊天再点", Toast.LENGTH_SHORT).show()
+                }
+            },
             onStats = { showStats() },
             onFacts = { RelationArchiveUi(activity, current).show() },
             onTodos = { RelationTodoUi(activity, current).show() },
             onAnalysisChanged = { value ->
-                if (current != null) {
-                    val saved = ModulePrefs.setChatEnabled(current, value)
-                    if (saved && !value) SignalAnalyzer.cancelConversation(current)
-                }
+                // 和长按菜单里的开关走同一条路：校验会话、关掉时清旧气泡、刷新界面。
+                // 以前这里只写偏好，失败了界面照样拨过去，气泡也留在屏幕上。
+                val target = current
+                val saved = target != null && MessageSniffer.setChatEnabled(target, value)
+                if (saved && !value) BubbleDecorator.clearAll()
+                if (saved) MessageSniffer.refresh()
+                saved
             }).show()
     }
     private val statsScope = kotlinx.coroutines.CoroutineScope(
@@ -141,7 +148,13 @@ class HostUi(private val activity: Activity) {
         val context = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
         dev.jev.wechatmood.core.MoodLog.i(
             "STATS_OPEN ok=${context != null} msgs=${context?.messages?.size ?: -1} talker=${context?.talker?.hashCode()}")
-        if (context == null || context.messages.isEmpty()) {
+        // 面板开着时可能已经切了聊天：入口指的是旧会话，别把统计开到新会话上。
+        val current = MessageSniffer.currentReplyTalker()
+        if (talker != null && current != null && current != talker) {
+            Toast.makeText(activity, "已经切到别的聊天了，重新打开统计", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (context == null) {
             Toast.makeText(activity, "先在聊天页等一会儿，再打开统计", Toast.LENGTH_SHORT).show()
             return
         }
@@ -162,10 +175,10 @@ class HostUi(private val activity: Activity) {
                 }.getOrDefault(emptyList())
                 rows.map {
                     dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
-                        it.analysisText() ?: "[媒体]", senderId = it.senderId())
+                        it.analysisText() ?: "[媒体]", senderId = it.senderId(), type = it.type)
                 }
             }
-            GroupStatsUi(activity, context, mapped, account) { showStats() }.show()
+            GroupStatsUi(activity, context, mapped, account).show()
         }
     }
 

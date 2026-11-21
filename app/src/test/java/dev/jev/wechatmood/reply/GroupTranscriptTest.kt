@@ -12,14 +12,32 @@ class GroupTranscriptTest {
 
     @Test fun `sample covers the whole span with contiguous runs`() {
         val picked = GroupTranscript.pick(1000)
-        assertTrue("取少了: ${picked.size}", picked.size in 150..200)
+        assertTrue("条数不对: ${picked.size}", picked.size in 100..140)
         assertEquals(picked.sorted(), picked)
         assertEquals(picked.size, picked.distinct().size)
         assertTrue("没覆盖开头: ${picked.first()}", picked.first() < 20)
-        assertTrue("没覆盖结尾: ${picked.last()}", picked.last() > 960)
+        // 最后一窗锚在最新消息上：以前均匀分布会漏掉最新几十条。
+        assertEquals("没覆盖结尾: ${picked.last()}", 999, picked.last())
         // 连续取样：同一小段里下标必须挨着，否则又变成碎片。
         val consecutive = picked.zipWithNext().count { (a, b) -> b - a == 1 }
         assertTrue("连续取样太少: $consecutive", consecutive > picked.size / 2)
+    }
+
+    @Test fun `sample stays inside the char budget and keeps small chats whole`() {
+        val picked = GroupTranscript.sample(1000)
+        assertTrue("条数超上限: ${picked.size}", picked.size <= GroupTranscript.SAMPLE_LIMIT)
+        assertEquals("最新一条必须进素材", 999, picked.last())
+        val perLine = GroupTranscript.MESSAGE_CHARS + GroupTranscript.LINE_OVERHEAD
+        assertTrue("素材超预算: ${picked.size * perLine}",
+            picked.size * perLine <= GroupTranscript.BUDGET_CHARS + perLine)
+        // 小群不抽样，整段都给。
+        assertEquals((0 until 30).toList(), GroupTranscript.sample(30))
+    }
+
+    @Test fun `timestamps are prefixed when asked`() {
+        val messages = listOf(ReplyMessage(1, "老王", 1_700_000_000_000, "早"))
+        val (lines, _) = GroupTranscript.lines(listOf(0), messages, emptyMap(), timestamps = true)
+        assertTrue("缺时间戳: ${lines[0]}", lines[0].matches(Regex("\\d{2}:\\d{2} 老王: 早")))
     }
 
     @Test fun `wxid and placeholders never reach the model`() {

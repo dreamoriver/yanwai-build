@@ -5,12 +5,28 @@ package dev.jev.wechatmood.reply
  * 都是纯函数，方便单测，也不依赖微信。
  */
 object GroupTranscript {
-    /** 一次喂给模型的素材上限：够覆盖一整天，又不至于撑爆上下文。 */
+    /** 一段素材最多放多少条；真正的条数由字符预算反算，见 [sample]。 */
     const val SAMPLE_LIMIT = 120
+    /** 素材正文的字符预算：小模型上下文也就 8k，素材撑太满直接 400。 */
+    const val BUDGET_CHARS = 6000
+    /** 每行除正文之外的固定开销：时间戳、署名、"： " 和换行。 */
+    const val LINE_OVERHEAD = 14
     /** 每段取几条连续消息：单条均匀抽会把对话抽成碎片，看不出谁在接谁。 */
     const val RUN = 4
     /** 单条消息留给模型的字数。 */
     const val MESSAGE_CHARS = 90
+
+    /**
+     * 先按字符预算算出能放几条，再交给 [pick] 抽。
+     *
+     * 以前上限写死 120 条，可 120 × 90 字本来就超过预算，第一轮循环必然砍半，
+     * 实际永远只喂得进六十来条，界面上的「按整段抽样」也就没覆盖到时段的尾部。
+     */
+    fun sample(size: Int, budgetChars: Int = BUDGET_CHARS): List<Int> {
+        val perLine = MESSAGE_CHARS + LINE_OVERHEAD
+        val limit = (budgetChars / perLine).coerceIn(RUN, SAMPLE_LIMIT)
+        return pick(size, limit)
+    }
 
     /**
      * 在整段消息里取连续小段，尽量覆盖整个时段。
@@ -24,7 +40,10 @@ object GroupTranscript {
         val span = size.toDouble() / windows
         val picked = LinkedHashSet<Int>()
         for (window in 0 until windows) {
-            val start = (window * span).toInt().coerceIn(0, size - 1)
+            // 最后一窗锚在最新消息上：群聊总结最该看到的就是刚说完的那几句，
+            // 纯均匀分布会把它整段切掉（1000 条里能漏掉最新 60 多条）。
+            val start = if (window == windows - 1) (size - run).coerceAtLeast(0)
+            else (window * span).toInt().coerceIn(0, size - 1)
             for (offset in 0 until run) {
                 val index = start + offset
                 if (index < size) picked += index
@@ -51,11 +70,13 @@ object GroupTranscript {
     /**
      * 把消息拼成「署名: 正文」的行，署名查不到的按出现顺序叫「群友 N」。
      * 同一个 wxid 在一段素材里只会拿到一个名字。
+     * [timestamps] 打开时每行前面带 HH:mm：素材横跨一整天时，模型才分得清上午说的和晚上说的。
      */
     fun lines(indices: List<Int>, messages: List<ReplyMessage>,
-        resolved: Map<String, String>): Pair<List<String>, Map<String, String>> {
+        resolved: Map<String, String>, timestamps: Boolean = false): Pair<List<String>, Map<String, String>> {
         val labels = LinkedHashMap<String, String>()
         val lines = ArrayList<String>(indices.size)
+        val clock = if (timestamps) java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA) else null
         var unnamed = 0
         for (index in indices) {
             val message = messages.getOrNull(index) ?: continue
@@ -66,7 +87,11 @@ object GroupTranscript {
                 if (it.length > MESSAGE_CHARS) it.take(MESSAGE_CHARS) + "…" else it
             }
             if (text.isEmpty()) continue
-            lines += "$name: $text"
+            val stamp = clock?.let { format ->
+                val millis = if (message.time > 1_000_000_000_000L) message.time else message.time * 1000
+                if (millis > 0) format.format(java.util.Date(millis)) + " " else ""
+            }.orEmpty()
+            lines += "$stamp$name: $text"
         }
         return lines to labels
     }

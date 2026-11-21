@@ -512,6 +512,10 @@ object ReplyDatabaseHistory {
         val parsed = dev.jev.wechatmood.reply.GroupMemberList.parse(xml)
         if (parsed.isNotEmpty()) {
             MoodLog.i("STATS_CHATROOM members=${parsed.size} xml=${xml.length}")
+        } else {
+            // 解析不出人时也要留痕：以前这里一声不响，日志里只剩 STATS_NAMES members=0，
+            // 分不清是表里没有这行，还是 XML 换了格式。
+            MoodLog.w("STATS_CHATROOM_EMPTY xml=${xml.length} members=${xml.contains("<member")} room=${chatroom.hashCode()}")
         }
         return parsed
     }
