@@ -386,16 +386,15 @@ object MessageSniffer {
                 else -> own
             }
         }
-        // 从「＋」横条进来时没有长按目标。对方最后发的是图片或表情，就当作本轮重点，
-        // 否则最常用的入口永远拿不到图片内容，模型只能看到一个「【图片】」占位。
-        // 从「＋」横条进来时没有长按目标。对方最后发的是图片或表情，就当作本轮重点，
-        // 否则最常用的入口永远拿不到图片内容，模型只能看到一个「【图片】」占位。
+        // 从「＋」横条进来时没有长按目标。只有对方最后一条消息本身就是图片或表情，
+        // 才把它当作本轮重点；以前在最近 400 条里找「最后一张图」，切到别的聊天会挑出
+        // 一张与当前对话无关的旧图，面板就显示成「回复 22:17：一张图片」。
         // 这里只记目标，不取图：截图要在主线程碰 View，压缩要在后台，放到
         // captureMediaImage 里异步做，避免点开面板时卡一下。
         var focusForReply = focusId
         if (target == null) {
-            val last = messages.lastOrNull { it.isSend == 0 && it.type in setOf(3, 47) }
-            if (last != null) {
+            val last = messages.lastOrNull { it.isSend == 0 && it.type != 10000 && it.type != 10002 }
+            if (last != null && last.type in setOf(3, 47)) {
                 targetMedia = if (last.type == 3) "图片" else "表情"
                 focusForReply = last.messageId
             }

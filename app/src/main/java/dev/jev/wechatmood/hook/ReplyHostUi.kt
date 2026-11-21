@@ -116,12 +116,13 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         val live = runCatching { MessageSniffer.replyContext(requireBottom = false, focusId = targetFocusId) }.getOrElse {
             toast(it.message ?: "读取聊天失败"); return true
         }
-        // 从附加面板进来没有长按目标：默认回对方最后一句。
-        // 否则 reply_target 是空的，提示词却写着「只回应用户长按的那条」，模型只能自己挑一个点接。
+        // 从附加面板进来没有长按目标：默认回对方最后一条消息。
+        // 以前要求「正文非空」，会把最后一条是图片/语音时跳过它，转而去回更早那句；
+        // 现在按消息取，占位由 replyTargetText 说明类型。
         if (focusMessageId == null) {
-            live.messages.lastOrNull { it.speaker != "我" && it.text.isNotBlank() }?.let { target ->
+            live.messages.lastOrNull { it.speaker != "我" && it.id > 0 }?.let { target ->
                 targetFocusId = target.id
-                MoodLog.i("REPLY_AUTO_TARGET ready=${target.id > 0}")
+                MoodLog.i("REPLY_AUTO_TARGET ready=${target.id > 0} placeholder=${target.placeholder}")
             }
         }
         if (live.talker != selectedTalker) return false
@@ -1201,6 +1202,12 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         openingJob?.cancel(); ownerEpoch = null
         dialog?.dismiss(); job?.cancel(); historyJob?.cancel(); session.cancel()
         talker = null
+        // 目标（尤其是长按的那张图）只属于打开它的聊天，切走后不能留给下一个群。
+        targetFocusId = 0
+        targetImage = null
+        draftTargetMedia = null
+        draftText = ""
+        draftLastIncoming = null
     }
     fun dispose() { hide(); scope.cancel() }
     private fun views(root: View): List<View> = buildList {
