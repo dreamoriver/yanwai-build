@@ -169,8 +169,15 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
     }
 
     private suspend fun load(key: ReplyContactKey) {
-        val loaded = withContext(Dispatchers.IO) {
-            RelationFactBridge.loadAll(activity, key) to RelationFactBridge.meta(activity, key)
+        val loaded = runCatching {
+            withContext(Dispatchers.IO) {
+                RelationFactBridge.loadAll(activity, key) to RelationFactBridge.meta(activity, key)
+            }
+        }.getOrElse { error ->
+            // 以前这里没有兜底：读库一抛异常，窗口就永远停在「正在读取…」。
+            MoodLog.w("RELATION_ARCHIVE_LOAD_FAILED " + error.javaClass.simpleName)
+            showStatus("读取档案失败，稍后重试", theme.error)
+            return
         }
         items = loaded.first
         meta = loaded.second

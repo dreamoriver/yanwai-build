@@ -210,6 +210,20 @@ object RelationFactBridge {
 
     fun clearAllLocal(context: Context) {
         store(context).clearAll()
+        // 角标和提醒指纹在另外两个偏好文件里：只清库的话，清空后仍会挂着旧的「提醒」后缀和通知。
+        // 通知 id 的口径与 RelationReminder 对齐（1099 汇总，1100+槽位）。
+        runCatching {
+            val notice = context.getSharedPreferences("yanwai_relation_notice", Context.MODE_PRIVATE)
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+            if (manager != null) {
+                manager.cancel(1099)
+                for ((name, value) in notice.all) {
+                    if (name.startsWith("nid_") && value is Int && value > 0) manager.cancel(1100 + value)
+                }
+            }
+            notice.edit().clear().apply()
+            context.getSharedPreferences("yanwai_relation_badge", Context.MODE_PRIVATE).edit().clear().apply()
+        }.onFailure { MoodLog.w("RELATION_FACT_CLEAR_PREFS_FAILED " + it.javaClass.simpleName) }
         MoodLog.i("RELATION_FACT_CLEAR_ALL_LOCAL")
     }
 
