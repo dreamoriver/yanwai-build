@@ -112,8 +112,13 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
         // 横条只留一个入口：分析开关和各项功能都收进「附加」弹窗。
         // 用透明底的主色文字，不做主色填充按钮：这一排是微信自己的图标，实心按钮会抢眼。
         val entry = theme.action("附加", quiet = true) {
-            if (panel === found && found.isShown && found.isAttachedToWindow) {
+            // 刚展开/切聊天时 AppPanel 可能还在动画里，isShown 和 isAttachedToWindow 会瞬时为 false。
+            // 以前这里直接忽略点击，第一次点「附加」就像没反应；只要还是我们挂的面板就允许打开。
+            if (panel === found) {
                 runCatching(open).onFailure { MoodLog.w("REPLY_PLUS_OPEN_FAILED " + it.javaClass.simpleName) }
+            } else {
+                MoodLog.i("REPLY_PLUS_ENTRY_IGNORED shown=${found.isShown} attached=${found.isAttachedToWindow}")
+                requestRefresh()
             }
         }.apply {
             textSize = 13f
