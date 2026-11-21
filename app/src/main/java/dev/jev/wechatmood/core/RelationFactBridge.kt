@@ -148,7 +148,8 @@ object RelationFactBridge {
     /** 从剪贴板导入：走与自动整理相同的合并逻辑，重复条目不会翻倍。 */
     fun importFacts(context: Context, key: ReplyContactKey, facts: List<RelationFact>): Int {
         val store = store(context)
-        val merged = RelationFacts.merge(store.listAll(key), facts, System.currentTimeMillis())
+        // 导入的内容自带 status：已处理/已移出的要原样保留，不能复活成有效条目。
+        val merged = RelationFacts.merge(store.listAll(key), facts, System.currentTimeMillis(), keepStatus = true)
         store.replace(key, merged)
         MoodLog.i("RELATION_FACT_IMPORT incoming=" + facts.size + " open=" + merged.count { it.isOpen })
         return merged.count { it.isOpen }
@@ -199,7 +200,8 @@ object RelationFactBridge {
             }
             if (items.isEmpty()) return@forEach
             // 合并而不是覆盖：微信库里可能已经有新版添加的条目。
-            store.replace(key, RelationFacts.merge(store.listAll(key), items, System.currentTimeMillis()))
+            store.replace(key, RelationFacts.merge(store.listAll(key), items,
+                System.currentTimeMillis(), keepStatus = true))
             contacts++
             facts += items.size
         }

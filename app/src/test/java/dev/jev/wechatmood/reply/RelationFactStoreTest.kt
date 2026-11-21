@@ -276,4 +276,34 @@ class RelationFactStoreTest {
         assertEquals(1, exported.getJSONArray(b.value).length())
         assertFalse(exported.has("c".repeat(64)))
     }
+    @Test fun `imported entries keep their settled status`() {
+        val key = ReplyContactKey("c".repeat(64))
+        val store = RelationFactStore(db())
+        val stamp = FactTimes.parseLocal("2026-10-24T19:00")
+        val done = RelationFact("约定", "周六一起吃饭", occurredAt = stamp,
+            status = RelationFact.STATUS_DONE, source = "manual")
+        store.replace(key, RelationFacts.merge(emptyList(), listOf(done), 1000, keepStatus = true))
+        assertEquals(RelationFact.STATUS_DONE, store.listAll(key).single().status)
+
+        // 不带 keepStatus 是自动整理的口径：同一句话会被当成新的有效条目，这是设计语义。
+        assertEquals(RelationFact.STATUS_ACTIVE,
+            RelationFacts.merge(emptyList(), listOf(done), 2000).single().status)
+    }
+
+    @Test fun `manual add is not swallowed by a settled similar entry`() {
+        val key = ReplyContactKey("d".repeat(64))
+        val store = RelationFactStore(db())
+        val stamp = FactTimes.parseLocal("2026-10-24T19:00")
+        store.replace(key, RelationFacts.merge(emptyList(),
+            listOf(RelationFact("约定", "周六一起吃饭", occurredAt = stamp)), 1000))
+        val existing = store.list(key).single()
+        assertTrue(store.setStatus(key, existing.factId, RelationFact.STATUS_DONE))
+
+        // 以前 merge 的「别复活」规则会把这条手动添加 continue 掉，界面却报「已添加」。
+        store.addManual(key, "约定", "周六一起吃饭", stamp)
+        val active = store.list(key).filter { it.isOpen }
+        assertEquals(1, active.size)
+        assertEquals("manual", active.single().source)
+    }
+
 }
