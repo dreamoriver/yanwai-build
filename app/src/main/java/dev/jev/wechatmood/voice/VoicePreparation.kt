@@ -49,8 +49,11 @@ object VoicePreparation {
      * @param existing 只读查询微信已保存的转写（VoiceTransText），不触发原生转写。
      *   命中即用，且不占 [MAX_CONTEXT_TRANSCRIPTS] 额度：微信已经转写过的语音再调一次
      *   原生接口既慢又会把额度吃光，让后面本来有文本的语音变成「未转写」。
+     * @param onPlan 本轮真正要调用原生转写的条数，给界面做进度分母。语音总条数和它无关：
+     *   已有转写的不占额度，超过上限的也不会转。
      */
     suspend fun reply(context: ReplyContext, existing: suspend (VoiceSource) -> String? = { null },
+        onPlan: (Int) -> Unit = {},
         transcribe: suspend (VoiceSource) -> String): ReplyContext {
         var budget = ReplyContext.MAX_CHARACTERS
         var trimmed = context.trimmed
@@ -66,6 +69,21 @@ object VoicePreparation {
         // 真正要回复的那条只剩「未转写」占位。已经有转写的不再占额度。
         val focus = context.messages.lastOrNull { it.id == context.focusMessageId && it.voice != null }
             ?: context.messages.lastOrNull { it.voice != null }
+        // 计划转写条数必须在真正转写之前算：目标条先转，界面第一条语音就该有分母。
+        // 规则与循环一致（已有转写跳过、目标条单独处理、上限 3 条），别拿语音总条数当分母。
+        val planned = run {
+            var budget = MAX_CONTEXT_TRANSCRIPTS
+            var count = 0
+            if (focus?.voice != null && transcripts[focus.id] == null) { budget--; count++ }
+            for (message in context.messages.asReversed()) {
+                if (budget <= 0) break
+                if (message.voice == null || transcripts[message.id] != null) continue
+                if (message.id == focus?.id) continue
+                budget--; count++
+            }
+            count
+        }
+        onPlan(planned)
         if (focus?.voice != null && transcripts[focus.id] == null && voiceBudget > 0) {
             voiceBudget--
             try {

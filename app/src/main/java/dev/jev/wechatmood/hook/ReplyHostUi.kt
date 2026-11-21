@@ -47,6 +47,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     private var talker: String? = null
     private var dialog: Dialog? = null
     private var snapshot: ReplyContext? = null
+    /** 依据弹窗改为异步读缓存后再显示，同一个面板只留一个。 */
+    private var evidenceDialog: AlertDialog? = null
     private var newMessageNotice: TextView? = null
     private var invalidateRequest: (() -> Unit)? = null
     /** 长按图片/表情时记住目标消息与已取的图，重新读取历史后也要留住。 */
@@ -870,13 +872,16 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     val withImage = if (loaded.targetImageDataUri != null || loaded.targetMedia == null || loaded.focusMessageId <= 0) loaded
                         else runCatching { MessageSniffer.captureMediaImage(loaded.focusMessageId) }.getOrNull()
                             ?.let { loaded.copy(targetImageDataUri = it) } ?: loaded
-                    val pending = ReplyDatabaseHistory.load(withImage, limit)
-                    val voiceCount = pending.messages.count { it.voice != null }
+                    val pending = ReplyDatabaseHistory.load(withImage, limit, owner.account)
+                    // 分母只用真正要调原生转写的条数：已有微信转写的不占额度，超过上限的也不转。
+                    var voiceCount = 0
                     var voiceIndex = 0
                     val current = VoicePreparation.reply(pending,
-                        existing = { source -> NativeVoiceBridge.existingText(source) }) { source ->
+                        existing = { source -> NativeVoiceBridge.existingText(source) },
+                        onPlan = { voiceCount = it }) { source ->
                         ensureActive()
-                        state.text = "正在转写语音 ${++voiceIndex}/$voiceCount…"
+                        state.text = if (voiceCount > 0) "正在转写语音 ${++voiceIndex}/$voiceCount…"
+                            else "正在转写语音…"
                         NativeVoiceBridge.transcribe(source) {
                             ownsDrawer() && ModulePrefs.canGenerateReply && reference.isCurrent(ticket)
                         }
@@ -1153,11 +1158,39 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             (context.historyFailure?.let { "\n$it" } ?: "")
     }
     private fun showEvidence(context: ReplyContext) {
-        val source = if (context.source == ReplyContextSource.LOCAL_HISTORY) "本机聊天历史 · 选择最近 ${context.requestedMessages} 条，实际 ${context.messages.size} 条（图片和表情以占位显示）"
+        val source = if (context.source == ReplyContextSource.LOCAL_HISTORY) "本机聊天历史 · 选择最近 ${context.requestedMessages} 条，实际 ${context.messages.size} 条"
             else "仅页面已加载片段 · 跳过 ${context.omittedMedia} 条其他媒体"
-        val info = "$source\n${contextSummary(context)}\n\n" +
-            context.messages.joinToString("\n\n") { "${it.speaker} · ${ReplyProtocol.formatTime(it.time)}${if (it.voice != null) " · 语音转写" else ""}\n${it.text}" }
-        AlertDialog.Builder(activity).setTitle("本次参考的聊天").setMessage(info).setPositiveButton("关闭", null).show()
+        val header = "$source\n${contextSummary(context)}\n\n"
+        // 图片和表情的描述缓存在 SharedPreferences 里，读盘放后台，别卡住聊天页。
+        scope.launch {
+            val body = withContext(Dispatchers.IO) {
+                context.messages.joinToString("\n\n") { message ->
+                    "${message.speaker} · ${ReplyProtocol.formatTime(message.time)}" +
+                        "${if (message.voice != null) " · 语音转写" else ""}\n${evidenceText(context, message)}"
+                }
+            }
+            // 读缓存期间抽屉已关或换了页面就不再弹，避免旧聊天的依据挡住当前聊天。
+            if (activity.isFinishing || activity.isDestroyed || dialog?.isShowing != true) return@launch
+            evidenceDialog?.dismiss()
+            val shown = AlertDialog.Builder(activity).setTitle("本次参考的聊天").setMessage(header + body)
+                .setPositiveButton("关闭", null).create()
+            evidenceDialog = shown
+            shown.setOnDismissListener { if (evidenceDialog === shown) evidenceDialog = null }
+            shown.show()
+        }
+    }
+
+    /**
+     * 依据弹窗里的正文：图片、表情这类占位不能只写【图片】，要让人知道这次到底有没有取到内容。
+     * 有缓存描述就显示描述，没有就明确写「本次没取到内容」。
+     */
+    private fun evidenceText(context: ReplyContext, message: ReplyMessage): String {
+        if (!message.placeholder) return message.text
+        // 只有图片和表情会去取图和生成描述；名片、视频、位置本来就不取，别写成「没取到」。
+        if (message.type != 3 && message.type != 47) return message.text
+        val label = ReplyContext.mediaLabel(message.type)
+        val digest = runCatching { ImageDigest.cached(activity, context.talker, message.id) }.getOrNull()
+        return if (!digest.isNullOrBlank()) "【$label：$digest】" else "【$label（本次没取到内容）】"
     }
     private fun openSettings() = runCatching {
         activity.startActivity(Intent().setComponent(ComponentName("dev.jev.wechatmood", "dev.jev.wechatmood.MainActivity"))

@@ -43,4 +43,24 @@ class VoiceExistingTranscriptTest {
         val prepared = VoicePreparation.reply(context(1L..2L), existing = { error("db busy") }) { "转写${it.id}" }
         assertEquals(2, prepared.messages.count { it.voiceState == VoiceState.READY })
     }
+
+    /** 进度分母只能是真正要调原生转写的条数：已有转写不占额度，超过 3 条的也不转。 */
+    @Test fun `plan reports only voices that will be transcribed`() = runBlocking {
+        var planned = -1
+        VoicePreparation.reply(context(1L..6L),
+            existing = { if (it.id <= 4L) "已有${it.id}" else null },
+            onPlan = { planned = it }) { "转写${it.id}" }
+        assertEquals(2, planned)
+    }
+
+    @Test fun `plan is zero when every voice already has text`() = runBlocking {
+        var planned = -1
+        var calls = 0
+        VoicePreparation.reply(context(1L..10L), existing = { "已有${it.id}" }, onPlan = { planned = it }) {
+            calls++
+            "不该调用"
+        }
+        assertEquals(0, planned)
+        assertEquals(0, calls)
+    }
 }

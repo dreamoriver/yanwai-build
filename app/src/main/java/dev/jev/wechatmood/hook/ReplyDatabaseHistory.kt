@@ -622,7 +622,8 @@ object ReplyDatabaseHistory {
             result
         }
 
-    suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES): ReplyContext = withContext(Dispatchers.IO) {
+    suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES,
+        accountScope: String? = null): ReplyContext = withContext(Dispatchers.IO) {
         require(limit in 1..ReplyContext.MAX_MESSAGES)
         val startedAt = android.os.SystemClock.elapsedRealtime()
         val active = coroutineContext
@@ -641,12 +642,20 @@ object ReplyDatabaseHistory {
             }
         } }
         val read = ReplyHistoryReader.read(loaded, sources, limit) { active.ensureActive() }
-        val named = nameGroupSpeakers(read)
+        // 昵称解析只认当前账号的库：displayNames 在 accountScope 为空时会拒绝所有 handle，
+        // 表现就是日志里 dbs=0、群消息全是裸 wxid。调用方没给账号时用页面锚点自己核一次。
+        // 私聊不需要改名，别为它白查一遍库。
+        val group = read.talker.endsWith("@chatroom")
+        val scope = accountScope?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+            ?: if (group) replyAccount(read) else null
+        val named = nameGroupSpeakers(read, scope)
+        // 真正被换掉名字的条数：替换前 speaker 必须还是 senderId，不能拿「本来就有名字」的页面消息充数。
+        val renamed = named.messages.zip(read.messages).count { (after, before) -> after.speaker != before.speaker }
         MoodLog.i("REPLY_HISTORY_RESULT requested=$limit handles=${databases.size} source=${named.source} " +
             "count=${named.messages.size} trimmed=${named.trimmed} " +
             "took=${android.os.SystemClock.elapsedRealtime() - startedAt}ms " +
             "quoted=${named.messages.count { message -> message.text.startsWith("【引用") }} " +
-            "renamed=${named.messages.count { it.senderId.isNotBlank() && it.speaker != it.senderId }}")
+            "renamed=$renamed account=${scope != null}")
         named
     }
 
@@ -654,14 +663,24 @@ object ReplyDatabaseHistory {
      * 历史里的群消息只有 wxid，页面上却是昵称。同一段上下文两种称呼会让模型分不清谁是谁，
      * 所以在返回前用群成员资料换一次名字；查不到就保持原样，不编造称呼。
      */
-    private suspend fun nameGroupSpeakers(context: ReplyContext): ReplyContext {
+    private suspend fun nameGroupSpeakers(context: ReplyContext, accountScope: String?): ReplyContext {
         if (!context.talker.endsWith("@chatroom")) return context
+        // 诊断：说清「没有可用 wxid」还是「已经有昵称」。只记空/长度/是否相等，不记昵称和正文。
+        val senders = context.messages.map { it.senderId }
+        MoodLog.i("REPLY_GROUP_SPEAKERS count=${context.messages.size} " +
+            "blankSender=${senders.count { it.isBlank() }} " +
+            "same=${context.messages.count { it.senderId.isNotBlank() && it.speaker == it.senderId }} " +
+            "senderLens=${senders.take(6).map { it.length }} " +
+            "speakerLens=${context.messages.take(6).map { it.speaker.length }} " +
+            "account=${accountScope != null}")
         // 已经有名字的不再查库，只替换 speaker 仍是裸 id 的那些。
         val unnamed = context.messages
             .filter { it.senderId.isNotBlank() && it.speaker == it.senderId }
             .map { it.senderId }.distinct()
         if (unnamed.isEmpty()) return context
-        val names = runCatching { displayNames(unnamed, context.talker) }.getOrNull().orEmpty()
+        val names = runCatching { displayNames(unnamed, context.talker, accountScope) }.getOrNull().orEmpty()
+        MoodLog.i("REPLY_GROUP_NAMES wanted=${unnamed.size} found=${names.size} " +
+            "account=${accountScope != null} idLens=${unnamed.take(6).map { it.length }}")
         if (names.isEmpty()) return context
         return context.copy(messages = context.messages.map { message ->
             val name = names[message.senderId]?.takeIf(String::isNotBlank)
