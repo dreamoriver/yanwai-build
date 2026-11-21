@@ -640,10 +640,32 @@ object ReplyDatabaseHistory {
                 }
             }
         } }
-        ReplyHistoryReader.read(loaded, sources, limit) { active.ensureActive() }.also {
-            MoodLog.i("REPLY_HISTORY_RESULT requested=$limit handles=${databases.size} source=${it.source} " +
-                "count=${it.messages.size} trimmed=${it.trimmed} took=${android.os.SystemClock.elapsedRealtime() - startedAt}ms " +
-                "quoted=${it.messages.count { message -> message.text.startsWith("【引用") }}")
-        }
+        val read = ReplyHistoryReader.read(loaded, sources, limit) { active.ensureActive() }
+        val named = nameGroupSpeakers(read)
+        MoodLog.i("REPLY_HISTORY_RESULT requested=$limit handles=${databases.size} source=${named.source} " +
+            "count=${named.messages.size} trimmed=${named.trimmed} " +
+            "took=${android.os.SystemClock.elapsedRealtime() - startedAt}ms " +
+            "quoted=${named.messages.count { message -> message.text.startsWith("【引用") }} " +
+            "renamed=${named.messages.count { it.senderId.isNotBlank() && it.speaker != it.senderId }}")
+        named
+    }
+
+    /**
+     * 历史里的群消息只有 wxid，页面上却是昵称。同一段上下文两种称呼会让模型分不清谁是谁，
+     * 所以在返回前用群成员资料换一次名字；查不到就保持原样，不编造称呼。
+     */
+    private suspend fun nameGroupSpeakers(context: ReplyContext): ReplyContext {
+        if (!context.talker.endsWith("@chatroom")) return context
+        // 已经有名字的不再查库，只替换 speaker 仍是裸 id 的那些。
+        val unnamed = context.messages
+            .filter { it.senderId.isNotBlank() && it.speaker == it.senderId }
+            .map { it.senderId }.distinct()
+        if (unnamed.isEmpty()) return context
+        val names = runCatching { displayNames(unnamed, context.talker) }.getOrNull().orEmpty()
+        if (names.isEmpty()) return context
+        return context.copy(messages = context.messages.map { message ->
+            val name = names[message.senderId]?.takeIf(String::isNotBlank)
+            if (name != null && message.speaker == message.senderId) message.copy(speaker = name) else message
+        })
     }
 }

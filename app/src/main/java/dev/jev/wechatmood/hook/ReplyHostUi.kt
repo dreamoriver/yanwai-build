@@ -192,7 +192,32 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             if (target == null) return "自由发挥：按最近对话接一句"
             val clock = if (target.time > 0) java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
                 .format(java.util.Date(target.time)) else ""
-            val text = target.text.replace("\n", " ").take(30)
+            // 图片、表情的正文只是占位：直接显示「【图片】」看不出在回什么。
+            // 有缓存描述就写描述，没有就说明生成时会先看图。
+            // 本轮刚生成的描述在 ctx 里；重开面板时 ctx 没有，去缓存里找同一张图的描述。
+            val digest = ctx.targetImageDigest?.takeIf { it.isNotBlank() && ctx.focusMessageId == target.id }
+                ?: if (target.placeholder) ImageDigest.cached(activity, ctx.talker, target.id) else null
+            val text = when {
+                target.placeholder -> when {
+                    digest != null -> "「${digest.take(30)}」"
+                    target.text.contains("表情") -> "一个表情（生成时会先看它）"
+                    target.text.contains("图片") -> "一张图片（生成时会先看它）"
+                    else -> target.text.trim('【', '】')
+                }
+                // 语音：转写过就显示内容，跳过和失败要分开说，别让用户以为没语音。
+                target.voice != null -> when (target.voiceState) {
+                    VoiceState.READY -> target.text.take(30)
+                    VoiceState.SKIPPED -> "一条语音（本轮未转写）"
+                    VoiceState.FAILED -> "一条语音（未能转写）"
+                    else -> "一条语音"
+                }
+                // 合并转发：正文是摊平的长文本，这里只说清「回的是哪段记录」。
+                target.text.startsWith("【合并转发") -> {
+                    val title = Regex("【合并转发：([^】]*)】").find(target.text)?.groupValues?.get(1).orEmpty()
+                    if (title.isBlank()) "一段聊天记录" else "一段聊天记录：${title.take(20)}"
+                }
+                else -> target.text.replace("\n", " ").take(30)
+            }
             return if (target.speaker == "我") "接着我${if (clock.isBlank()) "" else " $clock"}的话：$text"
             else "回复${if (clock.isBlank()) "" else " $clock"}：$text"
         }
@@ -841,10 +866,15 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             historyJob = scope.launch {
                 try {
                     if (!verifyAccount()) { window.dismiss(); return@launch }
-                    val pending = ReplyDatabaseHistory.load(loaded, limit)
+                    // 面板打开时的取图移到后台：主线程只碰 View 拿 bitmap，压缩和编码在 IO。
+                    val withImage = if (loaded.targetImageDataUri != null || loaded.targetMedia == null || loaded.focusMessageId <= 0) loaded
+                        else runCatching { MessageSniffer.captureMediaImage(loaded.focusMessageId) }.getOrNull()
+                            ?.let { loaded.copy(targetImageDataUri = it) } ?: loaded
+                    val pending = ReplyDatabaseHistory.load(withImage, limit)
                     val voiceCount = pending.messages.count { it.voice != null }
                     var voiceIndex = 0
-                    val current = VoicePreparation.reply(pending) { source ->
+                    val current = VoicePreparation.reply(pending,
+                        existing = { source -> NativeVoiceBridge.existingText(source) }) { source ->
                         ensureActive()
                         state.text = "正在转写语音 ${++voiceIndex}/$voiceCount…"
                         NativeVoiceBridge.transcribe(source) {
@@ -854,7 +884,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     ensureActive()
                     if (!ownsDrawer() || !ModulePrefs.canGenerateReply) return@launch
                     if (!verifyAccount()) { window.dismiss(); return@launch }
-                    if (current.messages.isEmpty() || current.messages.all { it.voiceState == VoiceState.FAILED }) {
+                    if (current.messages.isEmpty() ||
+                        current.messages.all { it.voiceState == VoiceState.FAILED || it.voiceState == VoiceState.SKIPPED }) {
                         reference.fail(ticket)
                         state.text = "尚无可用正文，语音可能未能转写，请在条数菜单中重试"
                         return@launch
@@ -864,6 +895,10 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     state.text = when {
                         current.messages.any { it.voiceState == VoiceState.FAILED } ->
                             "${current.messages.count { it.voiceState == VoiceState.FAILED }} 条语音未能转写，将明确标注缺失；可在条数菜单中重试。"
+                        current.messages.any { it.voiceState == VoiceState.SKIPPED } ->
+                            "${current.messages.count { it.voiceState == VoiceState.SKIPPED }} 条语音本轮未转写（已到上限），切到更大条数可再读一次。"
+                        current.targetMedia != null && current.targetImageDataUri == null ->
+                            "对方这条${current.targetMedia}没有取到内容，回复会只按上下文判断。"
                         current.historyFailure != null -> "仅读取到页面 ${current.messages.size} 条。历史暂不可用，可切换条数重试。"
                         current.messages.size < limit -> "本次读取到 ${current.messages.size} 条消息（含语音转写），将按实际内容回复。"
                         else -> ""
@@ -991,6 +1026,16 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             job = scope.launch {
                 try {
                     if (!verifyAccount()) { window.dismiss(); return@launch }
+                    // 长按图片时先让视觉模型看一句描述（同图只调用一次），
+                    // 拿到就随提示词带上；失败不影响生成，退回「没取到内容」的措辞。
+                    val digested = if (current.targetImageDataUri == null || current.targetImageDigest != null) current
+                    else {
+                        state.text = "正在看这张${current.targetMedia ?: "图片"}…"
+                        state.setTextColor(theme.muted)
+                        ImageDigest.describe(activity, config, current.talker, current.focusMessageId,
+                            current.targetImageDataUri!!)
+                            ?.let { current.copy(targetImageDigest = it) } ?: current
+                    }
                     val knowledge = withContext(Dispatchers.IO) {
                         ReplyKnowledge.loadFor(activity, relationship,
                             current.messages.joinToString("\n") { it.text } + "\n" + baselineDraft + "\n" + notes)
@@ -1005,8 +1050,10 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                     val client = ReplyHttpClient()
                     val topics = if (findTopics) client.findTopics(config, current, baselineDraft, notes, knowledge, relationship,
                         requireNotNull(time), previousTopics, customRelationship) else null
-                    // 流式：第一条候选写完整就先显示在状态栏，不必等 3–5 条全部生成。
-                    val suggestion = if (findTopics) null else client.generate(config, current, baselineDraft, direction,
+                    // 一次性返回：用户不需要逐条蹦出的过程，关掉流式以后也少一次参数兼容重试。
+                    state.text = if (findTopics) "正在找话题…" else "正在生成回复…"
+                    state.setTextColor(theme.muted)
+                    val suggestion = if (findTopics) null else client.generate(config, digested, baselineDraft, direction,
                         knowledge, previous, focusId, relationship, customRelationship)
                     val activeConfig = ModulePrefs.replySettings()
                     if (!session.accepts(ticket, MessageSniffer.currentReplyTalker()) || !ownsDrawer() || !ModulePrefs.canGenerateReply) return@launch
@@ -1100,11 +1147,13 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         fun time(value: Long) = if (value <= 0) "时间未知" else java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA).format(java.util.Date(value))
         val voices = context.messages.count { it.voiceState == VoiceState.READY }
         val missing = context.messages.count { it.voiceState == VoiceState.FAILED }
-        return "${time(first)} — ${time(last)} · 含 $voices 条语音转写${if (missing > 0) " · $missing 条转写失败" else ""}${if (context.trimmed) " · 已截取" else ""}" +
+        val skipped = context.messages.count { it.voiceState == VoiceState.SKIPPED }
+        return "${time(first)} — ${time(last)} · 含 $voices 条语音转写${if (missing > 0) " · $missing 条转写失败" else ""}" +
+            (if (skipped > 0) " · $skipped 条未转写" else "") + "${if (context.trimmed) " · 已截取" else ""}" +
             (context.historyFailure?.let { "\n$it" } ?: "")
     }
     private fun showEvidence(context: ReplyContext) {
-        val source = if (context.source == ReplyContextSource.LOCAL_HISTORY) "本机聊天历史 · 选择最近 ${context.requestedMessages} 条，实际 ${context.messages.size} 条文字或语音"
+        val source = if (context.source == ReplyContextSource.LOCAL_HISTORY) "本机聊天历史 · 选择最近 ${context.requestedMessages} 条，实际 ${context.messages.size} 条（图片和表情以占位显示）"
             else "仅页面已加载片段 · 跳过 ${context.omittedMedia} 条其他媒体"
         val info = "$source\n${contextSummary(context)}\n\n" +
             context.messages.joinToString("\n\n") { "${it.speaker} · ${ReplyProtocol.formatTime(it.time)}${if (it.voice != null) " · 语音转写" else ""}\n${it.text}" }

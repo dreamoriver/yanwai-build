@@ -17,6 +17,8 @@ import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.core.AnalysisInput
 import dev.jev.wechatmood.core.ManualAnalysis
 import dev.jev.wechatmood.reply.ReplyContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.luckypray.dexkit.DexKitBridge
 import java.lang.ref.WeakReference
 import java.lang.reflect.Field
@@ -361,9 +363,9 @@ object MessageSniffer {
         }
         val result = ReplyContext.collect(talker, messages.asReversed())
         check(result.historyAnchor != null || result.messages.isNotEmpty()) { "暂时无法核对当前聊天，请重新进入后重试" }
-        // 图片/表情本身不进 messages，只记下目标类型与引用里的媒体，供请求层提示模型。
+        // 图片/表情的正文是占位，长按目标另外记下类型与引用里的媒体，供请求层提示模型。
         val target = if (focusId > 0) messages.firstOrNull { it.messageId == focusId } else null
-        val targetMedia = when {
+        var targetMedia = when {
             target == null -> null
             target.type == 3 -> "图片"
             target.type == 47 -> "表情"
@@ -384,9 +386,31 @@ object MessageSniffer {
                 else -> own
             }
         }
-        return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusId,
+        // 从「＋」横条进来时没有长按目标。对方最后发的是图片或表情，就当作本轮重点，
+        // 否则最常用的入口永远拿不到图片内容，模型只能看到一个「【图片】」占位。
+        // 从「＋」横条进来时没有长按目标。对方最后发的是图片或表情，就当作本轮重点，
+        // 否则最常用的入口永远拿不到图片内容，模型只能看到一个「【图片】」占位。
+        // 这里只记目标，不取图：截图要在主线程碰 View，压缩要在后台，放到
+        // captureMediaImage 里异步做，避免点开面板时卡一下。
+        var focusForReply = focusId
+        if (target == null) {
+            val last = messages.lastOrNull { it.isSend == 0 && it.type in setOf(3, 47) }
+            if (last != null) {
+                targetMedia = if (last.type == 3) "图片" else "表情"
+                focusForReply = last.messageId
+            }
+        }
+        return result.copy(trimmed = result.trimmed || messages.size < count, focusMessageId = focusForReply,
             targetMedia = targetMedia, focusText = focusText)
     }
+
+    /** 主线程取图、后台压缩：拿某条消息气泡里的图片，取不到返回 null。 */
+    suspend fun captureMediaImage(messageId: Long): String? = withContext(Dispatchers.Main.immediate) {
+        val activity = active.get() ?: return@withContext null
+        val scope = chatNodes(activity.window.decorView)
+        records(scope).firstOrNull { it.second.metadata?.messageId == messageId }?.first
+            ?.let(MediaImage::captureBitmap)
+    }?.let { bitmap -> withContext(Dispatchers.Default) { MediaImage.encode(bitmap) } }
 
     /** Cheap live boundary check, without re-reading 100 messages on every scan. */
     fun replyBoundary(): Long? {
