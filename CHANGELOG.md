@@ -1,5 +1,13 @@
 # 言外自用构建 · 更新记录
 
+## 2.9.178
+
+通知入口的圆点能挂上了
+
+- 日志确认：通知直接进聊天时标题的父容器是 `RelativeLayout`，之前只支持 `LinearLayout`，所以一直 `RELATION_BADGE_SKIP parent=RelativeLayout`
+- 现在同时支持 `LinearLayout` / `RelativeLayout`；标题没有 id 时临时生成一个，用 `RIGHT_OF` 把 8dp 圆点排到标题右侧
+- 标题搜索范围从 `ChattingUILayout` 放开到整页，标题不在该容器内时也能找到
+
 ## 2.9.177
 
 标题定位诊断

@@ -117,10 +117,9 @@ internal object RelationChatBadge {
     }
 
     private fun attach(activity: Activity, title: TextView) {
-        val parent = title.parent as? LinearLayout ?: run {
-            // 标题容器不是 LinearLayout 时不要每 400ms 重试，等页面下一次重建。
+        val parent = title.parent as? ViewGroup ?: run {
             retryAfter = SystemClock.uptimeMillis() + 3_000
-            MoodLog.i("RELATION_BADGE_SKIP parent=" + (title.parent?.javaClass?.simpleName ?: "null"))
+            MoodLog.i("RELATION_BADGE_SKIP parent=null")
             return
         }
         detach()
@@ -135,9 +134,25 @@ internal object RelationChatBadge {
                     .onFailure { MoodLog.w("RELATION_BADGE_OPEN_FAILED " + it.javaClass.simpleName) }
             }
         }
-        val params = LinearLayout.LayoutParams(size, size).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            marginStart = dp(title, 6)
+        // 标题容器可能是 LinearLayout，也可能是 RelativeLayout（通知入口常见），两种都要能挂。
+        val params: ViewGroup.LayoutParams = when (parent) {
+            is LinearLayout -> LinearLayout.LayoutParams(size, size).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                marginStart = dp(title, 6)
+            }
+            is android.widget.RelativeLayout -> {
+                if (title.id == View.NO_ID) title.id = View.generateViewId()
+                android.widget.RelativeLayout.LayoutParams(size, size).apply {
+                    addRule(android.widget.RelativeLayout.RIGHT_OF, title.id)
+                    addRule(android.widget.RelativeLayout.CENTER_VERTICAL)
+                    marginStart = dp(title, 6)
+                }
+            }
+            else -> {
+                retryAfter = SystemClock.uptimeMillis() + 3_000
+                MoodLog.i("RELATION_BADGE_SKIP parent=" + parent.javaClass.simpleName)
+                return
+            }
         }
         val index = parent.indexOfChild(title)
         parent.addView(view, (index + 1).coerceAtMost(parent.childCount), params)
@@ -178,7 +193,8 @@ internal object RelationChatBadge {
                 .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") } as? ViewGroup
         } ?: all.filterIsInstance<ViewGroup>()
             .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") }
-        val scope: View = chat ?: root
+        // 标题也可能在 ChattingUILayout 外层（通知直接拉起时是 RelativeLayout），所以按整页找。
+        val scope: View = root
         val metrics = activity.resources.displayMetrics
         val footerY = footer?.let { screenY(it) }
         // 有 ChatFooter 时标题一定在它上方；没有时按屏幕顶部 25% 截断，避免把底部标签当标题。
