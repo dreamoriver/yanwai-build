@@ -38,6 +38,7 @@ internal object RelationChatBadge {
     private var lastHiddenTalker: String? = null
     private var lastLoggedBadge: String? = null
     private var lastScanInfo = ""
+    private var debugScan = true
     private var checking = false
     private var due = 0
     private var future = 0
@@ -61,6 +62,7 @@ internal object RelationChatBadge {
             lastRefresh = 0
             lastHiddenTalker = null
             lastLoggedBadge = null
+            debugScan = true
         }
         val now = SystemClock.uptimeMillis()
         if (dot?.isAttachedToWindow != true || host?.isAttachedToWindow != true) {
@@ -184,17 +186,26 @@ internal object RelationChatBadge {
             ?: (metrics.heightPixels * 0.25f).toInt()
         val titleSize = 13 * metrics.scaledDensity
         val bottomTabs = setOf("微信", "通讯录", "发现", "我")
-        val candidates = descendants(scope)
-            .filterIsInstance<TextView>()
+        val texts = descendants(scope).filterIsInstance<TextView>()
+        if (debugScan) {
+            debugScan = false
+            // 不记正文，只记长度/字号/宽度/可见性和位置，用来确认标题到底长什么样。
+            MoodLog.i("RELATION_BADGE_TEXTS n=" + texts.size + " " + texts.take(15).joinToString(";") {
+                "len=" + it.text.length + ",size=" + it.textSize.toInt() + ",w=" + it.width +
+                    ",vis=" + it.visibility + ",y=" + screenY(it)
+            })
+        }
+        val candidates = texts
             .filter { it !is android.widget.EditText }
-            .filter { it.visibility == View.VISIBLE && it.width > 0 && it.text.isNotBlank() && it.textSize >= titleSize }
+            .filter { it.visibility == View.VISIBLE && it.text.isNotBlank() }
             .filter { tv ->
                 generateSequence(tv.parent as? View) { it.parent as? View }.none { it is android.widget.ListView }
             }
             .filter { screenY(it) < limitY }
             .filter { it.text.toString().trim() !in bottomTabs }
+            .filter { it.textSize >= titleSize }
         lastScanInfo = "scope=" + (if (chat != null) "chat" else "root") + " nodes=" + all.size +
-            " candidates=" + candidates.size + " limitY=" + limitY
+            " texts=" + texts.size + " candidates=" + candidates.size + " limitY=" + limitY
         return candidates.minByOrNull { screenY(it) }
     }
 
