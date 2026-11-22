@@ -11,25 +11,28 @@ import android.content.Context
 internal object RelationBadge {
     private const val PREFS = "yanwai_relation_badge"
 
-    fun update(context: Context, talker: String?, due: Int, open: Int) {
+    fun update(context: Context, talker: String?, due: Int, open: Int, timed: Int = open) {
         if (talker.isNullOrBlank()) return
         runCatching {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putInt(talker + ":due", due)
                 .putInt(talker + ":open", open)
+                .putInt(talker + ":timed", timed)
                 .apply()
         }
     }
 
-    data class Counts(val due: Int, val open: Int)
+    data class Counts(val due: Int, val open: Int, val timed: Int)
 
-    /** 「附加」面板里的关系档案/待办行用：今天要处理几条、总共还有几条。 */
+    /** 「附加」面板里的关系档案/待办行用：今天要处理几条、档案几条、待办列表几条。 */
     fun counts(context: Context, talker: String?): Counts {
-        if (talker.isNullOrBlank()) return Counts(0, 0)
+        if (talker.isNullOrBlank()) return Counts(0, 0, 0)
         return runCatching {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            Counts(prefs.getInt(talker + ":due", 0), prefs.getInt(talker + ":open", 0))
-        }.getOrDefault(Counts(0, 0))
+            val open = prefs.getInt(talker + ":open", 0)
+            Counts(prefs.getInt(talker + ":due", 0), open,
+                prefs.getInt(talker + ":timed", open))
+        }.getOrDefault(Counts(0, 0, 0))
     }
 
     /** 全局扫描只知道今天到期的条数，不要用它覆盖「总共还有几条」。 */

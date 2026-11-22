@@ -37,6 +37,7 @@ internal object RelationChatBadge {
     private var retryAfter = 0L
     private var lastHiddenTalker: String? = null
     private var lastLoggedBadge: String? = null
+    private var lastScanInfo = ""
     private var checking = false
     private var due = 0
     private var future = 0
@@ -73,7 +74,7 @@ internal object RelationChatBadge {
                 retryAfter = now + 2_000
                 if (lastHiddenTalker != currentTalker) {
                     lastHiddenTalker = currentTalker
-                    MoodLog.i("RELATION_BADGE_HIDDEN")
+                    MoodLog.i("RELATION_BADGE_HIDDEN " + lastScanInfo)
                 }
                 return
             }
@@ -168,28 +169,33 @@ internal object RelationChatBadge {
     private fun findTitle(activity: Activity): TextView? {
         val root = activity.window?.decorView as? ViewGroup ?: return null
         val all = descendants(root)
-        val chat = all.filterIsInstance<ViewGroup>()
+        val footer = all.firstOrNull { it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter" }
+        // 先沿 ChatFooter 的父链找 ChattingUILayout（和 MessageSniffer 同一套定位），再退回全树。
+        val chat = footer?.let { node ->
+            generateSequence(node.parent as? View) { it.parent as? View }
+                .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") } as? ViewGroup
+        } ?: all.filterIsInstance<ViewGroup>()
             .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") }
         val scope: View = chat ?: root
         val metrics = activity.resources.displayMetrics
-        val footerY = all.firstOrNull {
-            it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter"
-        }?.let { screenY(it) }
-        // 有 ChatFooter 时标题一定在它上方；没有时按屏幕顶部 18% 截断，避免把底部标签当标题。
+        val footerY = footer?.let { screenY(it) }
+        // 有 ChatFooter 时标题一定在它上方；没有时按屏幕顶部 25% 截断，避免把底部标签当标题。
         val limitY = footerY?.let { it - (40 * metrics.density).toInt() }
-            ?: (metrics.heightPixels * 0.18f).toInt()
-        val titleSize = 15 * metrics.scaledDensity
+            ?: (metrics.heightPixels * 0.25f).toInt()
+        val titleSize = 13 * metrics.scaledDensity
         val bottomTabs = setOf("微信", "通讯录", "发现", "我")
-        return descendants(scope)
+        val candidates = descendants(scope)
             .filterIsInstance<TextView>()
             .filter { it !is android.widget.EditText }
-            .filter { it.isShown && it.text.isNotBlank() && it.textSize >= titleSize }
+            .filter { it.visibility == View.VISIBLE && it.width > 0 && it.text.isNotBlank() && it.textSize >= titleSize }
             .filter { tv ->
                 generateSequence(tv.parent as? View) { it.parent as? View }.none { it is android.widget.ListView }
             }
             .filter { screenY(it) < limitY }
             .filter { it.text.toString().trim() !in bottomTabs }
-            .minByOrNull { screenY(it) }
+        lastScanInfo = "scope=" + (if (chat != null) "chat" else "root") + " nodes=" + all.size +
+            " candidates=" + candidates.size + " limitY=" + limitY
+        return candidates.minByOrNull { screenY(it) }
     }
 
     private fun screenY(view: View): Int {
@@ -202,7 +208,8 @@ internal object RelationChatBadge {
         val out = ArrayList<View>(256)
         val stack = ArrayDeque<View>()
         stack.addLast(root)
-        while (stack.isNotEmpty() && out.size < 4000) {
+        // 微信主界面的 decorView 节点很多，4000 会在标题之前截断；只作为防爆上限。
+        while (stack.isNotEmpty() && out.size < 8000) {
             val view = stack.removeLast()
             out += view
             if (view is ViewGroup) {
