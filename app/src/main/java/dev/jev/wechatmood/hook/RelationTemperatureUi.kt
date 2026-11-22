@@ -137,15 +137,12 @@ internal class RelationTemperatureUi(private val activity: Activity, private val
             .apply { setPadding(0, theme.dp(3), 0, 0) })
     }
 
-    /** 当前聊天的近期情绪；没有数据就直说从这一版开始累计。 */
+    /** 当前聊天的近期情绪；30 天里没有判定就整块不显示，不放空标题。 */
     private fun renderEmotion() {
         if (EmotionTrend.sessionOf(currentTalker) == null) return
-        listContainer.addView(kit.sectionLabel("近期情绪（30 天）"))
         val summary = EmotionTrend.summarize(emotionRows).take(4)
-        if (summary.isEmpty()) {
-            listContainer.addView(kit.caption("还没有累计到数据：从这一版开始记录，之前的分析补不回来"))
-            return
-        }
+        if (summary.isEmpty()) return
+        listContainer.addView(kit.sectionLabel("近期情绪（30 天）"))
         listContainer.addView(kit.body(summary.joinToString(" · ") { it.label + " " + it.count + " 次" }))
         listContainer.addView(kit.caption("共 " + emotionRows.sumOf { it.count } + " 次判定；只记标签和次数，不存聊天原文"))
     }
