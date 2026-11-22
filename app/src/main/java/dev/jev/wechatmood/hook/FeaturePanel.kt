@@ -56,9 +56,11 @@ internal class FeaturePanel(
             background = theme.shape(theme.card, ReplyMetrics.RADIUS_CARD, theme.border)
         }
         var first = true
-        fun row(title: String, subtitle: String, action: () -> Unit) {
+        // 面板一打开就告诉用户「为什么会有提醒」：档案里总共几条待办、今天要处理几条。
+        val counts = RelationBadge.counts(activity, talker)
+        fun row(title: String, subtitle: String, action: () -> Unit, badge: String? = null) {
             if (!first) group.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)))
-            group.addView(kit.listRow(title, subtitle) {
+            group.addView(kit.listRow(title, subtitle, badge = badge) {
                 dialog.dismiss()
                 action()
             }, LinearLayout.LayoutParams(-1, -2))
@@ -73,12 +75,14 @@ internal class FeaturePanel(
                 "消息量、活跃成员与时段", onStats)
         }
         if (factsAvailable) {
+            val openBadge = counts.open.takeIf { it > 0 }?.toString()
+            val dueBadge = counts.due.takeIf { it > 0 }?.toString()
             if (talker?.endsWith("@chatroom") == true) {
-                row("群聊纪要", "群里的约定、时间地点和提到我的事", onFacts)
-                row("群待办", "群里带时间的约定与重要日期", onTodos)
+                row("群聊纪要", "群里的约定、时间地点和提到我的事", onFacts, openBadge)
+                row("群待办", "群里带时间的约定与重要日期", onTodos, dueBadge)
             } else {
-                row("关系档案", "整理过的事实，可移出或补一条", onFacts)
-                row("待办", "带时间的约定与重要日期", onTodos)
+                row("关系档案", "整理过的事实，可移出或补一条", onFacts, openBadge)
+                row("待办", "带时间的约定与重要日期", onTodos, dueBadge)
             }
         }
         body.addView(group, LinearLayout.LayoutParams(-1, -2))

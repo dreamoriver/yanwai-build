@@ -21,6 +21,27 @@ internal object RelationBadge {
         }
     }
 
+    data class Counts(val due: Int, val open: Int)
+
+    /** 「附加」面板里的关系档案/待办行用：今天要处理几条、总共还有几条。 */
+    fun counts(context: Context, talker: String?): Counts {
+        if (talker.isNullOrBlank()) return Counts(0, 0)
+        return runCatching {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            Counts(prefs.getInt(talker + ":due", 0), prefs.getInt(talker + ":open", 0))
+        }.getOrDefault(Counts(0, 0))
+    }
+
+    /** 全局扫描只知道今天到期的条数，不要用它覆盖「总共还有几条」。 */
+    fun updateDue(context: Context, talker: String?, due: Int) {
+        if (talker.isNullOrBlank()) return
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putInt(talker + ":due", due)
+                .apply()
+        }
+    }
+
     fun label(context: Context, talker: String?): String? {
         if (talker.isNullOrBlank()) return null
         return runCatching {

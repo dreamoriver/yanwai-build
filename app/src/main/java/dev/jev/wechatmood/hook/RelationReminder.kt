@@ -45,6 +45,8 @@ internal object RelationReminder {
     private const val GLOBAL_DELAY_MS = 3_000L
     private const val GROUP = "yanwai_relation_todo_group"
 
+    /** 微信进程内第一次回主界面要强制扫一次，之后才走 15 分钟节流。 */
+    @Volatile private var firstGlobalScan = true
     private val handler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var pending: Runnable? = null
@@ -138,8 +140,14 @@ internal object RelationReminder {
      * 全局路径：进微信首页时扫一遍。
      * 之前只在进入那个私聊时才检查，等于「你正好去找他」才提醒，和提醒的本意相反。
      */
-    suspend fun checkAll(context: Context) {
-        if (!takeGlobalSlot(context)) return
+    suspend fun checkAll(context: Context, force: Boolean = false) {
+        if (force) {
+            // 微信进程启动后第一次回主界面：不受 15 分钟节流影响，先把积压的提醒弹出来。
+            runCatching { prefs(context).edit().putLong(KEY_LAST_SCAN, System.currentTimeMillis()).apply() }
+            firstGlobalScan = false
+        } else if (!takeGlobalSlot(context)) {
+            return
+        }
         val now = System.currentTimeMillis()
         val groups = withContext(Dispatchers.IO) {
             runCatching { RelationFactBridge.dueContacts(context) }.getOrDefault(emptyList())
@@ -152,7 +160,7 @@ internal object RelationReminder {
         val names = names(resolved.mapNotNull { it.talker })
         fun label(group: DueContact) = displayName(
             group.name.ifBlank { group.talker?.let { names[it] }.orEmpty() }, group.talker)
-        resolved.forEach { RelationBadge.update(context, it.talker, it.facts.size, it.facts.size) }
+        resolved.forEach { RelationBadge.updateDue(context, it.talker, it.facts.size) }
         // 先把该提醒的挑出来再截断：旧写法到 5 个就直接 break，后面的联系人既没通知也没痕迹。
         val fresh = resolved.filter { markNotified(context, it.key, it.facts, now) }
         if (fresh.isEmpty()) {
@@ -197,10 +205,11 @@ internal object RelationReminder {
     fun scheduleGlobalCheck(context: Context) {
         cancelPending()
         val app = context.applicationContext
+        val force = firstGlobalScan
         val job = Runnable {
             pending = null
             scope.launch {
-                runCatching { checkAll(app) }
+                runCatching { checkAll(app, force) }
                     .onFailure { MoodLog.w("RELATION_REMIND_ALL_FAILED " + it.javaClass.simpleName) }
             }
         }

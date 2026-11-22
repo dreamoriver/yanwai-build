@@ -85,7 +85,8 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
      * 分组列表里的一行：没有独立卡片底，主标题 + 说明，右侧一个浅色箭头。
      * 卡片背景和行间分隔线由调用方给，这里只负责一行的高度与内容。
      */
-    fun listRow(title: String, subtitle: String?, arrow: Boolean = true, onClick: () -> Unit): View {
+    fun listRow(title: String, subtitle: String?, arrow: Boolean = true,
+        badge: String? = null, onClick: () -> Unit): View {
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -102,6 +103,13 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
             })
         }
         row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
+        if (!badge.isNullOrBlank()) {
+            // 小方标：只标数字，不抢标题；有到期时用 accent 描边。
+            row.addView(theme.label(badge, ReplyMetrics.TEXT_CAPTION, theme.accent, bold = true).apply {
+                setPadding(theme.dp(7), theme.dp(2), theme.dp(7), theme.dp(2))
+                background = theme.shape(theme.surface, ReplyMetrics.RADIUS_BUTTON, theme.accent)
+            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = theme.dp(4) })
+        }
         if (arrow) {
             row.addView(theme.label("›", 20f, theme.muted).apply { setPadding(theme.dp(8), 0, 0, 0) })
         }
