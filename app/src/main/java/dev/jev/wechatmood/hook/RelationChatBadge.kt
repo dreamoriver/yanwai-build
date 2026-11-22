@@ -161,19 +161,26 @@ internal object RelationChatBadge {
         host = null
     }
 
-    /** 聊天页的标题栏在 ChattingUILayout 里；找不到这个容器时不做兜底猜测。 */
+    /**
+     * 聊天页的标题栏通常在 ChattingUILayout 里；通知直接拉起 ChattingUI 时没有这个容器，
+     * 所以找不到容器就退回整个页面顶部找，仍然排除消息列表和输入框。
+     */
     private fun findTitle(activity: Activity): TextView? {
         val root = activity.window?.decorView as? ViewGroup ?: return null
-        val chat = descendants(root).filterIsInstance<ViewGroup>()
-            .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") } ?: return null
+        val all = descendants(root)
+        val chat = all.filterIsInstance<ViewGroup>()
+            .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") }
+        val scope: View = chat ?: root
         val metrics = activity.resources.displayMetrics
-        // 标题栏在 ChatFooter 上方；排除 ListView（消息气泡）和 EditText（输入框）。
-        val footerY = descendants(chat)
-            .firstOrNull { it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter" }
-            ?.let { screenY(it) } ?: Int.MAX_VALUE
-        val limitY = footerY - (40 * metrics.density).toInt()
+        val footerY = all.firstOrNull {
+            it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter"
+        }?.let { screenY(it) }
+        // 有 ChatFooter 时标题一定在它上方；没有时按屏幕顶部 18% 截断，避免把底部标签当标题。
+        val limitY = footerY?.let { it - (40 * metrics.density).toInt() }
+            ?: (metrics.heightPixels * 0.18f).toInt()
         val titleSize = 15 * metrics.scaledDensity
-        return descendants(chat)
+        val bottomTabs = setOf("微信", "通讯录", "发现", "我")
+        return descendants(scope)
             .filterIsInstance<TextView>()
             .filter { it !is android.widget.EditText }
             .filter { it.isShown && it.text.isNotBlank() && it.textSize >= titleSize }
@@ -181,6 +188,7 @@ internal object RelationChatBadge {
                 generateSequence(tv.parent as? View) { it.parent as? View }.none { it is android.widget.ListView }
             }
             .filter { screenY(it) < limitY }
+            .filter { it.text.toString().trim() !in bottomTabs }
             .minByOrNull { screenY(it) }
     }
 
