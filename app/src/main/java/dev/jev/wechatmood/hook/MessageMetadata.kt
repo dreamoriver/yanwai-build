@@ -81,13 +81,20 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
         }
         .trim()
 
-    /** 群消息正文前缀里的发送者 wxid / 微信号；私聊和自己发的返回 null。 */
+    /**
+     * 群消息正文前缀里的发送者 wxid / 微信号；私聊和自己发的返回 null。
+     *
+     * 前缀的分隔符不止一种：文本和引用是「wxid:\n正文」，语音是「wxid:」，
+     * 视频这类是「wxid:0:0」。以前只认「:\n」，视频消息就整批变成「没有发送者」，
+     * 统计里全被并成一个「未署名」。
+     */
     internal fun groupSender(): String? {
         if (isSend != 0 || !talker.endsWith("@chatroom")) return null
-        val separator = if (type == 34) ":" else ":\n"
-        if (!content.contains(separator)) return null
-        return content.substringBefore(separator).takeIf {
-            it.isNotBlank() && it.length <= 128 && it.none { c -> c.isWhitespace() || c == '<' || c == '>' }
+        val head = if (content.contains(":\n")) content.substringBefore(":\n") else content.substringBefore(':')
+        return head.takeIf {
+            it.isNotBlank() && it.length in 4..128 &&
+                it.none { c -> c.isWhitespace() || c == '<' || c == '>' } &&
+                (it.startsWith("wxid") || it.matches(Regex("[A-Za-z0-9_@.\\-]{4,64}")))
         }
     }
     private fun body() = if (groupSender() != null && type != 34) content.substringAfter(":\n") else content

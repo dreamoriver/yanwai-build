@@ -34,7 +34,6 @@ object StatsImage {
         val numberPaint = text(56f, INK, Typeface.BOLD)
         val labelPaint = text(22f, MUTED)
         val rowPaint = text(28f, INK)
-        val rowValuePaint = text(26f, MUTED)
         val bodyPaint = text(28f, INK).apply { isAntiAlias = true }
         val metaPaint = text(20f, MUTED)
 
@@ -49,7 +48,7 @@ object StatsImage {
         var y = PAD + 40
         canvas.drawText(title, PAD, y, titlePaint)
         y += 44
-        canvas.drawText("最近 ${stats.total} 条消息 · ${stats.senders} 人发言", PAD, y, subPaint)
+        canvas.drawText(spanLabel(stats), PAD, y, subPaint)
         y += 46
 
         // 三块数字
@@ -73,9 +72,7 @@ object StatsImage {
             val max = stats.topSenders.first().second.coerceAtLeast(1)
             stats.topSenders.forEach { (name, count) ->
                 val shown = names[name] ?: fallbackName(name)
-                canvas.drawText(shown.take(14), PAD, y, rowPaint)
-                val value = "$count 条"
-                canvas.drawText(value, WIDTH - PAD - rowValuePaint.measureText(value), y, rowValuePaint)
+                canvas.drawText(shown.take(14) + "（" + count + " 条）", PAD, y, rowPaint)
                 // 条形长度按最高值归一，直观看出谁说得最多。
                 val barWidth = (WIDTH - PAD * 2) * (count.toFloat() / max)
                 canvas.drawRoundRect(PAD, y + 12, PAD + barWidth, y + 22, 6 * DP, 6 * DP, fillPaint(ACCENT))
@@ -113,6 +110,14 @@ object StatsImage {
         resolver.openOutputStream(uri)?.use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
         uri
     }.getOrNull()
+
+    /** 标题下面只写这次统计的时间范围，条数和人数在四块数字里已经有。 */
+    private fun spanLabel(stats: GroupStats): String {
+        if (stats.earliest <= 0 || stats.latest <= 0) return "只在本机统计，不含聊天原文"
+        val format = SimpleDateFormat("HH:mm", Locale.CHINA)
+        return format.format(Date(stats.earliest)) + "–" + format.format(Date(stats.latest)) +
+            " · 只在本机统计"
+    }
 
     /** 名字不可见时用占位，避免图片里出现空行。 */
     private fun fallbackName(raw: String): String {

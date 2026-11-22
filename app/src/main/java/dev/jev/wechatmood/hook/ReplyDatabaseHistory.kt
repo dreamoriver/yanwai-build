@@ -296,7 +296,34 @@ object ReplyDatabaseHistory {
         out
     }
 
-    /** 诊断用：列出主库的表名，便于确认群昵称实际存在哪张表。 */
+    /**
+     * 诊断：一条消息在 message 表里的非空列（值截断）。
+     * 用来确认「群里的表情/图片/视频」到底有没有存发送者，以及存在哪一列。
+     */
+    suspend fun messageRow(talker: String, msgId: Long, accountScope: String? = null): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            val databases = databasesForScope(
+                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+            for (db in databases) {
+                val row = runCatching {
+                    query(db, "SELECT * FROM message WHERE msgId = ? AND talker = ? LIMIT 1",
+                        arrayOf(msgId.toString(), talker)).use { cursor ->
+                        if (!cursor.moveToFirst()) return@use null
+                        val out = LinkedHashMap<String, String>()
+                        for (index in 0 until cursor.columnCount) {
+                            val value = runCatching { cursor.getString(index) }.getOrNull() ?: continue
+                            if (value.isBlank()) continue
+                            out[cursor.getColumnName(index)] = value.take(48)
+                        }
+                        out
+                    }
+                }.getOrNull()
+                if (row != null) return@withContext row
+            }
+            emptyMap()
+        }
+
+    /** 诊断：列出主库的表名，便于确认群昵称实际存在哪张表。 */
     suspend fun atNames(talker: String, sinceMillis: Long, accountScope: String? = null): Map<String, String> =
         withContext(Dispatchers.IO) {
             if (!talker.endsWith("@chatroom")) return@withContext emptyMap()
@@ -432,8 +459,61 @@ object ReplyDatabaseHistory {
         )
         MoodLog.i("STATS_NAMES wanted=${wanted.size} found=${result.size} memberlist=$memberlist " +
             "contact=$contact alias=$byAlias stranger=$stranger scanned=$scanned dbs=${databases.size}")
+        // 还没查到的：把「库里到底有什么」写清楚，别再靠猜是昵称本来为空还是解析没命中。
+        if (result.size < wanted.size && chatroom != null) {
+            val missing = wanted.filter { it !in result }
+            MoodLog.w("STATS_NAMES_MISS n=" + missing.size + " ids=" + missing.take(5))
+            for (id in missing.take(3)) {
+                runCatching { diagnoseName(databases, chatroom, id) }
+                    .onFailure { MoodLog.w("STATS_NAME_DIAG_FAILED " + it.javaClass.simpleName) }
+            }
+        }
         result
     }
+
+    /** 诊断：某个没查到名字的人，在 roomdata 和各联系人表里到底是什么状态。只读，值截断。 */
+    private fun diagnoseName(databases: List<Any>, chatroom: String, username: String) {
+        for (db in databases) {
+            val blob = runCatching {
+                query(db, "SELECT roomdata FROM chatroom WHERE chatroomname = ? LIMIT 1",
+                    arrayOf(chatroom)).use { cursor -> if (cursor.moveToFirst()) cursor.getBlob(0) else null }
+            }.getOrNull()
+            val ids = dev.jev.wechatmood.reply.GroupRoomData.memberIds(blob)
+            val names = dev.jev.wechatmood.reply.GroupRoomData.parse(blob)
+            MoodLog.i("STATS_NAME_DIAG_ROOMDATA id=" + username + " inMembers=" + (username in ids) +
+                " withName=" + (names[username]?.length ?: 0))
+            val fields = dev.jev.wechatmood.reply.GroupRoomData.memberFields(blob, username)
+            MoodLog.i("STATS_NAME_DIAG_FIELDS id=" + username + " " + fields.entries.joinToString(";") { entry ->
+                entry.key.toString() + "=" + entry.value.joinToString("|") { it.take(16) }
+            })
+            for (table in listOf("rcontact", "stranger", "contact")) {
+                MoodLog.i("STATS_NAME_DIAG_ROW table=" + table + " id=" + username + " " +
+                    rowSummary(db, table, username))
+            }
+        }
+    }
+
+    /** 一行里有哪些非空字段，值截断到 24 字；表 / 列不存在时明说。 */
+    private fun rowSummary(db: Any, table: String, username: String): String {
+        val columns = tableColumns(db, table)
+        if (columns.isEmpty()) return "no_table"
+        val userColumn = USER_COLUMNS.firstOrNull { it in columns } ?: return "no_user_column"
+        return runCatching {
+            query(db, "SELECT * FROM " + table + " WHERE " + userColumn + " = ? LIMIT 1",
+                arrayOf(username)).use { cursor ->
+                if (!cursor.moveToFirst()) return@use "missing"
+                (0 until cursor.columnCount).mapNotNull { index ->
+                    val value = runCatching { cursor.getString(index) }.getOrNull()
+                    if (value.isNullOrBlank()) null else cursor.getColumnName(index) + "=" + value.take(24)
+                }.joinToString(" ")
+            }
+        }.getOrElse { "query_failed:" + it.javaClass.simpleName }
+    }
+
+    /** 昵称类字段：这里的「null」可能就是用户自己取的名字。 */
+    private val NICKNAME_COLUMNS = setOf("nickname", "nickName", "displayName", "displayname",
+        "groupNickname", "group_nickname", "nick_name")
+    private val PLACEHOLDER_NAMES = setOf("null", "uinull")
 
     /** rcontact 的显示优先级：备注 > 备注字段别名 > 昵称。 */
     private val CONTACT_NAMES = listOf("conRemark", "remark", "nickname", "nickName", "displayName")
@@ -458,7 +538,7 @@ object ReplyDatabaseHistory {
                     while (cursor.moveToNext()) {
                         val user = cursor.getString(0)?.trim().orEmpty()
                         if (user.isEmpty() || user in result) continue
-                        val name = bestName(cursor, 1, nameColumns.size) ?: continue
+                        val name = bestName(cursor, 1, nameColumns) ?: continue
                         result[user] = name
                         filled++
                     }
@@ -484,7 +564,7 @@ object ReplyDatabaseHistory {
                     while (cursor.moveToNext()) {
                         val alias = cursor.getString(0)?.trim().orEmpty()
                         if (alias.isEmpty() || alias !in chunk || alias in result) continue
-                        val name = bestName(cursor, 1, nameColumns.size) ?: continue
+                        val name = bestName(cursor, 1, nameColumns) ?: continue
                         result[alias] = name
                         filled++
                     }
@@ -536,11 +616,22 @@ object ReplyDatabaseHistory {
         return columns
     }
 
-    private fun bestName(cursor: Cursor, offset: Int, count: Int): String? =
-        (0 until count).asSequence()
-            .mapNotNull { index -> runCatching { cursor.getString(offset + index) }.getOrNull() }
-            .map { dev.jev.wechatmood.core.TextClean.name(it) }
-            .firstOrNull { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
+    /**
+     * 取第一个能用的名字。
+     *
+     * 「null」「uinull」曾经一律当成没名字，可昵称是用户自己取的：有人就叫 null，
+     * 微信上明明白白显示着，却被我们归到「未获取昵称」。所以按字段区分：
+     * 昵称类字段的 null 当真名，备注类字段的 null 仍算占位。
+     */
+    private fun bestName(cursor: Cursor, offset: Int, columns: List<String>): String? =
+        columns.indices.asSequence()
+            .mapNotNull { index ->
+                runCatching { cursor.getString(offset + index) }.getOrNull()?.let { columns[index] to it }
+            }
+            .map { (column, raw) -> column to dev.jev.wechatmood.core.TextClean.name(raw) }
+            .firstOrNull { (column, value) ->
+                value.isNotEmpty() && (column in NICKNAME_COLUMNS || value.lowercase() !in PLACEHOLDER_NAMES)
+            }?.second
 
     /** 群名片原文：老版本是 XML，新版本可能换成别的编码，原样取出来交给上层判断。 */
     private fun rawMemberlist(db: Any, chatroom: String): String {
@@ -567,8 +658,16 @@ object ReplyDatabaseHistory {
         return xml
     }
 
-    /** chatroom.memberlist 是 XML，群昵称和群备注都写在里面。 */
+    /**
+     * 群昵称：先读 `chatroom.roomdata`，老版本再退回 `memberlist` 的 XML。
+     *
+     * 新版微信（实测 8.0.80）把 memberlist 变成了 `wxid;wxid;…` 的纯 id 串，昵称只在
+     * roomdata 这个 protobuf 列里；只认 XML 时这一层永远空，非好友群成员就全成了
+     * 「未获取昵称」。
+     */
     private fun chatroomMemberNames(db: Any, chatroom: String): Map<String, String> {
+        val fromRoom = roomDataNames(db, chatroom)
+        if (fromRoom.isNotEmpty()) return fromRoom
         val xml = rawMemberlist(db, chatroom)
         val parsed = dev.jev.wechatmood.reply.GroupMemberList.parse(xml)
         if (parsed.isNotEmpty()) {
@@ -579,6 +678,29 @@ object ReplyDatabaseHistory {
             MoodLog.w("STATS_CHATROOM_EMPTY xml=${xml.length} members=${xml.contains("<member")} room=${chatroom.hashCode()}")
         }
         return parsed
+    }
+
+    /**
+     * `chatroom.roomdata`（protobuf）里的群昵称。
+     * 只读，解析失败或列不存在都返回空，让上层继续走 rcontact 兜底。
+     */
+    private fun roomDataNames(db: Any, chatroom: String): Map<String, String> {
+        val columns = tableColumns(db, "chatroom")
+        if ("roomdata" !in columns) {
+            MoodLog.w("STATS_ROOMDATA_NO_COLUMN columns=${columns.take(12)}")
+            return emptyMap()
+        }
+        var names: Map<String, String> = emptyMap()
+        runCatching {
+            query(db, "SELECT roomdata FROM chatroom WHERE chatroomname = ? LIMIT 1",
+                arrayOf(chatroom)).use { cursor ->
+                if (!cursor.moveToFirst()) return@use
+                val blob = runCatching { cursor.getBlob(0) }.getOrNull()
+                names = dev.jev.wechatmood.reply.GroupRoomData.parse(blob)
+                MoodLog.i("STATS_ROOMDATA blob=${blob?.size ?: 0} members=${names.size}")
+            }
+        }.onFailure { MoodLog.w("STATS_ROOMDATA_FAILED ${it.javaClass.simpleName} ${it.message}") }
+        return names
     }
 
     /**

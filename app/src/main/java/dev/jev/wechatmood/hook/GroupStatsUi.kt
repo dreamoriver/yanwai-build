@@ -122,8 +122,20 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
 
     init { stats = computeStats() }
 
+    /** 上一次记录的「没有发送者」类型分布，只在变化时写日志。 */
+    private var blankSignature: String? = null
+
     /** 按当前筛选重算，只读内存里的消息，不碰数据库。 */
     private fun computeStats(): GroupStats {
+        // 群里有些消息 content 不带发送者前缀（系统提示、部分媒体），单独记类型分布，
+        // 否则它们会全被并成一个「未获取昵称」，看着像某个人没说名字。
+        val blanks = selectedMessages().filter { it.senderId.isBlank() }
+        val signature = if (blanks.isEmpty()) "" else blanks.groupingBy { it.type }.eachCount().entries
+            .sortedByDescending { it.value }.joinToString(",") { it.key.toString() + ":" + it.value }
+        if (blanks.isNotEmpty() && signature != blankSignature) {
+            dev.jev.wechatmood.core.MoodLog.w("STATS_NO_SENDER n=" + blanks.size + " types=" + signature)
+        }
+        blankSignature = signature
         val records = selectedMessages().map {
             StatRecord(normalizedMillis(it.time), if (it.speaker == "我") 1 else 0, it.type, it.text, it.speaker)
         }
@@ -149,8 +161,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         else -> range.label
     }
 
+    /** 时段和条数已经由上面两个筛选按钮显示，这里只说结果，不重复。 */
     private fun summaryText(): String =
-        "${windowLabel()} · ${StatsFilter.limitLabel} · 共 ${stats.total} 条 · 人均 ${stats.perCapita} 条 · 只在本机计算"
+        "共 ${stats.total} 条 · ${stats.senders} 人发言 · 人均 ${stats.perCapita} 条"
 
     private fun analysisTitle() = if (isGroup) "群里在聊什么" else "你们在聊什么"
 
@@ -188,6 +201,24 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 it.analysisText() ?: "[媒体]", senderId = it.senderId(), type = it.type)
         }
         stats = computeStats()
+        logBlankSamples()
+    }
+
+    /**
+     * 诊断：把「没有发送者」的几条消息在库里的原样打出来。
+     * 优先看表情和图片：文本类没有前缀的都是自己发的，不需要看。
+     */
+    private suspend fun logBlankSamples() {
+        val samples = dbMessages.filter { it.senderId.isBlank() && (it.type == 47 || it.type == 3) }
+            .take(4)
+        for (sample in samples) {
+            val row = runCatching {
+                ReplyDatabaseHistory.messageRow(context.talker, sample.id, accountScope)
+            }.getOrNull().orEmpty()
+            dev.jev.wechatmood.core.MoodLog.w("STATS_BLANK_ROW type=" + sample.type +
+                " mine=" + (sample.speaker == "我") + " id=" + sample.id + " " +
+                row.entries.joinToString(" ") { it.key + "=" + it.value })
+        }
     }
 
     fun show() {
@@ -209,11 +240,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         filters.addView(limitPill, LinearLayout.LayoutParams(0, -2, 1f))
         body.addView(filters)
         val summaryLine = kit.caption(summaryText())
-        val spanLine = kit.caption("数据范围 ${spanText()}")
+        val spanLine = kit.caption("数据范围 ${spanText()} · 只在本机统计")
         val sourceLine = kit.caption(sourceNote)
         body.addView(summaryLine)
         body.addView(spanLine)
         body.addView(sourceLine)
+        captionLine(sourceLine, sourceNote)
 
         val numbers = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -221,6 +253,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         val cells = listOf("条消息", "人发言", "图片语音", "个时段").map { number(it) }
         cells.forEach { numbers.addView(it.first, weight()) }
+        // 打开这一刻就把数字填上：以前只有换过筛选项才赋值，第一次进来四块只有标签。
+        fillNumbers(cells)
         body.addView(numbers, LinearLayout.LayoutParams(-1, -2))
 
         body.addView(LinearLayout(activity), LinearLayout.LayoutParams(-1, theme.dp(6)))
@@ -230,6 +264,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         if (dbMessages.isEmpty()) {
             // 只有页面消息时，条数只含文字：媒体在回复上下文里被剔掉，单独按本页计数。
             sourceNote = "只有页面上的文字消息；图片语音按本页单独计数"
+            captionLine(sourceLine, sourceNote)
         }
         renderTop(pageNames + manualNames)
 
@@ -310,12 +345,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             rangePill.text = "时段 · ${StatsFilter.range.label}"
             limitPill.text = "条数 · ${StatsFilter.limitLabel}"
             summaryLine.text = summaryText()
-            spanLine.text = "数据范围 ${spanText()}"
-            sourceLine.text = sourceNote
-            cells[0].second.text = "${stats.total}"
-            cells[1].second.text = "${stats.senders}"
-            cells[2].second.text = "${stats.media + stats.voice}"
-            cells[3].second.text = "${stats.activeHours.size}"
+            spanLine.text = "数据范围 ${spanText()} · 只在本机统计"
+            captionLine(sourceLine, sourceNote)
+            fillNumbers(cells)
             renderTop(currentNames)
             renderActiveHours(activeBox)
             // 换了范围，旧的分析对不上新数据，先清掉；同一范围再切回来会从缓存里补回。
@@ -328,12 +360,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 // 新筛选可能要看更多消息：先重查，再刷新数字与表格。
                 reloadDb()
                 summaryLine.text = summaryText()
-                spanLine.text = "数据范围 " + spanText()
-                sourceLine.text = sourceNote
-                cells[0].second.text = "" + stats.total
-                cells[1].second.text = "" + stats.senders
-                cells[2].second.text = "" + (stats.media + stats.voice)
-                cells[3].second.text = "" + stats.activeHours.size
+                spanLine.text = "数据范围 " + spanText() + " · 只在本机统计"
+                captionLine(sourceLine, sourceNote)
+                fillNumbers(cells)
                 renderTop(currentNames)
                 renderActiveHours(activeBox)
                 renderTop(currentNames + namesFor(stats.members.map { it.name }))
@@ -389,6 +418,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
 
         // 昵称在数据库里，异步查一次再替换 wxid；同范围的分析结果还在的话直接摆出来。
         scope.launch {
+            logBlankSamples()
             renderTop(namesFor(stats.members.map { it.name }))
             // 打开窗口时命中的缓存不抢滚动位置：先让人看到数字，再自己往下翻。
             cachedAnalysis()?.let { renderAnalysis(it, scrollToBottom = false) }
@@ -408,7 +438,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         var unknown = 0
         for (member in stats.members) {
             val resolved = resolveName(member.name, names)
-            val shown = resolved ?: "未获取昵称#${++unknown}"
+            if (resolved == null) {
+                // 查不到就用日志说清：库里到底有没有这个名字、长什么样。
+                dev.jev.wechatmood.core.MoodLog.w("STATS_NAME_UNRESOLVED raw=" + member.name.take(16) +
+                    " db=" + (names[member.name]?.take(16) ?: "none") + " count=" + member.count)
+            }
+            // 没有发送者的那堆消息（系统提示、部分媒体）不是某个人，不要冒充「未获取昵称#N」。
+            val unattributed = member.name.startsWith("对方（群成员未知")
+            val shown = resolved ?: if (unattributed) "未署名消息" else "未获取昵称#${++unknown}"
             displayedNames[member.name] = shown
             merged[shown] = (merged[shown] ?: 0) + member.count
             rawByShown.putIfAbsent(shown, member.name)
@@ -425,11 +462,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             topContainer.addView(row, LinearLayout.LayoutParams(-1, -2))
         }
         if (unknown > 0) {
-            // 查不到就说清楚查不到，顺带报每层命中多少，方便判断是库的问题还是解析的问题。
-            val layers = ReplyDatabaseHistory.lastLayers
-            val detail = if (layers.isEmpty()) "" else "（群名片 ${layers["memberlist"] ?: 0} · 备注 " +
-                "${layers["contact"] ?: 0} · 微信号 ${layers["alias"] ?: 0} · 兜底 ${layers["scanned"] ?: 0}）"
-            topContainer.addView(kit.caption("其中 $unknown 人没查到群昵称$detail，先按序号显示").apply {
+            // 只说人话：分层命中数留在 STATS_NAMES 日志里，不往界面上堆。
+            topContainer.addView(kit.caption("其中 $unknown 人没查到昵称，点一下可以手动补").apply {
                 setPadding(0, theme.dp(6), 0, 0)
             })
         }
@@ -474,7 +508,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val fromDb = names[raw]?.let { dev.jev.wechatmood.core.TextClean.name(it) }?.takeIf { it.isNotEmpty() }
         val clean = (fromDb ?: raw).trim()
         // 数据库里缺失的字段会写 null / uinull，那不是名字。
-        if (clean.isEmpty() || clean.equals("null", true) || clean.equals("uinull", true)) return null
+        // 只有真的空白才算没名字：「null」这个名字是用户自己取的，微信会照原样显示。
+        if (clean.isEmpty()) return null
         // 空白、零宽、格式控制符都算「没有名字」，避免表格里出现空行。
         // 只把「真的能看见」的字符算名字：字母、数字、标点、符号。
         // 但 U+3164、U+2800 这类字符虽然属于「字母/符号」，渲染出来是空白，必须单独排除。
@@ -511,14 +546,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
     }
 
+    /** 成员表只有两列：名字（条数）和占比，条数并进名字里，表格不再被挤成三块。 */
     private fun headerRow() = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         minimumHeight = theme.dp(24)
-        addView(theme.label("成员", ReplyMetrics.TEXT_CAPTION, theme.muted),
+        addView(theme.label("成员（条数）", ReplyMetrics.TEXT_CAPTION, theme.muted),
             LinearLayout.LayoutParams(0, -2, 1f))
-        addView(theme.label("条数", ReplyMetrics.TEXT_CAPTION, theme.muted).apply { gravity = Gravity.END },
-            LinearLayout.LayoutParams(theme.dp(56), -2))
         addView(theme.label("占比", ReplyMetrics.TEXT_CAPTION, theme.muted).apply { gravity = Gravity.END },
             LinearLayout.LayoutParams(theme.dp(52), -2))
     }
@@ -527,12 +561,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         minimumHeight = theme.dp(28)
-        addView(theme.label(name, ReplyMetrics.TEXT_BODY, theme.ink).apply {
+        addView(theme.label("$name（$count 条）", ReplyMetrics.TEXT_BODY, theme.ink).apply {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        addView(theme.label(count, ReplyMetrics.TEXT_BODY, theme.muted).apply { gravity = Gravity.END },
-            LinearLayout.LayoutParams(theme.dp(56), -2))
         addView(theme.label(percent, ReplyMetrics.TEXT_BODY, theme.muted).apply { gravity = Gravity.END },
             LinearLayout.LayoutParams(theme.dp(52), -2))
     }
@@ -572,14 +604,15 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
      */
     private fun shorten(text: String): String = if (text.length > 10) text.take(10) + "…" else text
 
+    /** 复制出去的文本：一行一件事，成员写成「名字（N 条）」，别让人自己对着两列数字对齐。 */
     private fun exportText(analysis: String): String = buildString {
-        appendLine("群聊统计 · ${summaryText()}")
+        appendLine("群聊统计 · ${StatsFilter.range.label} · ${StatsFilter.limitLabel}")
+        appendLine("共 ${stats.total} 条 · ${stats.senders} 人发言 · 人均 ${stats.perCapita} 条")
         appendLine("数据范围 ${spanText()}")
-        appendLine("${stats.senders} 人发言")
         if (stats.topSenders.isNotEmpty()) {
             // 名字用表格里那套解析结果，复制出去别带 wxid。
-            appendLine("最活跃：" + stats.topSenders.joinToString("、") {
-                "${displayedNames[it.first] ?: it.first} ${it.second}"
+            appendLine("说得最多：" + stats.topSenders.joinToString("、") {
+                "${displayedNames[it.first] ?: it.first}（${it.second} 条）"
             })
         }
         if (stats.activeHours.isNotEmpty()) {
@@ -598,37 +631,46 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
      * 素材里的 speaker 已经换成昵称，模型不该再看到 wxid。
      */
     private val groupSummaryPrompt = """
-        你在一个微信群里待了一整天，现在用三十秒跟没进群的人讲清楚这群人最近在聊什么。
+        你在一个微信群里待了一整天，现在用三十秒跟没进群的人讲清楚这群人在折腾什么。
 
-        只写三段，全文 250 到 400 字。超过 400 字这版就算废了。
+        好笑、具体、有画面感，但只准用素材里真有的东西：人、事、数字、原话、分歧。
+        热闹不是靠形容词堆出来的，是靠把某件荒唐的小事说清楚。
 
-        第一段，一到两句，直接说主线：这群人这阵子最集中折腾或者争论的是哪件事。
-        不要把后面要讲的话题列成清单，那等于把第二段又说了一遍。
-        第二段，只挑最大的两到三个话题，一个话题一到两句话，写话题本身和结论或者分歧。
-        第三段，一句话收尾，吐槽或者给这帮人定性都行，别喊口号。
+        只写三段，全文 250 到 420 字。超过 420 字这版就算废了。
+
+        第一段，一句：这群人这阵子最较劲的是哪件事。要用最具体的那一版说法（谁、为了什么、卡在哪），
+        别写成「最近大家在讨论……」这种开场。
+
+        第二段，两到三句：挑最大的两到三个话题，每个写清「怎么起的、谁在坚持、最后怎样」。
+        允许用一句群里的原话当包袱，但别把聊天记录复述一遍。
+
+        第三段，一句收尾：吐槽、反差，或者给这帮人贴个小标签。别喊口号，别上价值。
+
+        想写得有意思，可以挑一两个用，别全上：
+        - 抓荒诞点：为很小的事认真争论半天，或者前后说法对不上。
+        - 用群里的原话当包袱，不要自己造梗。
+        - 把分歧原样摆出来，别和稀泥，也别替他们下结论。
 
         硬性要求：
-        - 统计行只用来判断热度，不要把它写进正文，也别提「多少条」「多少人」。
-        - 合并。十个人围着同一个话题说了十句，那是同一件事，不是十件。
-        - 不逐人报价。禁止「甲说……乙说……丙又接……」这种串行复述；
-          一个话题里最多出现两个昵称，只在这个人真的带着观点时才点名。
-        - 引用克制。全文最多三句原话，其余用自己的话概括；不引也能说清的地方就不要引。
-        - 小事不写。只有一两个人搭话、没结论的插科打诨，半句带过或者干脆不写。
+        - 统计行只用来判断热度，不要写进正文，也别提「多少条」「多少人」。
+        - 合并。十个人围着同一件事说十句，那是同一件事。
+        - 不逐人报价。禁止「甲说……乙说……丙又接……」；一个话题最多点两个昵称，
+          只有这个人真的带着观点时才点名。
+        - 引用克制。全文最多三句原话，不引也能说清的地方就不要引。
+        - 小事不写。一两个人搭话、没结论的插科打诨，半句带过或者干脆不写。
         - 宁可漏，不要全。漏掉边角话题没关系，主线错了才叫失败。
-        - 素材少就写短，别硬凑：不到 40 条消息，写到 120 到 250 字就算完；
-          如果只是普通闲聊没什么事，就照实说在聊什么，别硬编冲突，也别总结出什么群体规律。
+        - 素材少就写短：不到 40 条消息，120 到 250 字就算完；就是普通闲聊，就老实说他们在闲扯什么，
+          别硬编冲突，也别总结出什么群体规律。
         - [图片] [语音] 只当占位，不要猜内容；「未获取昵称#N」是没查到昵称的人，别猜是谁。
-        - 不写统计数字，不评价这个群好不好，不用「首先/其次」「总而言之」「值得一提的是」，
-          不加小标题，不编号。
+        - 不评价这个群好不好，不用「首先/其次」「总而言之」「值得一提的是」，不加小标题，不编号。
 
         语气像边想边说的口头转述，短句，可以刻薄一点。
 
         示范（只学密度和口吻，内容别照抄，人名价格都是编的）：
         这两天主要在折腾搬家，一边比价一边骂中介，顺带问了句周末谁有空搭把手。
-        主力是两个人，一个坚持自己搬能省一半，一个说上次闪了腰不值当，最后折中找了半日搬家公司。搬完顺带聊到楼下停车位，有人报 300 一个月，贵得没人接话。
+        主力是两个人，一个坚持自己搬能省一半，一个说上次闪了腰不值当，最后折中找了半日搬家公司，还被「半天也算一天」这句话堵了回去。搬完顺带聊到楼下停车位，有人报 300 一个月，贵得没人接话。
         倒是「谁顺手带个早饭」这点小事吵了半天，几个人排队点单，剩下的都在笑话他们。
 
-        只输出正文，不要写「以下是总结」这类开场，也不要解释你是怎么写的。
     """.trimIndent()
 
     /** 私聊用的是「转述这段聊天」的提示词：同一套写全的要求用在两个人身上更像流水账。 */
@@ -801,6 +843,21 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val head = text.take(limit + 80)
         val cut = head.indexOfLast { it in "。！？…\n" }
         return if (cut >= limit / 2) head.take(cut + 1).trim() else head.take(limit).trim()
+    }
+
+    /** 四个数字一次填完，避免各处漏填导致顶部只剩标签。 */
+    private fun fillNumbers(cells: List<Pair<LinearLayout, TextView>>) {
+        if (cells.size < 4) return
+        cells[0].second.text = stats.total.toString()
+        cells[1].second.text = stats.senders.toString()
+        cells[2].second.text = (stats.media + stats.voice).toString()
+        cells[3].second.text = stats.activeHours.size.toString()
+    }
+
+    /** 空的状态行直接收起，界面上不留没有内容的一行。 */
+    private fun captionLine(line: TextView, value: String) {
+        line.text = value
+        line.visibility = if (value.isBlank()) View.GONE else View.VISIBLE
     }
 
     private fun copy(text: String) {

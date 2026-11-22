@@ -57,10 +57,10 @@ object GroupTranscript {
      */
     fun label(raw: String, resolved: String?): String? {
         val fromDb = resolved?.let { dev.jev.wechatmood.core.TextClean.name(it) }
-            ?.takeIf { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
+            ?.takeIf { it.isNotEmpty() }
         if (fromDb != null) return fromDb
         val clean = dev.jev.wechatmood.core.TextClean.name(raw)
-        if (clean.isEmpty() || clean.equals("null", true) || clean.equals("uinull", true)) return null
+        if (clean.isEmpty()) return null
         if (clean.startsWith("wxid", true)) return null
         if (clean.startsWith("对方（")) return null
         if (clean.matches(Regex("[A-Za-z0-9_-]{14,}"))) return null
@@ -122,6 +122,6 @@ object GroupMemberList {
         val text = raw.replace("&lt;", "<").replace("&gt;", ">")
             .replace("&quot;", "\"").replace("&amp;", "&")
         val clean = dev.jev.wechatmood.core.TextClean.name(text)
-        return clean.takeIf { it.isNotEmpty() && !it.equals("null", true) && !it.equals("uinull", true) }
+        return clean.takeIf { it.isNotEmpty() }
     }
 }

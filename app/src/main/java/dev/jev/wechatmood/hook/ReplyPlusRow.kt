@@ -38,6 +38,8 @@ internal class ReplyPlusRow(private val activity: Activity, private val open: ()
         if (footer !== currentFooter) {
             clear()
             footer = currentFooter
+            // 换面板时不等节流窗口：点开「＋」的第一帧就要能看到入口文案。
+            lastRefreshAt = 0L
             // 只在换面板时重置重试预算；否则每个 tick 都会把 30 帧上限重置掉。
             nudgeBudget = 30
             currentFooter?.takeIf { it.isAttachedToWindow }?.let {
@@ -55,7 +57,7 @@ internal class ReplyPlusRow(private val activity: Activity, private val open: ()
     private fun requestRefresh() {
         val now = android.os.SystemClock.uptimeMillis()
         // 以前 120ms 一档，点开「＋」后第一帧经常被延后；48ms（约 20 次/秒）体感是立刻出现。
-        val wait = 48 - (now - lastRefreshAt)
+        val wait = 24 - (now - lastRefreshAt)
         if (wait <= 0) {
             lastRefreshAt = now
             refresh()

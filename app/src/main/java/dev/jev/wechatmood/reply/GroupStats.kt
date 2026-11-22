@@ -59,6 +59,9 @@ object GroupStatsCalculator {
     const val SAMPLE_LIMIT = 5000
     private val LINK = Regex("https?://", RegexOption.IGNORE_CASE)
 
+    /** 没有发件人时 [dev.jev.wechatmood.hook.MessageMetadata.speaker] 用的占位，统计时跳过。 */
+    const val UNATTRIBUTED = "对方（群成员未知"
+
     fun compute(records: List<StatRecord>, sampled: Boolean = false): GroupStats {
         if (records.isEmpty()) return GroupStats(sampled = sampled)
         val members = LinkedHashMap<String, MutableMember>()
@@ -84,6 +87,9 @@ object GroupStatsCalculator {
                 if (record.time < earliest) earliest = record.time
                 if (record.time > latest) latest = record.time
             }
+            // 没有发送者的消息（群里的表情、图片、视频，微信本地不记发件人）计入总数，
+            // 但不算某个人：以前它们被并成一个「对方（群成员未知）」，看着像有人没说名字。
+            if (record.send != 1 && record.speaker.startsWith(UNATTRIBUTED)) continue
             // 「我」也进成员表，否则会以为自己的消息没统计。
             val name = if (record.send == 1) "我" else displayName(record)
             val member = members.getOrPut(name) { MutableMember(name) }
