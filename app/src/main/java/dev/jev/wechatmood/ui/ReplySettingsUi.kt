@@ -186,6 +186,8 @@ class ReplySettingsUi(private val activity: AppCompatActivity, private val bindi
     }
     private fun status(text: String, color: Int) {
         SettingsStatus.show(binding.replyStatus, text, color)
+        val model = binding.model.text?.toString().orEmpty()
+        binding.replyFormSummary.text = if (model.isBlank()) text else "$model · $text"
         SettingsStatus.show(binding.testReply, when (color) {
             R.color.status_success -> "连接成功 · 重新检测"
             R.color.status_error -> "连接失败 · 点击重试"

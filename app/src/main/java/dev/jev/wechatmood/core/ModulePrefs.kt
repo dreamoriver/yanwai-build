@@ -10,6 +10,8 @@ import java.util.concurrent.TimeUnit
 object ModulePrefs {
     const val FILE_NAME = "wechatmood_config"
     const val KEY_EXPLORE = "explore_mode"
+    /** 新聊天默认开启自动分析；默认关闭，显式开关仍优先。 */
+    const val KEY_ANALYSIS_DEFAULT = "analysis_default"
     /** 关系档案自动提取，默认开启；关闭后不会在打开「帮我回」时顺带整理。 */
     const val KEY_RELATION_FACTS = "relation_facts_auto"
     /** 一次整理读多少条聊天；只存在微信进程本地，不参与设置同步。 */
@@ -24,7 +26,6 @@ object ModulePrefs {
     const val KEY_API_PROVIDER = "api_provider"
     const val KEY_API_MODEL = "api_model"
     @Volatile private var context: Context? = null
-    @Volatile private var conversations: ConversationSwitches? = null
     private val manualAnalysis = ManualAnalysis()
     private val analysisSnapshots = AnalysisSnapshots()
     private val session = SettingsSession {
@@ -98,12 +99,6 @@ object ModulePrefs {
         // 打开 SQLite 属于磁盘 IO，放到后台，别卡启动。
         runCatching { java.util.concurrent.Executors.newSingleThreadExecutor().execute { AnalysisResultCache.init(app) } }
         UsageReporter.init(app)
-        if (app.packageName == "com.tencent.mm" && conversations == null) {
-            val local = app.getSharedPreferences("yanwai_conversations", Context.MODE_PRIVATE)
-            conversations = ConversationSwitches(local.getStringSet("enabled_chats", emptySet()).orEmpty()) {
-                local.edit().putStringSet("enabled_chats", it).commit()
-            }
-        }
         // Register before reading so a save racing with initial loading cannot be missed.
         runCatching { SettingsSync.register(app, ::receiveSettings) }
             .onFailure { MoodLog.e("SYNC_REGISTER_FAILED", it) }
@@ -162,7 +157,8 @@ object ModulePrefs {
     val exploreMode get() = session.current?.exploreMode == true
     val apiKey get() = session.current?.api?.apiKey.orEmpty()
     fun apiSettings(): ApiSettings = session.current?.api ?: ApiSettings.fromInput(ApiSettings.DEFAULT_ENDPOINT, "")
-    fun isChatEnabled(talker: String?) = conversations?.isEnabled(talker) == true
+    /** 自动分析由桌面端全局开关控制；参数保留给按聊天取状态的调用方。 */
+    fun isChatEnabled(@Suppress("UNUSED_PARAMETER") talker: String?) = session.current?.analysisDefault == true
     fun canAnalyze(talker: String?) = isChatEnabled(talker) && session.current?.canAnalyze == true
     private fun scoped(input: AnalysisInput): AnalysisInput {
         val account = dev.jev.wechatmood.hook.ReplyDatabaseHistory.accountScope(input)
@@ -208,15 +204,6 @@ object ModulePrefs {
     }
     /** 用户点一下卡片即可收起；只影响这一条，重新长按「翻译意图」会恢复。 */
     fun hideCard(input: AnalysisInput): Boolean = manualAnalysis.hide(input)
-    fun setChatEnabled(talker: String?, value: Boolean): Boolean = runCatching {
-        val saved = conversations?.setEnabled(talker, value) == true
-        // Only an explicit, successfully saved switch-off resets this chat's manual choices.
-        if (saved && !value && talker != null) {
-            manualAnalysis.clearConversation(talker)
-            // Keep completed evidence/results. Disabling is not an instruction to re-analyze.
-        }
-        saved
-    }.onFailure { MoodLog.e("CHAT_SWITCH_SAVE_FAILED 本地会话开关保存失败", it) }.getOrDefault(false)
 
     private fun localPrefs(): android.content.SharedPreferences? =
         context?.getSharedPreferences(LOCAL_REPLY_FILE, Context.MODE_PRIVATE)

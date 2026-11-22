@@ -1,52 +1,52 @@
 package dev.jev.wechatmood
 
-import android.content.Intent
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
-import android.widget.Toast
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
-import dev.jev.wechatmood.analysis.ChatAnalysis
-import dev.jev.wechatmood.analysis.JevHttpClient
+import dev.jev.wechatmood.core.EmotionSettings
+import dev.jev.wechatmood.core.IntentSettings
 import dev.jev.wechatmood.core.ModulePrefs
-import dev.jev.wechatmood.core.ApiSettings
-import dev.jev.wechatmood.core.ApiProfiles
-import dev.jev.wechatmood.core.JevProvider
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.core.Diagnostics
 import dev.jev.wechatmood.core.SettingsProvider
+import dev.jev.wechatmood.core.UsageMeter
 import dev.jev.wechatmood.databinding.ActivityMainBinding
-import dev.jev.wechatmood.updates.UpdateNotice
+import dev.jev.wechatmood.reply.ReplySettings
+import dev.jev.wechatmood.ui.AnalysisConnectionUi
 import dev.jev.wechatmood.ui.ProbeState
 import dev.jev.wechatmood.ui.SetupPresenter
 import dev.jev.wechatmood.ui.SettingsStatus
 import dev.jev.wechatmood.ui.StatusTone
-import kotlinx.coroutines.*
-import androidx.core.widget.doAfterTextChanged
+import dev.jev.wechatmood.updates.UpdateNotice
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var updateNotice: UpdateNotice
     private var syncingSwitches = false
-    private var selectedProvider = JevProvider.TYPESAFE
-    private var bindingInputs = false
-    private var probeState = ProbeState.UNTESTED
     private val pagePositions = mutableMapOf<Int, Int>()
     private var currentPage = R.id.tabHome
-    private var modelsReturnPage = R.id.tabEmotion
+    private var modelsReturnPage = R.id.tabHome
     private var roleManagerUi: dev.jev.wechatmood.ui.ReplyRoleManagerUi? = null
-    private var intentSettingsUi: dev.jev.wechatmood.ui.IntentSettingsUi? = null
+    private var connectionUi: AnalysisConnectionUi? = null
+
     private val backToHome = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
             if (currentPage == R.id.modelsPanel) showPage(modelsReturnPage)
@@ -55,13 +55,10 @@ class MainActivity : AppCompatActivity() {
     }
     private val refreshAfterSettings = Runnable { if (!isFinishing && !isDestroyed) refresh() }
     private val stateListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
-        // Saving one profile updates several keys. Render once after the entire edit.
+        // Saving one connection updates several keys. Render once after the entire edit.
         binding.root.removeCallbacks(refreshAfterSettings)
         binding.root.post(refreshAfterSettings)
     }
-    // No data class: accidental logging must not print a key. Drafts never cross channels.
-    private class ApiDraft(val endpoint: String, val key: String, val model: String)
-    private val drafts = mutableMapOf<JevProvider, ApiDraft>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,8 +79,6 @@ class MainActivity : AppCompatActivity() {
             ?.takeIf { it in listOf(R.id.tabHome, R.id.tabEmotion, R.id.tabReply, R.id.tabAbout) }
             ?: if (intent.getBooleanExtra("reply_tab", false)) R.id.tabReply else R.id.tabHome
         binding.navigation.selectedItemId = selectedTab
-        binding.entryAnalysis.setOnClickListener { binding.navigation.selectedItemId = R.id.tabEmotion }
-        binding.entryReply.setOnClickListener { binding.navigation.selectedItemId = R.id.tabReply }
         bindDisplaySettings()
         binding.toggleContact.setOnClickListener {
             val open = binding.contactPanel.visibility != View.VISIBLE
@@ -112,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         // Makes the settings provider visible to WeChat on Android 11+.
         // The provider validates the caller UID before sharing settings with WeChat.
         runCatching {
-            grantUriPermission("com.tencent.mm", SettingsProvider.URI, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            grantUriPermission("com.tencent.mm", SettingsProvider.URI, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }.onSuccess { MoodLog.i("BRIDGE_VISIBILITY_GRANTED 微信读取授权已授予") }
             .onFailure { MoodLog.e("BRIDGE_VISIBILITY_GRANT_FAILED", it) }
         val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
@@ -121,62 +116,43 @@ class MainActivity : AppCompatActivity() {
         ModulePrefs.init(this)
         SettingsProvider.publish(this)
         roleManagerUi = dev.jev.wechatmood.ui.ReplyRoleManagerUi(this, binding.roleManager, uiScope, ::scrollTo)
-        if (currentPage == R.id.tabReply) roleManagerUi?.onShown()
-        val savedEndpoint = prefs.getString(ModulePrefs.KEY_API_BASE, ApiSettings.DEFAULT_ENDPOINT).orEmpty()
-        selectedProvider = JevProvider.resolve(prefs.getString(ModulePrefs.KEY_API_PROVIDER, null), savedEndpoint)
-        drafts[selectedProvider] = ApiDraft(savedEndpoint, prefs.getString(ModulePrefs.KEY_API_KEY, "").orEmpty(),
-            prefs.getString(ModulePrefs.KEY_API_MODEL, "").orEmpty())
-        binding.inputProvider.setSimpleItems(JevProvider.entries.map { it.label }.toTypedArray())
-        showProvider()
-        intentSettingsUi = dev.jev.wechatmood.ui.IntentSettingsUi(this, binding.intentSettings,
-            binding.analysisModelSettings, uiScope, ::openHelp,
-            { openModels(R.id.modelReply) }, { openModels(R.id.modelJev) }) { renderOverview() }
-        binding.modelTabs.addOnButtonCheckedListener { _, id, checked -> if (checked) showModelTab(id) }
-        binding.openReplyModel.setOnClickListener { openModels(R.id.modelReply) }
-        binding.openAllModels.setOnClickListener { openModels(R.id.modelJev) }
-        binding.toolbar.setNavigationOnClickListener { backToHome.handleOnBackPressed() }
-        savedInstanceState?.let { state ->
-            val provider = state.getString("draft_provider")
-            val endpointText = state.getString("draft_endpoint")
-            val keyText = state.getString("draft_key")
-            val modelText = state.getString("draft_model")
-            if (provider == selectedProvider.id && endpointText != null && keyText != null && modelText != null) {
-                drafts[selectedProvider] = ApiDraft(endpointText, keyText, modelText)
-                bindingInputs = true
-                binding.inputApiBase.setText(endpointText)
-                binding.inputApiKey.setText(keyText)
-                binding.inputApiModel.setText(modelText)
-                bindingInputs = false
-            }
+        binding.roleManager.toggleRoles.setOnClickListener {
+            val open = binding.roleManager.roleListGroup.visibility != View.VISIBLE
+            binding.roleManager.roleListGroup.visibility = if (open) View.VISIBLE else View.GONE
+            binding.roleManager.toggleRoles.text = if (open) "收起" else "展开"
         }
-        if (savedInstanceState == null) restoreProbeState()
-        showModelTab(savedInstanceState?.getInt("model_tab", R.id.modelJev) ?: R.id.modelJev)
+        if (currentPage == R.id.tabReply) roleManagerUi?.onShown()
+        connectionUi = AnalysisConnectionUi(this, binding.connectionSettings, uiScope, ::openHelp) { renderOverview() }
+        if (currentPage == R.id.modelsPanel) connectionUi?.onShown()
+        binding.entryAnalysisConnection.setOnClickListener { openModels() }
+        binding.entryReplyConnection.setOnClickListener { openModels() }
+        binding.connectionSettings.analysisFormSummary.setOnClickListener { openModels() }
+        binding.replySettings.replyFormSummary.setOnClickListener { openModels() }
+        binding.connectionSettings.toggleAnalysisForm.setOnClickListener {
+            toggleForm(binding.connectionSettings.analysisForm, binding.connectionSettings.toggleAnalysisForm)
+        }
+        binding.replySettings.toggleReplyForm.setOnClickListener {
+            toggleForm(binding.replySettings.replyFormGroup, binding.replySettings.toggleReplyForm)
+        }
+        binding.toolbar.setNavigationOnClickListener { backToHome.handleOnBackPressed() }
         if (savedInstanceState?.getBoolean("models_open") == true) {
             modelsReturnPage = selectedTab
             showPage(R.id.modelsPanel)
-        }
-        binding.inputProvider.setOnItemClickListener { _, _, position, _ ->
-            drafts[selectedProvider] = ApiDraft(binding.inputApiBase.text.toString(), binding.inputApiKey.text.toString(),
-                binding.inputApiModel.text.toString())
-            selectedProvider = JevProvider.entries[position]
-            showProvider()
-        }
-        binding.buttonGetKey.setOnClickListener { selectedProvider.keyUrl?.let(::openHelp) }
-        binding.buttonProviderDocs.setOnClickListener { openHelp(selectedProvider.docsUrl) }
-        listOf(binding.inputApiBase, binding.inputApiKey, binding.inputApiModel).forEach { field ->
-            field.doAfterTextChanged {
-                if (!bindingInputs) {
-                    probeState = ProbeState.UNTESTED
-                    binding.textTestResult.visibility = View.GONE
-                    renderOverview()
-                }
-            }
         }
         binding.switchExplore.isChecked = prefs.getBoolean(ModulePrefs.KEY_EXPLORE, false)
         binding.switchExplore.setOnCheckedChangeListener { _, value ->
             if (!syncingSwitches) {
                 save(ModulePrefs.KEY_EXPLORE, value)
                 Toast.makeText(this, "重新启动微信后生效", Toast.LENGTH_SHORT).show()
+            }
+        }
+        binding.intentSettings.switchChatDefault.isChecked = prefs.getBoolean(ModulePrefs.KEY_ANALYSIS_DEFAULT, false)
+        binding.intentSettings.switchChatDefault.setOnCheckedChangeListener { _, value ->
+            if (!syncingSwitches) {
+                save(ModulePrefs.KEY_ANALYSIS_DEFAULT, value)
+                Toast.makeText(this,
+                    if (value) "所有聊天都会自动分析；微信加载新设置后生效" else "已关闭自动分析",
+                    Toast.LENGTH_SHORT).show()
             }
         }
         val factsSwitch = binding.switchRelationFacts
@@ -201,11 +177,6 @@ class MainActivity : AppCompatActivity() {
             binding.buttonDebug.text = if (open) "收起详细排查信息" else "查看详细排查信息"
             if (open) binding.textLog.text = Diagnostics.collect(this)
         }
-        binding.buttonProviderHelp.setOnClickListener {
-            val open = binding.providerHelpPanel.visibility != View.VISIBLE
-            binding.providerHelpPanel.visibility = if (open) View.VISIBLE else View.GONE
-            binding.buttonProviderHelp.text = if (open) "收起 Key 获取方法" else "没有 Key？查看获取方法"
-        }
         binding.buttonSetupGuide.setOnClickListener {
             val open = binding.setupGuidePanel.visibility != View.VISIBLE
             showSetupGuide(open)
@@ -223,8 +194,8 @@ class MainActivity : AppCompatActivity() {
             }.onSuccess { Toast.makeText(this, "已复制微信号 YIRC99", Toast.LENGTH_SHORT).show() }
                 .onFailure { Toast.makeText(this, "复制失败，请长按上方微信号手动复制", Toast.LENGTH_LONG).show() }
         }
-        binding.buttonTestModel.setOnClickListener { testModel() }
         updateNotice = UpdateNotice(this, binding, uiScope, ::openHelp)
+        refresh()
     }
 
     private fun save(key: String, value: Boolean) {
@@ -235,82 +206,11 @@ class MainActivity : AppCompatActivity() {
         refresh()
     }
 
-    private fun showProvider() {
-        bindingInputs = true
-        val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
-        val draft = drafts[selectedProvider] ?: ApiDraft(
-            prefs.getString("channel_${selectedProvider.id}_endpoint", selectedProvider.endpoint).orEmpty(),
-            prefs.getString("channel_${selectedProvider.id}_key", "").orEmpty(),
-            prefs.getString("channel_${selectedProvider.id}_model", selectedProvider.model).orEmpty())
-        val custom = selectedProvider == JevProvider.CUSTOM
-        binding.inputProvider.setText(selectedProvider.label, false)
-        binding.inputApiBase.setText(if (custom) draft.endpoint else selectedProvider.endpoint)
-        binding.inputApiModel.setText(if (custom) draft.model else selectedProvider.model)
-        binding.inputApiKey.setText(draft.key)
-        binding.layoutApiBase.isEnabled = custom
-        binding.layoutApiBase.visibility = if (custom) View.VISIBLE else View.GONE
-        binding.layoutApiBase.helperText = if (custom) "请填写完整 Jev 兼容接口地址，不会自动补路径。" else "已按渠道匹配，无需手动修改。"
-        binding.layoutApiModel.visibility = if (custom) View.VISIBLE else View.GONE
-        binding.textProviderGuide.text = selectedProvider.guide
-        binding.textProviderSummary.text = if (custom) "填写支持 Jev 协议的完整地址、模型名和 Key。" else
-            "${selectedProvider.label} 的地址和模型已匹配，只需填写对应 Key。"
-        binding.buttonGetKey.visibility = if (selectedProvider.keyUrl == null) View.GONE else View.VISIBLE
-        binding.layoutApiBase.error = null
-        binding.layoutApiKey.error = null
-        binding.layoutApiModel.error = null
-        binding.textTestResult.visibility = View.GONE
-        probeState = ProbeState.UNTESTED
-        bindingInputs = false
-        renderOverview()
-    }
-
     private fun openHelp(url: String) {
         try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)) }
         catch (_: android.content.ActivityNotFoundException) {
             Toast.makeText(this, "未找到浏览器，请先安装浏览器", Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun saveApiSettings(): Boolean {
-        binding.layoutApiBase.error = null
-        binding.layoutApiKey.error = null
-        binding.layoutApiModel.error = null
-        val endpoint = binding.inputApiBase.text?.toString().orEmpty()
-        val key = binding.inputApiKey.text?.toString().orEmpty()
-        val model = binding.inputApiModel.text?.toString().orEmpty()
-        try { ApiSettings.fromInput(endpoint, "", selectedProvider.id) } catch (e: IllegalArgumentException) {
-            binding.layoutApiBase.error = e.message
-            binding.inputApiBase.requestFocus()
-            return false
-        }
-        try { ApiSettings.fromInput(endpoint, "", selectedProvider.id, model) } catch (e: IllegalArgumentException) {
-            binding.layoutApiModel.error = e.message
-            binding.inputApiModel.requestFocus()
-            return false
-        }
-        val settings = try { ApiSettings.fromInput(endpoint, key, selectedProvider.id, model) } catch (e: IllegalArgumentException) {
-            binding.layoutApiKey.error = e.message
-            binding.inputApiKey.requestFocus()
-            return false
-        }
-        MoodLog.protect(settings.apiKey)
-        val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
-        val values = ApiProfiles.valuesToSave(settings) { prefs.getString(it, null) }
-        val saved = SettingsProvider.save(this) {
-            values.forEach { (name, value) -> putString(name, value) }
-        }
-        if (!saved) {
-            showResult("配置未保存\n请重试；若仍失败，可在「更多 → 遇到问题」中导出日志。", StatusTone.ERROR)
-            return false
-        }
-        bindingInputs = true
-        binding.inputApiBase.setText(settings.endpoint)
-        binding.inputApiModel.setText(settings.model)
-        bindingInputs = false
-        binding.textTestResult.visibility = View.GONE
-        ModulePrefs.reload(force = true)
-        refresh()
-        return true
     }
 
     override fun onResume() {
@@ -342,6 +242,8 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
         syncingSwitches = true
         binding.switchExplore.isChecked = prefs.getBoolean(ModulePrefs.KEY_EXPLORE, false)
+        binding.switchRelationFacts.isChecked = prefs.getBoolean(ModulePrefs.KEY_RELATION_FACTS, true)
+        binding.intentSettings.switchChatDefault.isChecked = prefs.getBoolean(ModulePrefs.KEY_ANALYSIS_DEFAULT, false)
         syncingSwitches = false
         val wechat = runCatching {
             @Suppress("DEPRECATION")
@@ -349,9 +251,10 @@ class MainActivity : AppCompatActivity() {
         }.getOrDefault("未检测到微信")
         val runtime = getSharedPreferences(SettingsProvider.RUNTIME_FILE, MODE_PRIVATE)
         val last = runtime.getLong("last_seen", 0)
-        val evidence = if (last == 0L) "尚未收到运行记录，可查看启用指南。" else
-            "最近记录（${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(last))}）：\n${runtime.getString("status", "")}"
-        binding.textFrameworkStatus.text = "$wechat\n$evidence\n运行记录不代表微信当前在线。"
+        val whenText = if (last <= 0) "还没有收到微信的运行记录，可查看启用指南。"
+        else "上次运行：" + formatLastRun(last)
+        val status = runtime.getString("status", "").orEmpty()
+        binding.textFrameworkStatus.text = listOf(wechat, whenText, status).filter { it.isNotBlank() }.joinToString("\n")
         val host = SetupPresenter.resolve(false, false, ProbeState.UNTESTED, last, System.currentTimeMillis())
         binding.textHostBadge.text = host.hostLabel
         tintStatus(binding.textHostBadge, host.hostTone)
@@ -359,146 +262,53 @@ class MainActivity : AppCompatActivity() {
         renderOverview()
     }
 
-    private fun testModel() {
-        if (probeState == ProbeState.CHECKING) return
-        // 只校验表单，不先落盘：检测失败不该覆盖原来能用的配置。
-        val testedSettings = try {
-            ApiSettings.fromInput(binding.inputApiBase.text?.toString().orEmpty(),
-                binding.inputApiKey.text?.toString().orEmpty(), selectedProvider.id,
-                binding.inputApiModel.text?.toString().orEmpty())
-        } catch (error: IllegalArgumentException) {
-            binding.layoutApiKey.error = error.message
-            binding.inputApiKey.requestFocus()
-            return
-        }
-        if (testedSettings.apiKey.isBlank()) {
-            binding.layoutApiKey.error = "请先填写 API Key"
-            binding.inputApiKey.requestFocus()
-            return
-        }
-        binding.buttonTestModel.isEnabled = false
-        binding.layoutProvider.isEnabled = false
-        binding.layoutApiBase.isEnabled = false
-        binding.layoutApiKey.isEnabled = false
-        binding.layoutApiModel.isEnabled = false
-        binding.buttonTestModel.text = "正在检测…"
-        probeState = ProbeState.CHECKING
-        binding.progressModel.visibility = View.VISIBLE
-        showResult("正在使用示例消息检测\n不会读取你的微信聊天，请稍等。", StatusTone.NEUTRAL)
-        renderOverview()
-        uiScope.launch {
-            try {
-                // Test this connector only, even if the user has an unsaved route change.
-                val sample = dev.jev.wechatmood.core.AnalysisInput("这还差不多。", "sample", listOf(
-                    dev.jev.wechatmood.core.ContextMessage("对方", "你是不是忘了周末吃饭的事？"),
-                    dev.jev.wechatmood.core.ContextMessage("我", "记得，这次我来安排，明天把餐厅和时间告诉你。")))
-                val client = JevHttpClient()
-                val mood = ChatAnalysis.analyzeSuspending(sample, testedSettings.model,
-                    { payload -> client.exchangeSuspending(payload, testedSettings) })
-                if (!sameJevSettings(testedSettings)) {
-                    return@launch
-                }
-                probeState = ProbeState.PASSED
-                // 只有检测通过才落盘，避免把刚好能用的旧配置换掉。
-                val saved = saveApiSettings()
-                if (saved) markProbePassed(testedSettings)
-                showResult(if (saved) "JEV 检测通过\n${mood.detail}\n\n配置已保存。仅验证 JEV 连接；微信模块状态见首页。"
-                else "检测通过，但保存配置失败，请重试。", if (saved) StatusTone.SUCCESS else StatusTone.WARNING)
-                MoodLog.i("模型连接检测成功")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (!sameJevSettings(testedSettings)) {
-                    return@launch
-                }
-                probeState = ProbeState.FAILED
-                showResult("检测失败\n${e.message}\n\n修正配置或检查网络后，点击「重试连接检测」。", StatusTone.ERROR)
-                MoodLog.e("模型连接检测失败：${e.message}")
-            } finally {
-                if (!sameJevSettings(testedSettings)) {
-                    probeState = ProbeState.UNTESTED
-                    showResult("配置已变化，请重新检测。", StatusTone.WARNING)
-                }
-                binding.buttonTestModel.isEnabled = true
-                binding.layoutProvider.isEnabled = true
-                binding.layoutApiBase.isEnabled = selectedProvider == JevProvider.CUSTOM
-                binding.layoutApiKey.isEnabled = true
-                binding.layoutApiModel.isEnabled = true
-                binding.buttonTestModel.text = if (probeState == ProbeState.FAILED) "重试连接检测" else "重新检测 JEV"
-                binding.progressModel.visibility = View.GONE
-                refresh()
-            }
-        }
-    }
-
-    private fun probeFingerprint(settings: ApiSettings): String =
-        listOf(settings.provider.id, settings.endpoint, settings.model,
-            settings.apiKey.hashCode().toString()).joinToString("|")
-
-    /** 记住「这套配置检测通过过」，重开 App 不再退回待检测。 */
-    private fun markProbePassed(settings: ApiSettings) {
-        getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE).edit()
-            .putString("probe_passed_for", probeFingerprint(settings))
-            .putLong("probe_passed_at", System.currentTimeMillis())
-            .apply()
-    }
-
-    private fun restoreProbeState() {
-        val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
-        val saved = prefs.getString("probe_passed_for", null) ?: return
-        val current = runCatching {
-            ApiSettings.fromInput(prefs.getString(ModulePrefs.KEY_API_BASE, ApiSettings.DEFAULT_ENDPOINT).orEmpty(),
-                prefs.getString(ModulePrefs.KEY_API_KEY, "").orEmpty(),
-                prefs.getString(ModulePrefs.KEY_API_PROVIDER, null),
-                prefs.getString(ModulePrefs.KEY_API_MODEL, "").orEmpty())
-        }.getOrNull() ?: return
-        if (saved == probeFingerprint(current)) probeState = ProbeState.PASSED
-    }
-
-    private fun sameJevSettings(tested: ApiSettings): Boolean {
-        // 检测时配置可能还没落盘，按当前表单比较。
-        val current = runCatching {
-            ApiSettings.fromInput(binding.inputApiBase.text?.toString().orEmpty(),
-                binding.inputApiKey.text?.toString().orEmpty(), selectedProvider.id,
-                binding.inputApiModel.text?.toString().orEmpty())
-        }.getOrNull() ?: return false
-        return current.endpoint == tested.endpoint && current.apiKey == tested.apiKey &&
-            current.model == tested.model && current.provider == tested.provider
-    }
-
-    private fun draftDirty(): Boolean {
-        val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
-        val draft = runCatching { ApiSettings.fromInput(binding.inputApiBase.text.toString(),
-            binding.inputApiKey.text.toString(), selectedProvider.id, binding.inputApiModel.text.toString()) }.getOrNull() ?: return true
-        val saved = runCatching { ApiSettings.fromInput(prefs.getString(ModulePrefs.KEY_API_BASE, ApiSettings.DEFAULT_ENDPOINT).orEmpty(),
-            prefs.getString(ModulePrefs.KEY_API_KEY, "").orEmpty(), prefs.getString(ModulePrefs.KEY_API_PROVIDER, null),
-            prefs.getString(ModulePrefs.KEY_API_MODEL, "").orEmpty()) }.getOrNull() ?: return true
-        return draft.endpoint != saved.endpoint || draft.apiKey != saved.apiKey || draft.model != saved.model || draft.provider != saved.provider
+    /** 两件事：分析连接有没有、回复连接有没有。首页和各自页面都只显示这一句。 */
+    private fun formatLastRun(last: Long): String {
+        val now = java.util.Calendar.getInstance()
+        val then = java.util.Calendar.getInstance().apply { timeInMillis = last }
+        val hm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(last))
+        fun sameDay(a: java.util.Calendar, b: java.util.Calendar) =
+            a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR) &&
+                a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR)
+        if (sameDay(then, now)) return "今天 $hm"
+        val yesterday = (now.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_YEAR, -1) }
+        if (sameDay(then, yesterday)) return "昨天 $hm"
+        return java.text.SimpleDateFormat("M月d日 HH:mm", java.util.Locale.getDefault()).format(java.util.Date(last))
     }
 
     private fun renderOverview() {
         val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
-        val dirty = draftDirty()
-        val hasKey = !prefs.getString(ModulePrefs.KEY_API_KEY, "").isNullOrBlank()
-        val state = SetupPresenter.resolve(hasKey, dirty, probeState, 0, System.currentTimeMillis())
-        binding.textModelStatus.text = "JEV · ${state.modelLabel}"
-        tintStatus(binding.textModelStatus, state.modelTone)
-        if (probeState == ProbeState.CHECKING) SettingsStatus.show(binding.textModelStatus, "JEV · 正在检测", R.color.status_info)
-        SettingsStatus.show(binding.buttonTestModel, "", when (probeState) {
-            ProbeState.PASSED -> R.color.status_success
-            ProbeState.FAILED -> R.color.status_error
-            ProbeState.CHECKING -> R.color.status_info
-            ProbeState.UNTESTED -> R.color.status_neutral
-        })
-        val reply = ModulePrefs.replySettings()
-        SettingsStatus.show(binding.replySummary, if (reply.isConfigured) "当前模型：" + reply.model else "先连接回复模型", if (reply.isConfigured) R.color.status_neutral else R.color.status_warning)
-        binding.usageSummary.text = dev.jev.wechatmood.core.UsageMeter.summary(this)
-        binding.buttonTestModel.text = when (probeState) {
-            ProbeState.CHECKING -> "正在检测…"
-            ProbeState.FAILED -> "连接失败 · 点击重试"
-            ProbeState.PASSED -> "连接成功 · 重新检测"
-            ProbeState.UNTESTED -> "保存并检测 JEV"
+        val replyKey = prefs.getString(ReplySettings.KEY_API_KEY, "").orEmpty()
+        val replyModel = prefs.getString(ReplySettings.KEY_MODEL, "").orEmpty()
+        val replyReady = replyKey.isNotBlank()
+        SettingsStatus.show(binding.replySummary,
+            if (replyReady) "当前模型：$replyModel" else "还没有配置回复连接",
+            if (replyReady) R.color.status_neutral else R.color.status_warning)
+
+        val source = prefs.getString(EmotionSettings.KEY_SOURCE, null)
+        val reuse = prefs.getString(EmotionSettings.KEY_REUSE_REPLY, null) == "true"
+        val jevReady = !prefs.getString(ModulePrefs.KEY_API_KEY, "").isNullOrBlank()
+        val intentReady = !prefs.getString(IntentSettings.KEY_API_KEY, "").isNullOrBlank()
+        val analysisLabel = when {
+            source == null || source == "jev" -> if (jevReady) "JEV 官方" else ""
+            reuse -> if (replyReady && replyModel.isNotBlank()) "与回复相同（$replyModel）" else ""
+            else -> if (intentReady) prefs.getString(IntentSettings.KEY_MODEL, "").orEmpty().ifBlank { "已配置" } else ""
         }
+        val analysisReady = analysisLabel.isNotBlank()
+        SettingsStatus.show(binding.intentSettings.connectionSummary,
+            if (analysisReady) "已配置：$analysisLabel" else "还没有配置，回首页点「分析连接」。",
+            if (analysisReady) R.color.status_neutral else R.color.status_warning)
+        SettingsStatus.show(binding.textAnalysisConnection,
+            "分析连接：${if (analysisReady) analysisLabel else "未配置"}",
+            if (analysisReady) R.color.status_success else R.color.status_warning)
+        SettingsStatus.show(binding.textReplyConnection,
+            "回复连接：${if (replyReady && replyModel.isNotBlank()) replyModel else "未配置"}",
+            if (replyReady) R.color.status_success else R.color.status_warning)
+        binding.connectionSettings.analysisFormSummary.text =
+            if (analysisReady) "$analysisLabel · 已保存" else "未配置"
+        binding.replySettings.replyFormSummary.text =
+            if (replyReady && replyModel.isNotBlank()) "$replyModel · 已保存" else "未配置"
+        binding.usageSummary.text = UsageMeter.summary(this)
     }
 
     private fun showPage(id: Int) {
@@ -508,8 +318,8 @@ class MainActivity : AppCompatActivity() {
             .hideSoftInputFromWindow(binding.root.windowToken, 0)
         currentPage = id
         backToHome.isEnabled = id != R.id.tabHome
-        if (id == R.id.tabEmotion) intentSettingsUi?.onShown()
         if (id == R.id.tabReply) roleManagerUi?.onShown()
+        if (id == R.id.modelsPanel) connectionUi?.onShown()
         binding.homePanel.visibility = if (id == R.id.tabHome) View.VISIBLE else View.GONE
         binding.emotionPanel.visibility = if (id == R.id.tabEmotion) View.VISIBLE else View.GONE
         binding.replyPanel.visibility = if (id == R.id.tabReply) View.VISIBLE else View.GONE
@@ -517,7 +327,6 @@ class MainActivity : AppCompatActivity() {
         binding.navigation.visibility = if (id == R.id.modelsPanel) View.GONE else View.VISIBLE
         binding.toolbar.navigationIcon = if (id == R.id.modelsPanel) androidx.core.content.ContextCompat.getDrawable(this, R.drawable.ic_back) else null
         binding.toolbar.navigationContentDescription = "返回上一页"
-        if (id == R.id.modelsPanel) intentSettingsUi?.onShown()
         binding.aboutPanel.visibility = if (id == R.id.tabAbout) View.VISIBLE else View.GONE
         binding.pageScroll.post { if (currentPage == id) binding.pageScroll.scrollTo(0, pagePositions[id] ?: 0) }
     }
@@ -555,12 +364,6 @@ class MainActivity : AppCompatActivity() {
         SettingsStatus.show(view, view.text.toString(), color)
     }
 
-    private fun showResult(message: String, tone: StatusTone) {
-        binding.textTestResult.text = message
-        binding.textTestResult.visibility = View.VISIBLE
-        tintStatus(binding.textTestResult, tone)
-    }
-
     private fun scrollTo(view: View) {
         binding.pageScroll.post {
             val content = binding.pageScroll.getChildAt(0) as android.view.ViewGroup
@@ -571,23 +374,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun openModels(tab: Int) {
-        if (currentPage != R.id.modelsPanel) modelsReturnPage = currentPage
-        showModelTab(tab)
-        pagePositions[R.id.modelsPanel] = 0
-        showPage(R.id.modelsPanel)
+    private fun toggleForm(form: View, button: TextView) {
+        val open = form.visibility != View.VISIBLE
+        form.visibility = if (open) View.VISIBLE else View.GONE
+        button.text = if (open) "收起" else "修改"
     }
 
-    private fun showModelTab(id: Int) {
-        val tab = id.takeIf { it in listOf(R.id.modelJev, R.id.modelAnalysis, R.id.modelReply) } ?: R.id.modelJev
-        if (binding.modelTabs.checkedButtonId != tab) binding.modelTabs.check(tab)
-        binding.jevModelPage.visibility = if (tab == R.id.modelJev) View.VISIBLE else View.GONE
-        binding.analysisModelSettings.root.visibility = if (tab == R.id.modelAnalysis) View.VISIBLE else View.GONE
-        binding.replySettings.root.visibility = if (tab == R.id.modelReply) View.VISIBLE else View.GONE
-        currentFocus?.clearFocus()
-        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
-            .hideSoftInputFromWindow(binding.root.windowToken, 0)
-        binding.pageScroll.post { if (currentPage == R.id.modelsPanel) binding.pageScroll.scrollTo(0, 0) }
+    private fun openModels() {
+        if (currentPage != R.id.modelsPanel) modelsReturnPage = currentPage
+        pagePositions[R.id.modelsPanel] = 0
+        showPage(R.id.modelsPanel)
     }
 
     private fun showSetupGuide(open: Boolean) {
@@ -609,12 +405,6 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt("selected_tab", binding.navigation.selectedItemId)
         outState.putBoolean("models_open", currentPage == R.id.modelsPanel)
-        outState.putInt("model_tab", binding.modelTabs.checkedButtonId)
-        // 旋转/分屏时把没保存的 Key 草稿带过去，别让用户重贴。
-        outState.putString("draft_provider", selectedProvider.id)
-        outState.putString("draft_endpoint", binding.inputApiBase.text?.toString().orEmpty())
-        outState.putString("draft_key", binding.inputApiKey.text?.toString().orEmpty())
-        outState.putString("draft_model", binding.inputApiModel.text?.toString().orEmpty())
         super.onSaveInstanceState(outState)
     }
     override fun onDestroy() { uiScope.cancel(); super.onDestroy() }

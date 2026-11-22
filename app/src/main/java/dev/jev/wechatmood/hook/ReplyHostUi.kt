@@ -31,13 +31,13 @@ import dev.jev.wechatmood.reply.*
 import kotlinx.coroutines.*
 
 /** Native widgets only: module resource IDs are not valid inside the host's resource table. */
-class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> View,
+class ReplyHostUi(private val activity: Activity,
     private val openPanel: () -> Unit = {}) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val session = ReplySession()
     private val history = ReplyHistory.process
     // 横条只留「附加」一个入口：分析开关、统计、档案、待办都在同一个面板里。
-    private val plusEntry = ReplyPlusRow(activity, createAnalysisControl) { openPanel(); true }
+    private val plusEntry = ReplyPlusRow(activity) { openPanel(); true }
     private var job: Job? = null
     private var historyJob: Job? = null
     private var openingJob: Job? = null

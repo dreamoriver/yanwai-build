@@ -9,7 +9,7 @@ import android.widget.LinearLayout
 import dev.jev.wechatmood.core.MoodLog
 
 /** Restores the in-panel mounting from 1a8f1f1; original tiles/listeners are retained. */
-internal class ReplyPlusRow(private val activity: Activity, private val createAnalysisControl: () -> View, private val open: () -> Boolean) {
+internal class ReplyPlusRow(private val activity: Activity, private val open: () -> Boolean) {
     private var panel: ViewGroup? = null
     private var wrapper: LinearLayout? = null
     private var original: View? = null

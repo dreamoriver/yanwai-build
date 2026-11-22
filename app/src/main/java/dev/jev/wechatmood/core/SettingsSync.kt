@@ -52,6 +52,7 @@ object SettingsSync {
             bundle.getBoolean(dev.jev.wechatmood.reply.ReplySettings.KEY_CONSENT, false),
             IntentSettings.load { bundle.getString(it) },
             CardDisplaySettings.load { bundle.getBoolean(it, true) }, emotion,
-            bundle.getLong(ReplyIdentityProvider.KEY_ROLE_REVISION, 0))
+            bundle.getLong(ReplyIdentityProvider.KEY_ROLE_REVISION, 0),
+            bundle.getBoolean(ModulePrefs.KEY_ANALYSIS_DEFAULT, false))
     }.getOrNull()
 }

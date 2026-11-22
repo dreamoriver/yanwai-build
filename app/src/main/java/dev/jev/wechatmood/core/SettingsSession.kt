@@ -7,7 +7,8 @@ class RuntimeSettings(val revision: Long,
     val replyConsent: Boolean = false, // Legacy wire field; manual generation no longer depends on it.
     val intent: IntentSettings = IntentSettings(),
     val cardDisplay: CardDisplaySettings = CardDisplaySettings(),
-    val emotion: EmotionSettings = EmotionSettings(), val rolesRevision: Long = 0) {
+    val emotion: EmotionSettings = EmotionSettings(), val rolesRevision: Long = 0,
+    val analysisDefault: Boolean = false) {
     val emotionLlm get() = if (emotion.reuseReply) reply else intent.llm
     val canGenerateReply get() = reply.isConfigured
     val canAnalyze get() = if (emotion.source == EmotionSource.LLM) emotionLlm.isConfigured else api.isConfigured

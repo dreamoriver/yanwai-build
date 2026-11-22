@@ -450,17 +450,6 @@ object MessageSniffer {
         }.getOrNull()
     }
 
-    // Re-read the visible conversation at tap time, including during rapid chat navigation.
-    fun setChatEnabled(talker: String?, enabled: Boolean): Boolean = runCatching {
-        if (talker == null) return@runCatching false
-        val activity = active.get() ?: return@runCatching false
-        val scope = chatNodes(activity.window.decorView)
-        if (scope.isEmpty() || conversation(activity, scope, records(scope)) != talker) return@runCatching false
-        val saved = ModulePrefs.setChatEnabled(talker, enabled)
-        if (saved && !enabled) SignalAnalyzer.cancelConversation(talker)
-        saved
-    }.onFailure { MoodLog.e("CHAT_SWITCH_FAILED 无法确认当前会话", it) }.getOrDefault(false)
-
     private fun chatNodes(root: View): List<View> {
         val footer = nodes(root).filter {
             it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter" && isVisible(it)

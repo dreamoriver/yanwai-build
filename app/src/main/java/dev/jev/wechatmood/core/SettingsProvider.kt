@@ -120,6 +120,7 @@ class SettingsProvider : ContentProvider() {
                 putLong(KEY_REVISION, prefs.getLong(KEY_REVISION, 0L))
                 putLong(ReplyIdentityProvider.KEY_ROLE_REVISION, ReplyIdentityProvider.rolesRevision(context))
                 putBoolean(ModulePrefs.KEY_EXPLORE, prefs.getBoolean(ModulePrefs.KEY_EXPLORE, false))
+                putBoolean(ModulePrefs.KEY_ANALYSIS_DEFAULT, prefs.getBoolean(ModulePrefs.KEY_ANALYSIS_DEFAULT, false))
                 CardDisplaySettings.KEYS.forEach { putBoolean(it, prefs.getBoolean(it, true)) }
                 putString(ModulePrefs.KEY_API_BASE, prefs.getString(ModulePrefs.KEY_API_BASE, ApiSettings.DEFAULT_ENDPOINT))
                 putString(ModulePrefs.KEY_API_KEY, prefs.getString(ModulePrefs.KEY_API_KEY, ""))

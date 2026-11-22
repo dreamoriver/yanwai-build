@@ -37,7 +37,7 @@ object Diagnostics {
     fun collect(context: Context): String = MoodLog.sanitize(buildString {
         appendLine("言外运行诊断 ${Date()}")
         appendLine(environment(context))
-        appendLine("verifiedSettings=${ModulePrefs.bridgeAvailable} analysisControl=per_conversation_local")
+        appendLine("verifiedSettings=${ModulePrefs.bridgeAvailable} analysisControl=global")
         ModulePrefs.analysisSettings()?.let {
             appendLine("emotionSource=${it.emotion.source.label} analysisConfigured=${it.canAnalyze}")
             if (it.emotion.source == EmotionSource.LLM) {

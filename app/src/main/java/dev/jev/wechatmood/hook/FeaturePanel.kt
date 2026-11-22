@@ -30,15 +30,12 @@ internal class FeaturePanel(
     private val talker: String?,
     private val replyAvailable: Boolean,
     private val factsAvailable: Boolean,
-    private val analysisEnabled: Boolean,
     private val onReply: () -> Unit,
     private val onStats: () -> Unit,
     private val onFacts: () -> Unit,
     private val onTodos: () -> Unit,
     private val onDigests: () -> Unit,
     private val onTemperature: () -> Unit,
-    /** 返回是否真的保存成功；false 时开关会拨回原位。 */
-    private val onAnalysisChanged: (Boolean) -> Boolean,
 ) {
     private val kit = PanelKit(activity)
     private val theme = kit.theme
@@ -137,33 +134,6 @@ internal class FeaturePanel(
         body.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)).apply {
             topMargin = theme.dp(14)
         })
-        var syncing = false
-        val switch = Switch(activity).apply {
-            isChecked = analysisEnabled
-            text = "自动分析"
-            textSize = ReplyMetrics.TEXT_BODY
-            setTextColor(theme.ink)
-            // 没识别到聊天时没有「这个会话」可存，开关不该能拨。
-            isEnabled = talker != null
-            minimumHeight = theme.dp(ReplyMetrics.TAP)
-            setPadding(0, theme.dp(10), 0, theme.dp(4))
-            setOnCheckedChangeListener { button, value ->
-                if (syncing) return@setOnCheckedChangeListener
-                if (!onAnalysisChanged(value)) {
-                    // 保存失败就把开关拨回去，别让人以为已经关了。
-                    syncing = true
-                    button.isChecked = !value
-                    syncing = false
-                    Toast.makeText(activity, "开关没保存，重新进一次聊天再试", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-        body.addView(switch, LinearLayout.LayoutParams(-1, -2))
-        body.addView(kit.caption(
-            if (talker == null) "没识别到当前聊天，开关先不可用"
-            else "开启后，收到的文字与语音会在气泡下方显示情绪与解读"
-        ))
-
         dialog.setContentView(body)
         dialog.window?.apply {
             setBackgroundDrawableResource(android.R.color.transparent)

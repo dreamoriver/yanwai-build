@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+    <com.google.android.material.card.MaterialCardView style="@style/Yanwai.SettingsCard">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView style="@style/Yanwai.Section" android:layout_width="0dp" android:layout_weight="1" android:layout_marginTop="0dp" android:text="分析连接" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/toggleAnalysisForm" style="@style/Yanwai.Button.Text" android:layout_width="wrap_content" android:text="修改" />
+            </LinearLayout>
+            <TextView android:id="@+id/analysisFormSummary" style="@style/Yanwai.Caption" android:accessibilityLiveRegion="polite" />
+            <LinearLayout android:id="@+id/analysisForm" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+                <TextView android:id="@+id/connectionStatus" style="@style/Yanwai.Badge" android:layout_marginTop="8dp" android:visibility="gone" android:accessibilityLiveRegion="polite" />
+                <com.google.android.material.textfield.TextInputLayout android:id="@+id/channelLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="渠道">
+                    <com.google.android.material.textfield.MaterialAutoCompleteTextView android:id="@+id/analysisChannel" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:inputType="none" android:importantForAutofill="no" android:saveEnabled="false" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <TextView android:id="@+id/channelHint" style="@style/Yanwai.Caption" android:layout_marginTop="6dp" android:maxLines="2" android:ellipsize="end" />
+                <com.google.android.material.textfield.TextInputLayout android:id="@+id/keyLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:hint="API Key" app:endIconMode="password_toggle" app:helperText="仅保存在本机。">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/apiKey" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:inputType="textPassword" android:singleLine="true" android:importantForAutofill="no" android:saveEnabled="false" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputLayout android:id="@+id/endpointLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:hint="API 地址" android:visibility="gone">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/endpoint" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:inputType="textUri" android:maxLines="3" android:importantForAutofill="no" android:saveEnabled="false" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputLayout android:id="@+id/modelLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:hint="模型 ID" android:visibility="gone">
+                    <com.google.android.material.textfield.MaterialAutoCompleteTextView android:id="@+id/model" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:inputType="textVisiblePassword" android:completionThreshold="0" android:singleLine="true" android:importantForAutofill="no" android:saveEnabled="false" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.button.MaterialButton android:id="@+id/fetchModels" style="@style/Yanwai.Button.Text" android:layout_width="wrap_content" android:layout_gravity="start" android:text="获取模型列表" android:visibility="gone" />
+                <TextView android:id="@+id/modelsStatus" style="@style/Yanwai.Caption" android:accessibilityLiveRegion="polite" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/providerConsole" style="@style/Yanwai.Button.Text" android:layout_width="wrap_content" android:layout_gravity="start" android:text="去官方平台获取 Key ↗" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/testConnection" style="@style/Yanwai.Button" android:layout_marginTop="12dp" android:text="保存并检测分析连接" />
+                <TextView style="@style/Yanwai.Caption" android:text="检测只用示例聊天，不读取微信消息，可能产生少量费用。" />
+                <com.google.android.material.progressindicator.LinearProgressIndicator android:id="@+id/progressConnection" android:layout_width="match_parent" android:layout_height="4dp" android:indeterminate="true" android:visibility="gone" android:contentDescription="正在检测分析连接" />
+                <TextView android:id="@+id/connectionResult" style="@style/Yanwai.Body" android:layout_marginTop="8dp" android:padding="16dp" android:background="@drawable/status_pill" android:visibility="gone" android:accessibilityLiveRegion="polite" android:textIsSelectable="true" />
+            </LinearLayout>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+</LinearLayout>
