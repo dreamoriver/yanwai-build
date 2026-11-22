@@ -19,6 +19,10 @@ object ForwardDigest {
     private const val DATATYPE_CHAT_RECORD = 17
     /** 展开深度上限；测试要构造超深嵌套，所以不设成 private。 */
     internal const val MAX_DEPTH = 6
+    /** 「昵称: 内容」里昵称的长度上限；超过这个长度就当正文里自带冒号，不拆。 */
+    private const val MAX_SENDER = 12
+    /** 长得像人名但不是人名的前缀，拆出来只会把正文读成「某某说」。 */
+    private val NOT_NAMES = setOf("我说", "你说", "他说", "她说", "我说过", "回复", "备注")
     /** 纯拟声和感叹，删掉不影响“这事有没有结果”。 */
     private const val CHATTER_CHARS = "哈呵嘿嘻哦喔噢啊呀哇诶欸唉嗷呜吧呢啦咯嘛嘞噗"
     /** 应答词的口语后缀：「好的」「行吧」「收到啦」都要认出来。 */
@@ -37,7 +41,9 @@ object ForwardDigest {
 
     data class Item(val type: Int, val sender: String, val text: String, val time: String, val nested: Boolean = false)
     data class Message(val title: String, val chatroom: Boolean, val items: List<Item>, val omitted: Int, val nested: Int,
-        val truncatedRaw: Boolean = false) {
+        val truncatedRaw: Boolean = false, val rawCount: Int = 0) {
+        /** 界面上的「共 N 条」用解析到的原始条数：items 是压缩后的段落，直接显示会比微信里看到的少。 */
+        val count: Int get() = if (rawCount > 0) rawCount else items.size
         /** 给模型的纯文本：不带 XML、不带未展开的条数。 */
         fun transcript(): String = buildString {
             if (title.isNotBlank()) append("聊天记录：").append(title).append('\n')
@@ -68,12 +74,33 @@ object ForwardDigest {
         // 结构解析之外再兜底扫一遍所有 datadesc：四层嵌套时按 dataitem 配对容易漏，
         // 漏掉的内容不该因为层级对不上就消失；但补扫和结构解析共用同一份预算，
         // 否则超过总字数或深度限制的内容会从这条通路重新加回来。
-        val merged = compress(supplement(body, items, budget))
+        val supplemented = supplement(body, items, budget)
+        // 纯语气和同人连发会在 compress 里被并掉或丢掉，这部分以前不计入 omitted，
+        // 于是「只解析出几条」看起来像丢消息。把压缩前的条数和被当成语气词的条数一起记下来。
+        val chatter = supplemented.count { it.text.isChatter() || it.text.isFiller() }
+        val merged = compress(supplemented)
         dev.jev.wechatmood.core.MoodLog.i(
-            "FORWARD_DIGEST parsed=${items.size} merged=${merged.size} nested=$nested omitted=$omitted " +
-                "raw=${safe.length} truncated=$truncatedRaw")
+            "FORWARD_DIGEST parsed=${items.size} supplemented=${supplemented.size} chatter=$chatter " +
+                "merged=${merged.size} nested=$nested omitted=$omitted raw=${safe.length} truncated=$truncatedRaw")
+        // 只记结构计数，不记正文：用来区分「XML 里本来就只有这几条」和「结构没认出来」。
+        val pairs = dataItems(body)
+        val types = pairs.map { (attributes, _) ->
+            Regex("""datatype\s*=\s*"(\d+)""").find(attributes)?.groupValues?.get(1) ?: "?"
+        }.groupingBy { it }.eachCount()
+        val descs = DESC.findAll(body).map { it.groupValues[1] }.toList()
+        // 只有 datadesc 没有 dataitem 的转发拿不到发送人：看这些行是否自带「昵称: 」前缀，
+        // 决定下一版能不能把名字补回去。只记计数，不记内容。
+        val named = descs.count { value ->
+            val head = if (value.contains('：')) value.substringBefore('：') else value.substringBefore(':')
+            head.isNotEmpty() && head.length <= 20 && !head.contains('\n')
+        }
+        dev.jev.wechatmood.core.MoodLog.i(
+            "FORWARD_DIGEST_SHAPE dataitem=${pairs.size} types=$types " +
+                "desc=${descs.size} nameLike=$named " +
+                "recordinfo=${Regex("<recordinfo").findAll(body).count()} " +
+                "recordxml=${Regex("<recordxml").findAll(body).count()} body=${body.length}")
         return Message(tag(body, "title").decode().cleanNoise().stripFiller(), tag(body, "isChatRoom") == "1",
-            merged, omitted, nested, truncatedRaw)
+            merged, omitted, nested, truncatedRaw, rawCount = supplemented.size)
     }
 
     private fun collect(
@@ -209,7 +236,10 @@ object ForwardDigest {
         for (item in items) {
             if (item.text.isBlank() || item.text.isFiller() || item.text.isChatter()) continue
             val last = out.lastOrNull()
-            val sameSender = last != null && (item.sender.isBlank() || last.sender.isBlank() || last.sender == item.sender)
+            // 只合并同一个人的连续发言。全局补扫出来的条目没有发送人，以前空 sender 被当成「同一个人」，
+            // 于是几十条挤成几段：看不出谁说的，时间和条数也一起丢了。
+            val sameSender = last != null && item.sender.isNotBlank() &&
+                last.sender.isNotBlank() && last.sender == item.sender
             if (last != null && sameSender && last.text.length + item.text.length < MAX_ITEM_CHARS) {
                 out[out.lastIndex] = last.copy(text = last.text + "；" + item.text)
             } else {
@@ -274,15 +304,36 @@ object ForwardDigest {
                 }
             }
             if (depth > MAX_DEPTH) continue
-            val text = match.groupValues[1].decode().cleanNoise().trimFillerPrefix().stripFiller().take(MAX_ITEM_CHARS)
+            val raw = match.groupValues[1].decode().cleanNoise()
+            // 没有 <dataitem> 的转发拿不到 sourcename，但 datadesc 常常自带「昵称: 内容」：
+            // 拆出来，摘要里才看得出是谁说的，同一个人的连续发言也才能合并。
+            val (sender, body) = splitSpeaker(raw)
+            val text = body.trimFillerPrefix().stripFiller().take(MAX_ITEM_CHARS)
             // 占位符（[聊天记录]、[图片]）不补，否则数量会虚增。
             if (text.isBlank() || text.isFiller() || text.matches(PLACEHOLDER) || !seen.add(text)) continue
             if (text.length > remaining) break
-            extra += Item(0, "", text, "", nested = true)
+            extra += Item(0, sender, text, "", nested = true)
             room--
             remaining -= text.length
         }
         return if (extra.isEmpty()) parsed else parsed + extra
+    }
+
+    /**
+     * 从「昵称: 内容」里拆出昵称。
+     *
+     * 只认短、且不含换行和常见标点的前缀：正文里本来就有冒号的情况（「我说：算了」）
+     * 会把半句话当成人名，宁可保留原样也不拆错。
+     */
+    internal fun splitSpeaker(value: String): Pair<String, String> {
+        val cut = value.indexOfFirst { it == '：' || it == ':' }
+        if (cut <= 0 || cut > MAX_SENDER) return "" to value
+        val head = value.substring(0, cut).trim()
+        if (head.isEmpty() || head.length > MAX_SENDER || head in NOT_NAMES) return "" to value
+        if (head.any { it == '\n' || it == '\r' || it in "，。！？、；\"“”" }) return "" to value
+        val body = value.substring(cut + 1).trim()
+        if (body.isEmpty()) return "" to value
+        return head to body
     }
 
     /** 去掉不可打印字符与零宽填充，避免整屏噪声进摘要。 */

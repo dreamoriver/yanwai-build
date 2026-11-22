@@ -14,10 +14,13 @@ import android.widget.TextView
 import android.widget.Toast
 import dev.jev.wechatmood.core.HttpClients
 import dev.jev.wechatmood.core.ModulePrefs
+import dev.jev.wechatmood.core.RelationFactBridge
 import dev.jev.wechatmood.core.TextClean
 import dev.jev.wechatmood.reply.GroupStats
+import dev.jev.wechatmood.reply.DigestArchive
 import dev.jev.wechatmood.reply.GroupStatsCalculator
 import dev.jev.wechatmood.reply.GroupTranscript
+import dev.jev.wechatmood.reply.ReplyContactKey
 import dev.jev.wechatmood.reply.ReplyContext
 import dev.jev.wechatmood.reply.ReplyHttpClient
 import dev.jev.wechatmood.reply.StatRecord
@@ -292,6 +295,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                     dev.jev.wechatmood.core.MoodLog.i("STATS_AI_DISCARD epoch=" + epoch)
                     return@launch
                 }
+                // 先落盘再摆上：结论只存本机，翻历史纪要时不用再花一次模型钱。
+                archive(analysis, requestPool, requestRange)
                 renderAnalysis(analysis)
             }
         }
@@ -657,6 +662,29 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     """.trimIndent()
 
     /** 一次请求拿到一段转述，顺带回报用了多少素材。 */
+    /**
+     * 把这次的转述留下来。
+     *
+     * 只存模型写出的结论，不存聊天素材；同一时段重复分析由 [DigestArchive] 的派生 id 去重。
+     * 落盘失败不影响这次分析照常显示，只记日志。
+     */
+    private suspend fun archive(analysis: Analysis, pool: List<dev.jev.wechatmood.reply.ReplyMessage>,
+        range: StatsFilter.Range) {
+        val key = ReplyContactKey.of(accountScope, context.talker, allowGroup = true) ?: run {
+            dev.jev.wechatmood.core.MoodLog.i("DIGEST_ARCHIVE_SKIP key")
+            return
+        }
+        // 库里是毫秒、页面消息常是秒：不归一化会让同一结论派生两个 id，去重失效。
+        val digest = DigestArchive.build(windowLabel(range), normalizedMillis(pool.firstOrNull()?.time ?: 0),
+            normalizedMillis(pool.lastOrNull()?.time ?: 0), analysis.material, analysis.total, analysis.text) ?: run {
+            dev.jev.wechatmood.core.MoodLog.i("DIGEST_ARCHIVE_SKIP empty")
+            return
+        }
+        withContext(Dispatchers.IO) { RelationFactBridge.saveDigest(activity, key, digest) }
+        dev.jev.wechatmood.core.MoodLog.i("DIGEST_ARCHIVE_SAVED id=" + digest.id +
+            " label=" + digest.rangeLabel + " material=" + digest.material + " total=" + digest.total)
+    }
+
     private suspend fun analyzeAll(context: ReplyContext,
         pool: List<dev.jev.wechatmood.reply.ReplyMessage>, range: StatsFilter.Range, limit: Int,
         shownNames: Map<String, String>, statsSnapshot: GroupStats): Analysis {

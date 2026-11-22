@@ -190,6 +190,38 @@ object ReplyDatabaseHistory {
         out.reversed()
     }
 
+    /**
+     * 每个会话最后一条消息的时间，用于「谁很久没联系」。
+     *
+     * 只查档案目录里已经记下的 talker，不做全表 GROUP BY：老用户的 message 表百万行，
+     * 全表聚合会卡住聊天。结果统一归一化成毫秒，查不到的不出现在返回值里。
+     */
+    suspend fun lastMessageTimes(talkers: List<String>, accountScope: String? = null): Map<String, Long> =
+        withContext(Dispatchers.IO) {
+            val wanted = talkers.filter { it.isNotBlank() }.distinct().take(200)
+            if (wanted.isEmpty()) return@withContext emptyMap()
+            val out = HashMap<String, Long>()
+            val databases = databasesForScope(
+                synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+            val placeholders = wanted.joinToString(",") { "?" }
+            for (db in databases) {
+                runCatching {
+                    query(db, "SELECT talker, MAX(createTime) FROM message WHERE talker IN ($placeholders) " +
+                        "GROUP BY talker", wanted.toTypedArray()).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            val talker = cursor.getString(0) ?: continue
+                            val raw = cursor.getLong(1)
+                            val ms = if (raw > 1_000_000_000_000L) raw else raw * 1000
+                            if (ms > 0 && ms > (out[talker] ?: 0L)) out[talker] = ms
+                        }
+                    }
+                }
+            }
+            dev.jev.wechatmood.core.MoodLog.i(
+                "RELATION_TEMP_LAST asked=" + wanted.size + " found=" + out.size)
+            out
+        }
+
     /** 档案条目回指依据：按 localId 取一条消息，只读，不改游标以外的任何状态。 */
     suspend fun messageById(talker: String, msgId: Long,
         accountScope: String? = null): MessageMetadata? = withContext(Dispatchers.IO) {

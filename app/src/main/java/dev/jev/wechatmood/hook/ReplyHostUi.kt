@@ -449,6 +449,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             visibility = View.GONE
         }
         val draftIssues = theme.label("", 13f, theme.ink)
+        // 同一句话在不同关系的人听来可能完全不同，这是「言外」这个名字本来的意思。
+        val draftReadings = theme.label("", 12f, theme.muted).apply { setPadding(0, dp(6), 0, 0) }
         val draftRewrite = theme.label("", 15f, theme.ink).apply { setPadding(0, dp(6), 0, 0) }
         val draftUse = action("用这条替换") {
             val rewrite = lastRewrite
@@ -465,6 +467,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             toast("已替换，自己确认后再发送")
         }
         draftPanel.addView(draftIssues)
+        draftPanel.addView(draftReadings)
         draftPanel.addView(draftRewrite)
         draftPanel.addView(draftUse, LinearLayout.LayoutParams(-2, dp(44)).apply { topMargin = dp(10) })
         results.addView(draftPanel)
@@ -722,23 +725,28 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 state.text = "没看懂模型的返回，点一次重试；连续失败就看下模型配置"
                 return
             }
-            if (check.isEmpty) {
-                draftPanel.visibility = View.GONE
-                if (check.verdict == null) {
-                    // 模型两次都没给结构时用本地判断兜底，避免只给一句「不擅长」。
-                    state.text = DraftFallback.hint(draftText, draftLastIncoming)
-                    return
-                }
-                state.text = "参考最近 ${check.referenceCount} 条 · 模型判断：" + check.verdict
-                return
-            }
-            state.text = check.verdict?.let { "模型判断：$it" }.orEmpty()
+            val readings = check.readings
             draftIssues.text = check.issues.joinToString("\n")
+            draftIssues.visibility = if (check.issues.isEmpty()) View.GONE else View.VISIBLE
+            // 多视角读法即使没挑出毛病也留着：这句话在别的关系里可能完全是另一个意思。
+            draftReadings.text = readings.entries.joinToString("\n") { "在${it.key}听来：${it.value}" }
+            draftReadings.visibility = if (readings.isEmpty()) View.GONE else View.VISIBLE
             lastRewrite = check.rewrite
             draftRewrite.text = check.rewrite?.let { "可以改成：$it" }.orEmpty()
             draftRewrite.visibility = if (check.rewrite == null) View.GONE else View.VISIBLE
             draftUse.visibility = if (check.rewrite == null) View.GONE else View.VISIBLE
-            draftPanel.visibility = View.VISIBLE
+            val shown = check.issues.isNotEmpty() || check.rewrite != null || readings.isNotEmpty()
+            draftPanel.visibility = if (shown) View.VISIBLE else View.GONE
+            if (!shown && check.verdict == null) {
+                // 模型两次都没给结构时用本地判断兜底，避免只给一句「不擅长」。
+                state.text = DraftFallback.hint(draftText, draftLastIncoming)
+                return
+            }
+            state.text = if (check.issues.isEmpty() && check.rewrite == null) {
+                check.verdict?.let { "参考最近 ${check.referenceCount} 条 · 模型判断：$it" }.orEmpty()
+            } else {
+                check.verdict?.let { "模型判断：$it" }.orEmpty()
+            }
         }
         fun runDraftCheck() {
             if (busy) { MoodLog.i("DRAFT_CHECK_SKIP busy"); return }
@@ -771,6 +779,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             // 先清掉上一次的卡片，避免新结果和旧结论混在一起。
             draftPanel.visibility = View.GONE
             draftIssues.text = ""
+            draftReadings.text = ""
             draftRewrite.text = ""
             lastRewrite = null
             busy = true; controls(true)
@@ -1167,6 +1176,13 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                             current.targetImageDataUri!!)
                             ?.let { current.copy(targetImageDigest = it) } ?: current
                     }
+                    // 这张图的描述顺手进档案：截图里写的时间地点，不该只在这一次生成里用一次就丢。
+                    digested.targetImageDigest
+                        ?.takeIf { it.isNotBlank() && it != current.targetImageDigest }
+                        ?.let { fresh ->
+                            DigestFactQueue.offer(activity, owner.account, current.talker, "图片描述", fresh,
+                                captured = current)
+                        }
                     val knowledge = withContext(Dispatchers.IO) {
                         ReplyKnowledge.loadFor(activity, relationship,
                             current.messages.joinToString("\n") { it.text } + "\n" + baselineDraft + "\n" + notes)

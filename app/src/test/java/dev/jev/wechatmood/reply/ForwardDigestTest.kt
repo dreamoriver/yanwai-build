@@ -273,4 +273,32 @@ class ForwardDigestTest {
         assertTrue(reply.text, reply.text.contains("好"))
         assertTrue(message.items.none { it.text.contains("哈哈") })
     }
+
+    @Test fun `只有 datadesc 的转发不会把多条挤成一段`() {
+        // 实机：某条转发没有 <dataitem>，只有 63 个 <datadesc>。补扫出来的条目没有发送人，
+        // 以前空 sender 被当成「同一个人」，62 条被并成 8 段，界面还显示「共 8 条」。
+        val descs = (1..12).joinToString("") { "<datadesc>第" + it + "条内容</datadesc>" }
+        val raw = wrap("<recordinfo><title>群聊的聊天记录</title><desc>张三: 开场一句</desc>" + descs + "</recordinfo>")
+        val message = requireNotNull(ForwardDigest.parse(raw))
+        assertTrue("原始条数要如实显示，不能拿压缩后的段落数冒充", message.count >= 10)
+        assertTrue("没有发送人的条目不能互相合并", message.items.size >= 10)
+    }
+
+    @Test fun `speaker split keeps prose colons intact`() {
+        assertEquals("张三", ForwardDigest.splitSpeaker("张三：明天见").first)
+        assertEquals("明天见", ForwardDigest.splitSpeaker("张三：明天见").second)
+        assertEquals("", ForwardDigest.splitSpeaker("这是一个很长很长的人名不应该被拆：正文").first)
+        assertEquals("「我说」不是人名", "", ForwardDigest.splitSpeaker("我说：这周先不去了").first)
+        assertEquals("没有冒号就不拆", "", ForwardDigest.splitSpeaker("直接一句话").first)
+    }
+
+    @Test fun `only datadesc forwards recover the speaker`() {
+        // 实机那条转发没有 <dataitem>，全靠 datadesc；拆出昵称后摘要里才看得出谁说的。
+        val descs = "<datadesc>张三: 周六下午三点集合</datadesc>" +
+            "<datadesc>李四: 收到，我带伞</datadesc>"
+        val raw = wrap("<recordinfo><title>群聊的聊天记录</title><desc>张三: 开场一句</desc>" + descs + "</recordinfo>")
+        val message = requireNotNull(ForwardDigest.parse(raw))
+        assertEquals("张三", message.items.first { it.text.contains("周六下午三点集合") }.sender)
+        assertEquals("李四", message.items.first { it.text.contains("收到，我带伞") }.sender)
+    }
 }

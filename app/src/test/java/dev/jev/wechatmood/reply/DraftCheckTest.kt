@@ -86,4 +86,20 @@ class DraftCheckTest {
     @Test fun `simple mode drops blank output`() {
         assertNull(DraftCheckProtocol.simpleParse(body("   ")))
     }
+
+    @Test fun `three perspective readings are parsed`() {
+        val check = DraftCheckProtocol.parse(body(
+            "判断：回应到位\n问题：无\n改写：好呀，我看看\n恋人：可能被听成敷衍\n同事：没别的意思\n长辈：有点随意"))
+        assertEquals("可能被听成敷衍", check.readings["恋人"])
+        assertEquals("没别的意思", check.readings["同事"])
+        assertEquals("有点随意", check.readings["长辈"])
+    }
+
+    @Test fun `missing readings are dropped instead of failing the check`() {
+        val check = DraftCheckProtocol.parse(body("判断：还行\n问题：无\n改写：好\n恋人：无\n同事：太客气"))
+        assertNull("写了「无」就是没有这一视角", check.readings["恋人"])
+        assertEquals("太客气", check.readings["同事"])
+        assertNull("模型漏写一段不能算整份失败", check.readings["长辈"])
+        assertEquals("好", check.rewrite)
+    }
 }

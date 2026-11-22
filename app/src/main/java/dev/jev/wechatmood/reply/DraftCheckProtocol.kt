@@ -6,7 +6,9 @@ import org.json.JSONObject
 /** 一条草稿体检结果：最多两条问题，外加一条保持原意的改写。 */
 data class DraftCheck(val issues: List<String>, val rewrite: String?, val parsed: Boolean = true,
     val verdict: String? = null, val relates: Boolean? = null, val referenceCount: Int = 0,
-    val responded: String? = null) {
+    val responded: String? = null,
+    /** 三种关系视角下这句话会被听成什么意思；键是「恋人」「同事」「长辈」。 */
+    val readings: Map<String, String> = emptyMap()) {
     val isEmpty: Boolean get() = issues.isEmpty() && rewrite.isNullOrBlank()
 }
 
@@ -14,18 +16,25 @@ object DraftCheckProtocol {
     private const val MAX_CONTEXT = 8
     private const val MAX_ISSUE = 40
     private const val MAX_REWRITE = 60
+    private const val MAX_READING = 40
+    private val READERS = listOf("恋人", "同事", "长辈")
 
     private const val INSTRUCTIONS = """你是聊天回复检查器。draft 是用户打好、但还没发出去的一句话。
 先看 focus（用户长按的那条，可能是图片），再看 last_incoming（对方最后说的那句）。
-按下面四行输出，不要 JSON，不要 Markdown，不要额外解释：
+按下面七行输出，不要 JSON，不要 Markdown，不要额外解释：
 回应：先写下你要回应的那条消息的开头一句原文（从 focus 或对方最后一句里摘，最多 15 字）
 判断：一句话说明 draft 和这段对话的关系；focus 是图片时，先用十个字左右描述图里是什么
 问题：最多两条，用「；」分隔；确实没有就写「无」
 改写：一条能直接替换 draft 发出去的话，沿用 my_style 的句长和标点，最多 30 字；即使这句没问题，也要给一条更自然的说法
+恋人：同样这句话发给恋人，对方可能听成什么意思，20 字内
+同事：同样这句话发给同事，对方可能听成什么意思，20 字内
+长辈：同样这句话发给长辈，对方可能听成什么意思，20 字内
 要求：
 - 不要在回答里出现 draft、focus、last_incoming、my_style 这些字段名，用「你打的这句」「对方发的这张图」这类自然说法
 - 不要推测对方心理；不要编造没出现过的信息
-- 改写必须能直接发送，不要加「你可以说」这类前缀"""
+- 改写必须能直接发送，不要加「你可以说」这类前缀
+- 三段读法各写一句，只写这句在这个关系里可能被听出的意思；和改写意思差不多就写「无」，不要凑字数
+- 读法不是让对方一定这么想，只是提醒有这种可能，用「可能」「容易被听成」这类说法"""
 
     fun payload(settings: ReplySettings, context: ReplyContext, draft: String,
         relationship: ReplyRelationship, customRelationship: String = "", image: String? = null): JSONObject {
@@ -62,13 +71,13 @@ object DraftCheckProtocol {
             .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image))))
         else JSONObject().put("role", "user").put("content", evidence.toString())
         return JSONObject().put("model", settings.model).put("stream", false)
-            .put("max_tokens", 500).put("temperature", 0.1)
+            .put("max_tokens", 800).put("temperature", 0.1)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content", INSTRUCTIONS))
                 .put(userMessage))
     }
 
-    private val LABEL = Regex("^(回应|判断|问题|毛病|改写|可以改成|建议)[：:](.*)$")
+    private val LABEL = Regex("^(回应|判断|问题|毛病|改写|可以改成|建议|恋人|同事|长辈)[：:](.*)$")
 
     /** 按「判断/问题/改写」三个标签切段，容忍冒号全半角与多行内容。 */
     private fun sections(text: String): Map<String, String> {
@@ -127,9 +136,16 @@ object DraftCheckProtocol {
         val rewrite = (sections["改写"] ?: sections["可以改成"] ?: sections["建议"])
             ?.let { dev.jev.wechatmood.core.TextClean.plain(it) }?.take(MAX_REWRITE)
             ?.takeIf { it.isNotBlank() && it != "无" && it != "不需要" }
+        // 读法缺段就当没写：小模型经常只回两段，不能因此把整份结果判失败。
+        val readings = READERS.mapNotNull { who ->
+            sections[who]?.let { dev.jev.wechatmood.core.TextClean.plain(it) }?.take(MAX_READING)
+                ?.takeIf { it.isNotBlank() && it != "无" && it != "没有" }
+                ?.let { who to it }
+        }.toMap()
         dev.jev.wechatmood.core.MoodLog.i(
-            "DRAFT_CHECK ok chars=${content.length} issues=${issues.size} rewrite=${rewrite != null} verdict=${verdict != null}")
-        DraftCheck(issues, rewrite, verdict = verdict, responded = responded)
+            "DRAFT_CHECK ok chars=${content.length} issues=${issues.size} rewrite=${rewrite != null} " +
+                "verdict=${verdict != null} readings=${readings.size}")
+        DraftCheck(issues, rewrite, verdict = verdict, responded = responded, readings = readings)
     }.onFailure {
         dev.jev.wechatmood.core.MoodLog.w("DRAFT_CHECK_PARSE_FAILED " + it.javaClass.simpleName)
     }.getOrDefault(DraftCheck(emptyList(), null, parsed = false))

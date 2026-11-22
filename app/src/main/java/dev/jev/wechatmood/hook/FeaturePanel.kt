@@ -35,6 +35,8 @@ internal class FeaturePanel(
     private val onStats: () -> Unit,
     private val onFacts: () -> Unit,
     private val onTodos: () -> Unit,
+    private val onDigests: () -> Unit,
+    private val onTemperature: () -> Unit,
     /** 返回是否真的保存成功；false 时开关会拨回原位。 */
     private val onAnalysisChanged: (Boolean) -> Boolean,
 ) {
@@ -127,6 +129,8 @@ internal class FeaturePanel(
                 row("关系档案", "整理过的事实，可移出或补一条", onFacts, factsBadge)
                 row("待办", "带时间的约定与重要日期", onTodos, todosBadge)
             }
+            row("关系温度", "久未联系、悬着的约定与本周要处理", onTemperature)
+            row("历史纪要", "存下来的 AI 转述，可回看或转成待办", onDigests)
         }
         body.addView(group, LinearLayout.LayoutParams(-1, -2))
 

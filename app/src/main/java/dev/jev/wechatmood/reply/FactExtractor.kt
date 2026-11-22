@@ -18,7 +18,7 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
     suspend fun extract(settings: ReplySettings, messages: List<ReplyMessage>,
         existing: List<RelationFact> = emptyList(),
         now: Long = System.currentTimeMillis(), limit: Int = MAX_MESSAGES,
-        group: Boolean = false): List<RelationFact> {
+        group: Boolean = false, extra: List<String> = emptyList()): List<RelationFact> {
         check(settings.isConfigured) { "请先配置回复模型" }
         val usable = messages.filter { it.text.isNotBlank() && !it.text.startsWith("【引用") }
             .takeLast(limit.coerceIn(10, MAX_MESSAGES))
@@ -28,7 +28,7 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
             "[${index + 1}] $stamp ${message.speaker}: ${message.text.take(80)}"
         }
         // 从最新往回攒到预算上限：以前正序拼完再 take，超长时砍掉的反而是刚聊完的那几条。
-        val transcript = buildList {
+        val chatLines = buildList {
             var used = 0
             for (line in lines.asReversed()) {
                 if (isNotEmpty() && used + line.length + 1 > MAX_CHARACTERS) break
@@ -36,6 +36,12 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
                 used += line.length + 1
             }
         }.asReversed().joinToString("\n")
+        // 转发摘要、图片描述、历史纪要是另一个模型的转述，不是聊天原话：
+        // 单独排在聊天之后，由提示词限定只按其中写明的时间地点提取，不许补。
+        val externalLines = extra.mapNotNull { line ->
+            line.trim().take(MAX_EXTERNAL_CHARS).takeIf { it.isNotBlank() }
+        }.take(MAX_EXTERNAL_LINES)
+        val transcript = (listOf(chatLines) + externalLines).filter { it.isNotBlank() }.joinToString("\n")
         check(transcript.isNotBlank()) { "没有可用的聊天内容" }
         val messageIdAt: (Int) -> Long = { index -> usable.getOrNull(index - 1)?.id ?: 0 }
         val messageTimeAt: (Int) -> Long = { index -> usable.getOrNull(index - 1)?.time ?: 0 }
@@ -46,7 +52,8 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
             val payload = JSONObject().put("model", settings.model).put("stream", false)
                 .put("max_tokens", tokens).put("temperature", 0.2)
                 .put("messages", JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", instructions(now, existing, group)))
+                    .put(JSONObject().put("role", "system").put("content",
+                        instructions(now, existing, group) + if (externalLines.isEmpty()) "" else EXTERNAL_RULE))
                     .put(JSONObject().put("role", "user").put("content", transcript)))
             val facts = client.request(settings, payload, parse = { body ->
                 parseOrNull(body, messageIdAt, messageTimeAt)
@@ -54,7 +61,7 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
             if (facts != null) {
                 MoodLog.i("RELATION_FACT_EXTRACT total=${facts.size} tokens=$tokens " +
                     "timed=${facts.count { it.isTimed }} dated=${facts.count { it.occurredAt > 0 }} " +
-                    "evidence=${facts.count { it.sourceChatMessageId > 0 }} " +
+                    "evidence=${facts.count { it.sourceChatMessageId > 0 }} extra=${externalLines.size} " +
                     "replaced=${facts.count { it.replaces.isNotEmpty() }}")
                 return facts
             }
@@ -115,6 +122,21 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
         const val MAX_MESSAGES = 50
         const val MAX_CHARACTERS = 6000
         const val MAX_FACTS = 12
+
+        /** 一次整理最多带三条转述：转发摘要、图片描述各一条就够，多说明调用方没收住。 */
+        const val MAX_EXTERNAL_LINES = 3
+        const val MAX_EXTERNAL_CHARS = 1200
+
+        /**
+         * 外部转述规则：转发摘要与图片描述由另一个模型生成，可能漏时间、也可能转述错，
+         * 所以只允许按写明的提取，并且不允许它们伪造聊天依据。
+         */
+        private val EXTERNAL_RULE = """
+
+另外，下面几行以「【转发摘要】」「【图片描述】」「【历史纪要】」开头，是另一个模型对转发内容、图片或群聊的转述，不是聊天原话：
+- 只有其中明确写出时间、地点、要做的事时才提取，转述里没有的一律不补
+- 这些行的 evidence 一律填 0
+- 转述里的相对时间（明天、周五）按转述自己写下的日期换算，看不出来就把 occurred_at 留空""".trimEnd()
 
         /** 把「周五」「下周三」换算成绝对日期需要一个明确基准，所以当前时间写进提示词。 */
         private const val MAX_EXISTING = 20

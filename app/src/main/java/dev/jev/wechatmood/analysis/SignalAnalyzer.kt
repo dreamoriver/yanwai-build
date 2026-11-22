@@ -93,6 +93,14 @@ object SignalAnalyzer {
             if (!active()) throw CancellationException("分析已关闭或配置已改变")
             if (verifiedAccount && !result.intentFailed) {
                 AnalysisResultCache.save(input, snapshot, result, AnalysisState.build(prepared).toString())
+                // 情绪日聚合：只记标签和次数、按会话哈希存，不写明文 wxid，也不存聊天原文。
+                // 分析缓存是按内容哈希存的、14 天滑动就删，撑不起「最近一个月」这种按人按天的统计。
+                val session = dev.jev.wechatmood.reply.EmotionTrend.sessionOf(input.talker)
+                val app = ModulePrefs.appContext()
+                if (app != null && session != null) {
+                    dev.jev.wechatmood.core.RelationFactBridge.recordEmotion(
+                        app, session, result.label, input.speaker)
+                }
             }
             result
         } catch (e: org.json.JSONException) {

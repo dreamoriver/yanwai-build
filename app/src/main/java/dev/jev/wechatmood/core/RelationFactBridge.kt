@@ -9,7 +9,11 @@ import dev.jev.wechatmood.reply.RelationFact
 import dev.jev.wechatmood.reply.RelationFacts
 import dev.jev.wechatmood.reply.RelationFactStore
 import dev.jev.wechatmood.reply.RelationMeta
+import dev.jev.wechatmood.reply.ContactRow
+import dev.jev.wechatmood.reply.DigestArchive
+import dev.jev.wechatmood.reply.EmotionDay
 import dev.jev.wechatmood.reply.ReplyContactKey
+import dev.jev.wechatmood.reply.StoredDigest
 import org.json.JSONObject
 
 /**
@@ -108,6 +112,42 @@ object RelationFactBridge {
     fun rememberContact(context: Context, key: ReplyContactKey, talker: String, name: String = "") = runCatching {
         store(context).rememberContact(key, talker, name)
     }.onFailure { MoodLog.w("RELATION_CONTACT_DIR_FAILED " + it.javaClass.simpleName) }
+
+    /** 所有还开着的时间型条目：只读本机库，不触发任何模型请求。 */
+    fun timedOpen(context: Context): Map<String, List<RelationFact>> = runCatching {
+        store(context).timedOpen()
+    }.getOrDefault(emptyMap())
+
+    /** 档案目录里的联系人，用于关系温度。 */
+    fun contacts(context: Context, limit: Int = 200): List<ContactRow> =
+        runCatching { store(context).contacts(limit) }
+            .onFailure { MoodLog.w("RELATION_CONTACTS_FAILED " + it.javaClass.simpleName) }
+            .getOrDefault(emptyList())
+
+    /** 记一次情绪判定：只存标签和次数，不存原文。 */
+    fun recordEmotion(context: Context, session: String, label: String, speaker: String) = runCatching {
+        store(context).recordEmotion(session, label, speaker)
+    }.onFailure { MoodLog.w("EMOTION_TREND_RECORD_FAILED " + it.javaClass.simpleName) }
+
+    fun emotionDays(context: Context, session: String, days: Int = 30): List<EmotionDay> =
+        runCatching { store(context).emotionDays(session, days) }
+            .onFailure { MoodLog.w("EMOTION_TREND_LOAD_FAILED " + it.javaClass.simpleName) }
+            .getOrDefault(emptyList())
+
+    /** 存一条 AI 转述；只写本机库，不参与上传。 */
+    fun saveDigest(context: Context, key: ReplyContactKey, digest: StoredDigest) = runCatching {
+        store(context).saveDigest(key, digest)
+    }.onFailure { MoodLog.w("DIGEST_ARCHIVE_SAVE_FAILED " + it.javaClass.simpleName) }
+
+    /** 返回 null 表示读失败：和「真的一条都没有」分开，界面不能把库异常说成空态。 */
+    fun digests(context: Context, key: ReplyContactKey, limit: Int = DigestArchive.MAX_PER_CONTACT): List<StoredDigest>? =
+        runCatching { store(context).digests(key, limit) }
+            .onFailure { MoodLog.w("DIGEST_ARCHIVE_LOAD_FAILED " + it.javaClass.simpleName) }
+            .getOrNull()
+
+    fun deleteDigest(context: Context, key: ReplyContactKey, digestId: String): Boolean = runCatching {
+        store(context).deleteDigest(key, digestId)
+    }.onFailure { MoodLog.w("DIGEST_ARCHIVE_DELETE_FAILED " + it.javaClass.simpleName) }.getOrDefault(false)
 
     /** 聊天标题圆点：只读本地库，talker 没有档案时返回 null。 */
     fun badge(context: Context, talker: String?): ChatBadge? = runCatching {

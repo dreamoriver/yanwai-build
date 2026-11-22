@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -306,4 +307,103 @@ class RelationFactStoreTest {
         assertEquals("manual", active.single().source)
     }
 
+
+    @Test fun `digests are newest first, capped and deletable`() {
+        val key = ReplyContactKey("b".repeat(64))
+        val store = RelationFactStore(db())
+        val total = DigestArchive.MAX_PER_CONTACT + 5
+        repeat(total) { index ->
+            // 每个时段标签派生一个 id，才能测到 200 条上限。
+            val digest = requireNotNull(DigestArchive.build("时段 " + index, 0, index.toLong(), 1, 1,
+                "第 " + index + " 条纪要", now = index.toLong()))
+            store.saveDigest(key, digest)
+        }
+        val kept = store.digests(key)
+        assertEquals(DigestArchive.MAX_PER_CONTACT, kept.size)
+        assertEquals("第 " + (total - 1) + " 条纪要", kept.first().text)
+        assertTrue("最旧的几条要被裁掉", kept.none { it.text == "第 0 条纪要" })
+
+        store.deleteDigest(key, kept.first().id)
+        assertEquals(DigestArchive.MAX_PER_CONTACT - 1, store.digests(key).size)
+    }
+
+    @Test fun `the same digest is stored once and clear removes them`() {
+        val key = ReplyContactKey("c".repeat(64))
+        val other = ReplyContactKey("d".repeat(64))
+        val store = RelationFactStore(db())
+        val digest = requireNotNull(DigestArchive.build("今天", 0, 5, 1, 2, "周日一起去看房", now = 9))
+        store.saveDigest(key, digest)
+        store.saveDigest(key, digest)
+        assertEquals("同一时段同一结论只留一条", 1, store.digests(key).size)
+
+        store.saveDigest(other, digest)
+        store.clear(key)
+        assertTrue(store.digests(key).isEmpty())
+        assertEquals("别的会话不受影响", 1, store.digests(other).size)
+    }
+
+    @Test fun `deleting a missing digest reports false`() {
+        val key = ReplyContactKey("e".repeat(64))
+        val store = RelationFactStore(db())
+        assertFalse(store.deleteDigest(key, "0".repeat(16)))
+        val digest = requireNotNull(DigestArchive.build("今天", 0, 1, 1, 1, "临时约定", now = 2))
+        store.saveDigest(key, digest)
+        assertTrue(store.deleteDigest(key, digest.id))
+        assertFalse("第二次删同一条应当返回 false", store.deleteDigest(key, digest.id))
+    }
+
+    @Test fun `only the newest digest survives in one time slot`() {
+        val key = ReplyContactKey("f".repeat(64))
+        val store = RelationFactStore(db())
+        val now = 1_700_000_000_000L
+        val first = requireNotNull(DigestArchive.build("最近 3 小时", 0, now, 10, 20, "第一版结论", now = now))
+        val again = requireNotNull(DigestArchive.build("最近 3 小时", 0, now, 11, 21, "第二版结论", now = now + 60_000))
+        store.saveDigest(key, first)
+        store.saveDigest(key, again)
+        val kept = store.digests(key)
+        assertEquals("同一时段同一天只留一条", 1, kept.size)
+        assertEquals("留下的是最新结论", "第二版结论", kept.first().text)
+    }
+
+    @Test fun `legacy duplicates in one slot are cleared when the slot is written again`() {
+        val key = ReplyContactKey("1".repeat(64))
+        val store = RelationFactStore(db())
+        val now = 1_700_000_000_000L
+        // 旧版按文本派生 id，同一个时段可能已经堆了多条；再写一次要把它们清掉。
+        store.saveDigest(key, StoredDigest("a".repeat(16), now, "最近 3 小时", 0, now, 10, 20, "旧结论一"))
+        store.saveDigest(key, StoredDigest("b".repeat(16), now + 1000, "最近 3 小时", 0, now, 10, 20, "旧结论二"))
+        store.saveDigest(key, requireNotNull(DigestArchive.build("最近 3 小时", 0, now, 12, 22, "新结论", now = now + 2000)))
+        val kept = store.digests(key)
+        assertEquals(1, kept.size)
+        assertEquals("新结论", kept.first().text)
+    }
+
+    @Test fun `emotion counts add up and follow the archive lifecycle`() {
+        val key = ReplyContactKey("2".repeat(64))
+        val store = RelationFactStore(db())
+        val session = requireNotNull(EmotionTrend.sessionOf("wxid_demo"))
+        // 用真实当前时间：emotionDays 默认按「今天往前 30 天」取，固定时间戳会被当成过期。
+        val now = System.currentTimeMillis()
+        repeat(3) { store.recordEmotion(session, "平和", "对方", now = now) }
+        store.recordEmotion(session, "疑问", "我方口径", now = now)
+        val rows = store.emotionDays(session, now = now)
+        assertEquals(2, rows.size)
+        assertEquals(3, rows.first { it.label == "平和" }.count)
+        assertEquals("对方", rows.first { it.label == "平和" }.speaker)
+
+        store.rememberContact(key, "wxid_demo", "阿明")
+        store.clear(key)
+        assertTrue("清空档案时这个会话的情绪也要一起清掉", store.emotionDays(session).isEmpty())
+    }
+
+    @Test fun `contacts list keeps the keys and names for the temperature view`() {
+        val key = ReplyContactKey("3".repeat(64))
+        val store = RelationFactStore(db())
+        store.rememberContact(key, "wxid_abc", "阿明")
+        val rows = store.contacts()
+        assertEquals(1, rows.size)
+        assertEquals(key.value, rows.first().contactKey)
+        assertEquals("wxid_abc", rows.first().talker)
+        assertEquals("阿明", rows.first().name)
+    }
 }

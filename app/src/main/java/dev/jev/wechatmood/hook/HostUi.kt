@@ -130,6 +130,8 @@ class HostUi(private val activity: Activity) {
             onStats = { showStats() },
             onFacts = { RelationArchiveUi(activity, current).show() },
             onTodos = { RelationTodoUi(activity, current).show() },
+            onDigests = { DigestHistoryUi(activity, current).show() },
+            onTemperature = { RelationTemperatureUi(activity, current).show() },
             onAnalysisChanged = { value ->
                 // 和长按菜单里的开关走同一条路：校验会话、关掉时清旧气泡、刷新界面。
                 // 以前这里只写偏好，失败了界面照样拨过去，气泡也留在屏幕上。

@@ -73,7 +73,12 @@ object MessageMenu {
                             REPLY_ITEM_ID -> target.reply?.let { MessageSniffer.suggestReply(view, it) } == true
                             FORWARD_ITEM_ID -> target.forward?.let { forward ->
                                 dev.jev.wechatmood.reply.ForwardDigest.parse(forward.content)?.let { digest ->
-                                    ForwardDigestUi(view.context as android.app.Activity, digest).show()
+                                    // 页面快照在这里就抓：摘要要跑几秒，晚点用户可能已经切走聊天。
+                                    val page = runCatching {
+                                        MessageSniffer.replyContext(requireBottom = false)
+                                    }.getOrNull()
+                                    ForwardDigestUi(view.context as android.app.Activity, digest,
+                                        page?.talker, page).show()
                                     true
                                 } ?: false
                             } == true

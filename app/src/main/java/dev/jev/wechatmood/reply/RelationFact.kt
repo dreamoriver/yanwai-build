@@ -252,6 +252,8 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
     private val now: () -> Long = System::currentTimeMillis) : Closeable {
     /** 整批替换要串行：并发整理和手动添加同时跑，旧列表会把刚写进去的条目盖掉。 */
     private val writeLock = Any()
+    /** 情绪表上次清理到哪一天；按天节流，避免每次分析都全表扫一遍。 */
+    private var lastEmotionPruneDay: String? = null
 
     init {
         db.execute("CREATE TABLE IF NOT EXISTS relation_facts (contact_key TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)")
@@ -265,6 +267,14 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         // 哈希键换不回聊天对象，提醒要点进那个聊天就得单独记一份；只在本机，不参与上传或分析。
         db.execute("CREATE TABLE IF NOT EXISTS relation_contact_dir (contact_key TEXT PRIMARY KEY NOT NULL, " +
             "talker TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)")
+        // 存下来的 AI 转述：只有模型结论，没有聊天素材；每会话最多 DigestArchive.MAX_PER_CONTACT 条。
+        db.execute("CREATE TABLE IF NOT EXISTS group_digests (contact_key TEXT NOT NULL, digest_id TEXT NOT NULL, " +
+            "created_at INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(contact_key, digest_id))")
+        db.execute("CREATE INDEX IF NOT EXISTS group_digests_contact ON group_digests(contact_key, created_at DESC)")
+        // 情绪日聚合：只存标签和次数，不存任何原文；留 90 天。
+        db.execute("CREATE TABLE IF NOT EXISTS emotion_day (session TEXT NOT NULL, day_key TEXT NOT NULL, " +
+            "speaker TEXT NOT NULL, label TEXT NOT NULL, count INTEGER NOT NULL, updated_at INTEGER NOT NULL, " +
+            "PRIMARY KEY(session, day_key, speaker, label))")
         // 旧库只有 talker 一列：补上名字，失败说明已经补过。
         runCatching { db.execute("ALTER TABLE relation_contact_dir ADD COLUMN name TEXT NOT NULL DEFAULT ''") }
         migrateLegacy()
@@ -415,6 +425,108 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
      * 彻底删除一条：删行并留下忽略标记。
      * 返回 false 表示这条已经不在（可能刚被重新整理过），界面应刷新而不是假装成功。
      */
+    /** 写一条转述；超过上限时删掉最旧的，别让历史纪要把档案库撑大。 */
+    /**
+     * 写一条转述。
+     *
+     * 同一时段、同一天只留最新一条：写新的之前顺手清掉同槽的旧行。
+     * 旧版按「文本 + 时段末尾时间」派生 id，同一个「今天 00:00 到现在」可能已经堆了几条。
+     */
+    /** 档案目录里的联系人，最近整理过的排在前面。 */
+    fun contacts(limit: Int = 200): List<ContactRow> =
+        db.queryRows("SELECT contact_key || '|' || talker || '|' || name FROM relation_contact_dir " +
+            "ORDER BY updated_at DESC LIMIT ?", listOf(limit.coerceIn(1, 500).toString()))
+            .mapNotNull { row ->
+                val parts = row.split('|', limit = 3)
+                if (parts.size < 3) null else ContactRow(parts[0], parts[1], parts[2])
+            }
+
+    /**
+     * 记一次情绪判定。
+     *
+     * Android 9 的 SQLite 不支持 upsert，所以先 INSERT OR IGNORE 再 UPDATE。
+     * 顺手清掉 90 天前的行：只留计数，删了不影响任何档案。
+     */
+    fun recordEmotion(session: String, label: String, speaker: String,
+        now: Long = System.currentTimeMillis()) = synchronized(writeLock) {
+        if (session.isBlank() || label.isBlank()) return@synchronized
+        val day = FactTimes.dayKey(now)
+        db.execute("INSERT OR IGNORE INTO emotion_day(session, day_key, speaker, label, count, updated_at) " +
+            "VALUES(?,?,?,?,0,?)", listOf(session, day, speaker, label, now.toString()))
+        db.execute("UPDATE emotion_day SET count = count + 1, updated_at = ? " +
+            "WHERE session = ? AND day_key = ? AND speaker = ? AND label = ?",
+            listOf(now.toString(), session, day, speaker, label))
+        // 清理按天做一次就够：每次分析都全表 DELETE 没有意义，这条表还没有 day_key 索引。
+        val cutoff = FactTimes.dayKey(now - EmotionTrend.KEEP_DAYS * 24L * 3600_000L)
+        if (lastEmotionPruneDay != cutoff) {
+            lastEmotionPruneDay = cutoff
+            db.execute("DELETE FROM emotion_day WHERE day_key < ?", listOf(cutoff))
+        }
+    }
+
+    fun emotionDays(session: String, days: Int = 30, now: Long = System.currentTimeMillis()): List<EmotionDay> {
+        if (session.isBlank()) return emptyList()
+        val cutoff = FactTimes.dayKey(now - days.coerceIn(1, EmotionTrend.KEEP_DAYS) * 24L * 3600_000L)
+        return db.queryRows("SELECT day_key || '|' || label || '|' || count || '|' || speaker " +
+            "FROM emotion_day WHERE session = ? AND day_key >= ? ORDER BY day_key DESC", listOf(session, cutoff))
+            .mapNotNull { row ->
+                val parts = row.split('|', limit = 4)
+                if (parts.size < 3) null
+                else EmotionDay(parts[0], parts[1], parts[2].toIntOrNull() ?: 0, parts.getOrElse(3) { "" })
+            }
+    }
+
+    fun saveDigest(key: ReplyContactKey, digest: StoredDigest) = synchronized(writeLock) {
+        val day = FactTimes.dayKey(digest.createdAt.coerceAtLeast(1))
+        rawDigests(key).filter {
+            it.id != digest.id && it.rangeLabel == digest.rangeLabel &&
+                FactTimes.dayKey(it.createdAt.coerceAtLeast(1)) == day
+        }.forEach { stale ->
+            db.execute("DELETE FROM group_digests WHERE contact_key = ? AND digest_id = ?",
+                listOf(key.value, stale.id))
+        }
+        // 插入和裁剪放同一个事务；裁剪按 rowid 兜底，同一毫秒写入时刚写的那条不会被自己删掉。
+        transaction {
+            db.execute("INSERT OR REPLACE INTO group_digests(contact_key, digest_id, created_at, payload) VALUES(?,?,?,?)",
+                listOf(key.value, digest.id, digest.createdAt.toString(), digest.encode().toString()))
+            db.execute("DELETE FROM group_digests WHERE contact_key = ? AND digest_id NOT IN " +
+                "(SELECT digest_id FROM group_digests WHERE contact_key = ? " +
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+                listOf(key.value, key.value, DigestArchive.MAX_PER_CONTACT.toString()))
+        }
+        digest
+    }
+
+    private fun rawDigests(key: ReplyContactKey,
+        limit: Int = DigestArchive.MAX_PER_CONTACT): List<StoredDigest> =
+        db.queryRows("SELECT payload FROM group_digests WHERE contact_key = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            listOf(key.value, limit.coerceIn(1, DigestArchive.MAX_PER_CONTACT).toString()))
+            .mapNotNull { payload -> runCatching { StoredDigest.decode(JSONObject(payload)) }.getOrNull() }
+
+    /**
+     * 同一时段同一天只返回最新那条。
+     *
+     * 旧数据里同槽可能已经有多条（按文本派生 id 的时代留下的），读的时候收口，
+     * 下次保存那条槽时会顺手把它们删掉。
+     */
+    fun digests(key: ReplyContactKey, limit: Int = DigestArchive.MAX_PER_CONTACT): List<StoredDigest> {
+        val seen = HashSet<String>()
+        return rawDigests(key).filter {
+            seen.add(it.rangeLabel + "|" + FactTimes.dayKey(it.createdAt.coerceAtLeast(1)))
+        }.take(limit.coerceIn(1, DigestArchive.MAX_PER_CONTACT))
+    }
+
+    /** 返回 false 表示这条已经不在：界面据此刷新，而不是假装删掉了。 */
+    fun deleteDigest(key: ReplyContactKey, digestId: String): Boolean = synchronized(writeLock) {
+        val exists = db.query("SELECT 1 FROM group_digests WHERE contact_key = ? AND digest_id = ?",
+            listOf(key.value, digestId)) != null
+        if (exists) {
+            db.execute("DELETE FROM group_digests WHERE contact_key = ? AND digest_id = ?",
+                listOf(key.value, digestId))
+        }
+        exists
+    }
+
     fun delete(key: ReplyContactKey, factId: String): Boolean {
         if (!factId.matches(RelationFact.ID_PATTERN)) return false
         val exists = db.query("SELECT 1 FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?",
@@ -530,6 +642,29 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
     private fun contactTalker(contactKey: String): String? =
         db.query("SELECT talker FROM relation_contact_dir WHERE contact_key = ?", listOf(contactKey))
 
+    /**
+     * 所有还开着的时间型条目，按联系人哈希聚合。
+     *
+     * 和 [dueContacts] 不同：这里不收窄到「现在该提醒」的那几条，
+     * 未来的约定也返回，关系温度用它算「悬着几条」「本周要处理几条」。
+     */
+    fun timedOpen(): Map<String, List<RelationFact>> {
+        val placeholders = RelationFact.TIMED_KINDS.joinToString(",") { "?" }
+        val rows = db.queryRows(
+            "SELECT contact_key || ':' || payload FROM relation_fact_items " +
+                "WHERE status = 'active' AND kind IN ($placeholders) AND occurred_at > 0",
+            RelationFact.TIMED_KINDS.toList())
+        val grouped = LinkedHashMap<String, MutableList<RelationFact>>()
+        for (row in rows) {
+            if (row.length < 66 || row[64] != ':') continue
+            val contactKey = row.substring(0, 64)
+            if (!contactKey.matches(Regex("[0-9a-f]{64}"))) continue
+            val fact = runCatching { RelationFact.decode(JSONObject(row.substring(65))) }.getOrNull() ?: continue
+            grouped.getOrPut(contactKey) { mutableListOf() } += fact
+        }
+        return grouped
+    }
+
     /** 全部联系人的到期条目：进微信首页时用它统一提醒一次，不用先把每个聊天点一遍。 */
     fun dueContacts(now: Long = System.currentTimeMillis()): List<DueContact> {
         val placeholders = RelationFact.TIMED_KINDS.joinToString(",") { "?" }
@@ -557,6 +692,8 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         factIds.distinct().count { setStatus(key, it, status) }
 
     fun clear(key: ReplyContactKey) {
+        // 先按目录把会话哈希算出来：下面删掉 contact_dir 之后就查不到 talker 了。
+        val emotionSession = contactTalker(key.value)?.let { EmotionTrend.sessionOf(it) }
         db.execute("DELETE FROM relation_fact_items WHERE contact_key = ?", listOf(key.value))
         db.execute("DELETE FROM relation_facts WHERE contact_key = ?", listOf(key.value))
         db.execute("DELETE FROM relation_fact_migrations WHERE contact_key = ?", listOf(key.value))
@@ -564,6 +701,9 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         // 水位一起清掉，下次才会重新抽，否则清空后再也不更新。
         db.execute("DELETE FROM relation_meta WHERE contact_key = ?", listOf(key.value))
         db.execute("DELETE FROM relation_contact_dir WHERE contact_key = ?", listOf(key.value))
+        // 历史纪要也是这个会话的档案，清空时不能留下 AI 结论。
+        db.execute("DELETE FROM group_digests WHERE contact_key = ?", listOf(key.value))
+        if (emotionSession != null) db.execute("DELETE FROM emotion_day WHERE session = ?", listOf(emotionSession))
     }
 
     fun clearAll() {
@@ -573,6 +713,8 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         db.execute("DELETE FROM relation_fact_tombstones")
         db.execute("DELETE FROM relation_meta")
         db.execute("DELETE FROM relation_contact_dir")
+        db.execute("DELETE FROM group_digests")
+        db.execute("DELETE FROM emotion_day")
     }
 
     override fun close() = db.close()

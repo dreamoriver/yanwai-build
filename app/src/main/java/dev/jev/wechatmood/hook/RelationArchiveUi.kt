@@ -133,13 +133,12 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setDimAmount(ReplyMetrics.DIM)
         }
-        dialog.setOnShowListener {
-            dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
         dialog.setOnDismissListener {
             addDialog?.dismiss()
             scope.cancel()
         }
+        // show 之前就定好宽度：放到 onShow 里设置会先按内容宽度露半屏，再跳成全宽。
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         dialog.show()
 
         val selected = talker
@@ -575,9 +574,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             // 第一帧就按全宽测量：只放在 onShow 里会先按内容宽度显示半屏，再刷新一次。
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        dialog.setOnShowListener {
-            dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
+        // show 之前就定好宽度：放到 onShow 里设置会先按内容宽度露半屏，再跳成全宽。
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         dialog.show()
     }
 

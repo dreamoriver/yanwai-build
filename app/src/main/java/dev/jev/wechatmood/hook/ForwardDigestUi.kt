@@ -13,6 +13,7 @@ import android.widget.Toast
 import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.reply.ForwardDigest
 import dev.jev.wechatmood.reply.ForwardDigestProtocol
+import dev.jev.wechatmood.reply.ReplyContext
 import dev.jev.wechatmood.reply.ReplyHttpClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,8 +21,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/** 长按合并转发 → 摘要：解析 XML，交给配置的回复模型出一段要点。 */
-internal class ForwardDigestUi(private val activity: Activity, private val message: ForwardDigest.Message) {
+/**
+ * 长按合并转发 → 摘要：解析 XML，交给配置的回复模型出一段要点。
+ *
+ * [talker]/[page] 是点按那一刻的聊天快照：摘要要跑几秒，用户可能已经切走，
+ * 之后再也抓不到这条转发属于哪个会话，档案也就记不进去。
+ */
+internal class ForwardDigestUi(private val activity: Activity, private val message: ForwardDigest.Message,
+    private val talker: String? = null, private val page: ReplyContext? = null) {
     private val kit = PanelKit(activity)
     private val theme = kit.theme
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -45,10 +52,10 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
         val column = kit.content(root)
 
         column.addView(kit.heading("合并转发摘要"))
-        column.addView(kit.caption("共 ${message.items.size} 条消息 · 由你配置的回复模型整理")
+        column.addView(kit.caption("共 ${message.count} 条消息 · 由你配置的回复模型整理")
             .apply { setPadding(0, theme.dp(4), 0, theme.dp(10)) })
 
-        val body = kit.body("正在整理 ${message.items.size} 条消息…", ReplyMetrics.TEXT_ITEM).apply {
+        val body = kit.body("正在整理 ${message.count} 条消息…", ReplyMetrics.TEXT_ITEM).apply {
             setTextIsSelectable(true)
         }
         text = body
@@ -65,7 +72,7 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
         footer = note
         column.addView(note, LinearLayout.LayoutParams(-1, -2))
 
-        val busy = kit.loading().apply { showLoading("正在整理 ${message.items.size} 条消息…") }
+        val busy = kit.loading().apply { showLoading("正在整理 ${message.count} 条消息…") }
         loading = busy
         column.addView(busy, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
 
@@ -126,6 +133,10 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
         copy.isEnabled = true
         copy.alpha = 1f
         if (message.omitted > 0) footer?.text = "已省略 ${message.omitted} 条过长或过多的内容"
+        // 转发里的约定、时间地点顺手进档案：摘要看完就关掉的话，待办永远收不到这件事。
+        if (!failed && shown.isNotBlank()) {
+            DigestFactQueue.offer(activity, null, talker ?: page?.talker, "转发摘要", shown, captured = page)
+        }
     }
 
     fun dismiss() {

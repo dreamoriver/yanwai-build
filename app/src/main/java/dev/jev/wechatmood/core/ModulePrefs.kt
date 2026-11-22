@@ -88,6 +88,9 @@ object ModulePrefs {
             }
         }
     }
+    /** 微信进程里的 Application；情绪日聚合这类后台记录要用，不能从界面拿。 */
+    fun appContext(): Context? = context
+
     fun init(context: Context) {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         val app = context.applicationContext ?: context
