@@ -84,11 +84,6 @@ class MainActivity : AppCompatActivity() {
         binding.navigation.selectedItemId = selectedTab
         binding.entryAnalysis.setOnClickListener { binding.navigation.selectedItemId = R.id.tabEmotion }
         binding.entryReply.setOnClickListener { binding.navigation.selectedItemId = R.id.tabReply }
-        binding.entryDisplay.setOnClickListener {
-            binding.navigation.selectedItemId = R.id.tabAbout
-            scrollTo(binding.showIntent)
-        }
-        binding.entryGuide.setOnClickListener { showSetupGuide(true); scrollTo(binding.setupGuidePanel) }
         bindDisplaySettings()
         binding.toggleContact.setOnClickListener {
             val open = binding.contactPanel.visibility != View.VISIBLE
@@ -184,7 +179,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "重新启动微信后生效", Toast.LENGTH_SHORT).show()
             }
         }
-        val factsSwitch = binding.replySettings.switchRelationFacts
+        val factsSwitch = binding.switchRelationFacts
         factsSwitch.isChecked = prefs.getBoolean(ModulePrefs.KEY_RELATION_FACTS, true)
         factsSwitch.setOnCheckedChangeListener { _, value ->
             if (!syncingSwitches) {
@@ -194,11 +189,11 @@ class MainActivity : AppCompatActivity() {
                     Toast.LENGTH_SHORT).show()
             }
         }
-        binding.replySettings.buttonClearFacts.setOnClickListener {
+        binding.buttonClearFacts.setOnClickListener {
             dev.jev.wechatmood.core.ReplyIdentityProvider.clearAllFacts(this)
             // 广播在 Android 9–13 上收不到发送方、微信没运行时也收不到，
             // 所以请求已经落盘，等微信进程连上设置服务后执行并回执。
-            binding.replySettings.factsStatus.text = "已记录清空请求；微信运行中会立即执行，没运行则下次启动时执行"
+            binding.factsStatus.text = "已记录清空请求；微信运行中会立即执行，没运行则下次启动时执行"
         }
         binding.buttonDebug.setOnClickListener {
             val open = binding.debugPanel.visibility != View.VISIBLE
@@ -529,9 +524,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindDisplaySettings() {
         val prefs = getSharedPreferences(ModulePrefs.FILE_NAME, MODE_PRIVATE)
-        listOf(binding.showIntent to dev.jev.wechatmood.core.CardDisplaySettings.KEY_INTENT,
-            binding.showConcern to dev.jev.wechatmood.core.CardDisplaySettings.KEY_CONCERN,
-            binding.showTone to dev.jev.wechatmood.core.CardDisplaySettings.KEY_TONE).forEach { (toggle, key) ->
+        listOf(binding.intentSettings.showIntent to dev.jev.wechatmood.core.CardDisplaySettings.KEY_INTENT,
+            binding.intentSettings.showConcern to dev.jev.wechatmood.core.CardDisplaySettings.KEY_CONCERN,
+            binding.intentSettings.showTone to dev.jev.wechatmood.core.CardDisplaySettings.KEY_TONE).forEach { (toggle, key) ->
             toggle.isChecked = prefs.getBoolean(key, true)
             ViewCompat.setStateDescription(toggle, if (toggle.isChecked) "显示" else "隐藏")
             var restoring = false
@@ -542,7 +537,7 @@ class MainActivity : AppCompatActivity() {
                         restoring = true; toggle.isChecked = prefs.getBoolean(key, true); restoring = false
                     }
                     ViewCompat.setStateDescription(toggle, if (toggle.isChecked) "显示" else "隐藏")
-                    SettingsStatus.show(binding.cardDisplayStatus,
+                    SettingsStatus.show(binding.intentSettings.cardDisplayStatus,
                         if (saved) "已保存，返回聊天即可查看。" else "保存失败，请重试。",
                         if (saved) R.color.status_success else R.color.status_error)
                 }

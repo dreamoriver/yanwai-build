@@ -22,22 +22,6 @@
                     <ImageView android:layout_width="24dp" android:layout_height="24dp" android:layout_marginStart="12dp" android:src="@drawable/ic_chevron" android:importantForAccessibility="no" />
                 </LinearLayout>
                 <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/outline_subtle" />
-                <LinearLayout android:id="@+id/entryDisplay" style="@style/Yanwai.Entry" android:orientation="horizontal" android:gravity="center_vertical" android:contentDescription="卡片显示，选择分析卡片上要显示的内容" android:importantForAccessibility="yes">
-                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:importantForAccessibility="noHideDescendants">
-                        <TextView style="@style/Yanwai.Body" android:textSize="17sp" android:fontFamily="sans-serif-medium" android:textColor="@color/text_primary" android:text="卡片显示" />
-                        <TextView style="@style/Yanwai.Caption" android:layout_marginTop="4dp" android:text="选择分析卡片上要显示的内容" />
-                    </LinearLayout>
-                    <ImageView android:layout_width="24dp" android:layout_height="24dp" android:layout_marginStart="12dp" android:src="@drawable/ic_chevron" android:importantForAccessibility="no" />
-                </LinearLayout>
-                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/outline_subtle" />
-                <LinearLayout android:id="@+id/entryGuide" style="@style/Yanwai.Entry" android:orientation="horizontal" android:gravity="center_vertical" android:contentDescription="使用指南，启用模块和微信内的功能入口" android:importantForAccessibility="yes">
-                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:importantForAccessibility="noHideDescendants">
-                        <TextView style="@style/Yanwai.Body" android:textSize="17sp" android:fontFamily="sans-serif-medium" android:textColor="@color/text_primary" android:text="使用指南" />
-                        <TextView style="@style/Yanwai.Caption" android:layout_marginTop="4dp" android:text="启用模块和微信内的功能入口" />
-                    </LinearLayout>
-                    <ImageView android:layout_width="24dp" android:layout_height="24dp" android:layout_marginStart="12dp" android:src="@drawable/ic_chevron" android:importantForAccessibility="no" />
-                </LinearLayout>
-                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/outline_subtle" />
                 <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" app:cardBackgroundColor="@color/panel_surface" app:cardCornerRadius="20dp" app:cardElevation="0dp" app:strokeWidth="1dp" app:strokeColor="@color/outline_subtle">
                     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp">
                         <TextView style="@style/Yanwai.Section" android:layout_marginTop="0dp" android:text="微信模块" />
@@ -70,6 +54,15 @@
                         <TextView style="@style/Yanwai.Body" android:text="在微信聊天中展开「＋」，点击「帮我回 · 找话题」。选择对方身份和参考条数，再点击生成。" />
                         <TextView android:id="@+id/replySummary" style="@style/Yanwai.Badge" android:layout_marginTop="16dp" />
                         <com.google.android.material.button.MaterialButton android:id="@+id/openReplyModel" style="@style/Yanwai.Button.Outline" android:layout_marginTop="12dp" android:text="配置回复模型" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+                <com.google.android.material.card.MaterialCardView style="@style/Yanwai.SettingsCard">
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp">
+                        <TextView style="@style/Yanwai.Section" android:layout_marginTop="0dp" android:text="关系档案" />
+                        <TextView style="@style/Yanwai.Caption" android:text="打开「帮我回」时，用回复模型从最近聊天里整理工作、城市、喜好、约定这类事实，只保存在本机。每个联系人每天最多一次。" />
+                        <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/switchRelationFacts" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:text="自动整理关系档案" />
+                        <com.google.android.material.button.MaterialButton android:id="@+id/buttonClearFacts" style="@style/Yanwai.Button.Text" android:text="清空已整理的关系档案" />
+                        <TextView android:id="@+id/factsStatus" style="@style/Yanwai.Caption" android:accessibilityLiveRegion="polite" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
                 <include android:id="@+id/roleManager" layout="@layout/role_manager" />
@@ -110,7 +103,7 @@
                     <com.google.android.material.progressindicator.LinearProgressIndicator android:id="@+id/progressModel" android:layout_width="match_parent" android:layout_height="4dp" android:indeterminate="true" android:visibility="gone" app:trackCornerRadius="2dp" android:contentDescription="正在检测模型连接" />
                     <TextView android:id="@+id/textTestResult" style="@style/Yanwai.Body" android:layout_marginTop="12dp" android:padding="16dp" android:background="@drawable/status_pill" android:accessibilityLiveRegion="polite" android:visibility="gone" />
                 </LinearLayout>
-                <TextView style="@style/Yanwai.Caption" android:layout_marginTop="8dp" android:text="检测只发送示例聊天，可能产生 API 费用。" />
+                <TextView style="@style/Yanwai.Caption" android:layout_marginTop="8dp" android:text="检测只用示例聊天，不读取微信消息，可能产生少量费用。" />
                 </LinearLayout>
                 <include android:id="@+id/analysisModelSettings" layout="@layout/analysis_model_settings" />
                 <include android:id="@+id/replySettings" layout="@layout/reply_settings" />
@@ -118,20 +111,14 @@
             <LinearLayout android:id="@+id/aboutPanel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
                 <TextView style="@style/Yanwai.PageTitle" android:text="更多" />
                 <com.google.android.material.button.MaterialButton android:id="@+id/openAllModels" style="@style/Yanwai.Button.Outline" android:text="模型配置" app:icon="@drawable/ic_settings" />
-                <TextView style="@style/Yanwai.Section" android:text="分析卡片显示" android:layout_marginTop="20dp" />
-                <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/showIntent" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="显示意图解析" android:saveEnabled="false" />
-                <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/showConcern" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="显示可能在意" android:saveEnabled="false" />
-                <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/showTone" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="显示情绪倾向" android:saveEnabled="false" />
-                <TextView android:id="@+id/cardDisplayStatus" style="@style/Yanwai.Caption" android:text="切换立即保存，不重新分析。" android:accessibilityLiveRegion="polite" />
-                <TextView style="@style/Yanwai.Caption" android:layout_marginTop="8dp" android:text="只影响智能分析的三项解读；情绪指标和失败提示始终保留。" />
                 <TextView style="@style/Yanwai.Section" android:layout_marginTop="24dp" android:text="遇到问题" />
                 <TextView style="@style/Yanwai.Body" android:text="先复现一次，再导出日志。问题自行恢复后，也可以查看之前的记录。" />
                 <com.google.android.material.button.MaterialButton android:id="@+id/buttonExportLog" style="@style/Yanwai.Button.Outline" android:layout_marginTop="12dp" android:text="导出运行日志" />
+                <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/switchExplore" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:text="记录微信适配信息" />
+                <TextView style="@style/Yanwai.Caption" android:text="排查微信版本兼容问题时开启，重启微信后生效。" />
                 <com.google.android.material.button.MaterialButton android:id="@+id/buttonDebug" style="@style/Yanwai.Button.Text" android:text="查看详细排查信息" />
                 <LinearLayout android:id="@+id/debugPanel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
                     <TextView style="@style/Yanwai.Caption" android:text="桌面页包含本应用日志和微信最近上报的记录。若未收到微信日志，请在微信内长按「分析」或「言外」入口直接导出。" />
-                    <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/switchExplore" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp" android:text="记录微信适配信息" />
-                    <TextView style="@style/Yanwai.Caption" android:text="排查版本兼容问题时开启，重启微信后生效。" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/buttonRefreshLog" style="@style/Yanwai.Button.Text" android:text="刷新状态与日志" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/buttonCopyLog" style="@style/Yanwai.Button.Text" android:text="复制完整日志" />
                     <TextView android:id="@+id/textLog" style="@style/Yanwai.Caption" android:textIsSelectable="true" android:fontFamily="monospace" />

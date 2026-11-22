@@ -23,6 +23,18 @@
     <com.google.android.material.button.MaterialButton android:id="@+id/saveIntent" style="@style/Yanwai.Button" android:layout_marginTop="16dp" android:text="保存分析方式" />
     </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
+    <com.google.android.material.card.MaterialCardView style="@style/Yanwai.SettingsCard">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp">
+            <TextView style="@style/Yanwai.Section" android:layout_marginTop="0dp" android:text="分析卡片显示" />
+            <TextView style="@style/Yanwai.Caption" android:text="决定分析卡片上能看到哪几行解读。切换立即保存，不会重新分析。" />
+            <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/showIntent" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="显示意图解析" android:saveEnabled="false" />
+            <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/showConcern" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="显示可能在意" android:saveEnabled="false" />
+            <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/showTone" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="显示情绪倾向" android:saveEnabled="false" />
+            <TextView android:id="@+id/cardDisplayStatus" style="@style/Yanwai.Caption" android:accessibilityLiveRegion="polite" />
+            <TextView style="@style/Yanwai.Caption" android:layout_marginTop="4dp" android:text="情绪指标和失败提示始终保留。" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <TextView style="@style/Yanwai.Section" android:text="模型连接" android:layout_marginTop="24dp" />
     <TextView android:id="@+id/connectionSummary" style="@style/Yanwai.Body" android:text="JEV 与 LLM 可随时单独配置。" />
     <com.google.android.material.button.MaterialButton android:id="@+id/openModelSettings" style="@style/Yanwai.Button.Outline" android:layout_marginTop="12dp" android:text="管理模型连接" app:icon="@drawable/ic_settings" />
