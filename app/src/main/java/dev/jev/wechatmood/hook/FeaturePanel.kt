@@ -7,7 +7,15 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.Switch
+import android.widget.TextView
 import android.widget.Toast
+import dev.jev.wechatmood.core.RelationFactBridge
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 「附加」入口弹出的功能面板：帮回、统计、档案、待办，最后是自动分析开关。
@@ -32,6 +40,39 @@ internal class FeaturePanel(
 ) {
     private val kit = PanelKit(activity)
     private val theme = kit.theme
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var factsBadge: TextView? = null
+    private var todosBadge: TextView? = null
+
+    private fun badgeView(): TextView = theme.label("", ReplyMetrics.TEXT_CAPTION, theme.accent, bold = true).apply {
+        setPadding(theme.dp(7), theme.dp(2), theme.dp(7), theme.dp(2))
+        background = theme.shape(theme.surface, ReplyMetrics.RADIUS_BUTTON, theme.accent)
+        visibility = android.view.View.GONE
+    }
+
+    private fun setBadge(view: TextView?, value: Int) {
+        if (view == null) return
+        if (value <= 0) {
+            view.visibility = android.view.View.GONE
+        } else {
+            view.text = value.toString()
+            view.visibility = android.view.View.VISIBLE
+        }
+    }
+
+    /** 缓存是上一次进聊天写的；打开面板时再读一次本地库，避免要开关几次才出数字。 */
+    private fun refreshCounts() {
+        val current = talker ?: return
+        scope.launch {
+            val badge = withContext(Dispatchers.IO) {
+                runCatching { RelationFactBridge.badge(activity, current) }.getOrNull()
+            } ?: return@launch
+            if (activity.isFinishing || activity.isDestroyed) return@launch
+            RelationBadge.update(activity, current, badge.due, badge.open, badge.timed)
+            setBadge(factsBadge, badge.open)
+            setBadge(todosBadge, badge.timed)
+        }
+    }
 
     fun show() {
         val dialog = Dialog(activity)
@@ -58,9 +99,9 @@ internal class FeaturePanel(
         var first = true
         // 面板一打开就告诉用户「为什么会有提醒」：档案里总共几条待办、今天要处理几条。
         val counts = RelationBadge.counts(activity, talker)
-        fun row(title: String, subtitle: String, action: () -> Unit, badge: String? = null) {
+        fun row(title: String, subtitle: String, action: () -> Unit, badgeView: TextView? = null) {
             if (!first) group.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)))
-            group.addView(kit.listRow(title, subtitle, badge = badge) {
+            group.addView(kit.listRow(title, subtitle, badgeView = badgeView) {
                 dialog.dismiss()
                 action()
             }, LinearLayout.LayoutParams(-1, -2))
@@ -75,14 +116,16 @@ internal class FeaturePanel(
                 "消息量、活跃成员与时段", onStats)
         }
         if (factsAvailable) {
-            val openBadge = counts.open.takeIf { it > 0 }?.toString()
-            val timedBadge = counts.timed.takeIf { it > 0 }?.toString()
+            factsBadge = badgeView()
+            todosBadge = badgeView()
+            setBadge(factsBadge, counts.open)
+            setBadge(todosBadge, counts.timed)
             if (talker?.endsWith("@chatroom") == true) {
-                row("群聊纪要", "群里的约定、时间地点和提到我的事", onFacts, openBadge)
-                row("群待办", "群里带时间的约定与重要日期", onTodos, timedBadge)
+                row("群聊纪要", "群里的约定、时间地点和提到我的事", onFacts, factsBadge)
+                row("群待办", "群里带时间的约定与重要日期", onTodos, todosBadge)
             } else {
-                row("关系档案", "整理过的事实，可移出或补一条", onFacts, openBadge)
-                row("待办", "带时间的约定与重要日期", onTodos, timedBadge)
+                row("关系档案", "整理过的事实，可移出或补一条", onFacts, factsBadge)
+                row("待办", "带时间的约定与重要日期", onTodos, todosBadge)
             }
         }
         body.addView(group, LinearLayout.LayoutParams(-1, -2))
@@ -130,6 +173,8 @@ internal class FeaturePanel(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT)
         }
+        dialog.setOnDismissListener { scope.cancel() }
         dialog.show()
+        refreshCounts()
     }
 }

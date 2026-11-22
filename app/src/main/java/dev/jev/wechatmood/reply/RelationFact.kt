@@ -238,8 +238,9 @@ object RelationDue {
     }
 }
 
-/** 聊天标题圆点的两种状态：今天要处理几条、更远处还有几条。 */
-data class ChatBadge(val due: Int, val future: Int)
+/** 聊天标题圆点与附加面板用：今天要处理几条、更远处几条、全部开放几条、待办几条。 */
+data class ChatBadge(val due: Int, val future: Int, val open: Int = due + future,
+    val timed: Int = due + future)
 
 /**
  * 事实存储：一条事实一行，[payload] 存完整对象，其余列只用于查询与排序。
@@ -363,10 +364,12 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
     fun badge(talker: String, now: Long = System.currentTimeMillis()): ChatBadge? {
         if (talker.isBlank()) return null
         val key = contactKeyForTalker(talker) ?: return null
-        val timed = listAll(ReplyContactKey(key)).filter { it.isOpen && it.isTimed && it.occurredAt > 0 }
-        if (timed.isEmpty()) return ChatBadge(0, 0)
+        val all = listAll(ReplyContactKey(key))
+        val open = all.count { it.isOpen }
+        val timed = all.filter { it.isOpen && it.isTimed && it.occurredAt > 0 }
+        if (timed.isEmpty()) return ChatBadge(0, 0, open, 0)
         val due = timed.count { RelationDue.select(listOf(it), now).isNotEmpty() }
-        return ChatBadge(due, timed.size - due)
+        return ChatBadge(due, timed.size - due, open, timed.size)
     }
 
     private fun contactKeyForTalker(talker: String): String? =
