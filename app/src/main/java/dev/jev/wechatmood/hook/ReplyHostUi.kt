@@ -46,6 +46,7 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     private var savingRoleWindow: Dialog? = null
     private var talker: String? = null
     private var dialog: Dialog? = null
+    private var styleDialog: Dialog? = null
     private var snapshot: ReplyContext? = null
     /** 依据弹窗改为异步读缓存后再显示，同一个面板只留一个。 */
     private var evidenceDialog: AlertDialog? = null
@@ -87,6 +88,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
      */
     private fun showStyleProfile(profile: StyleProfile?) {
         val dialog = Dialog(activity)
+        styleDialog = dialog
+        dialog.setOnDismissListener { if (styleDialog === dialog) styleDialog = null }
         val theme = ReplyTheme(activity)
         val box = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -661,7 +664,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 toast("正在生成回复，稍后再整理档案")
                 return@doRefreshFacts
             }
-            val key = owner.key
+            // 档案按会话存：群聊也要能手动整理，不能复用只认私聊的 owner.key。
+            val key = ReplyContactKey.of(owner.account, owner.talker, allowGroup = true)
             if (key == null) {
                 if (!auto) toast("账号或联系人尚未确认，暂时不能整理档案")
                 return@doRefreshFacts
@@ -700,14 +704,16 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                         "看了 ${result.scanned} 条，没有可整理的新事实")
                     else -> {
                         facts = result.facts
-                        finishFacts("关系档案已更新：" + result.changeText(),
-                            "档案已更新：" + result.changeText())
+                        val changed = result.added + result.replaced + result.superseded > 0
+                        val text = (if (changed) "关系档案已更新：" else "") + result.changeText()
+                        finishFacts(text, if (changed) "档案已更新：" + result.changeText()
+                            else result.changeText())
                     }
                 }
             }
             if (!started && !auto) {
                 factsActionRef?.text = "整理中…"
-                state.text = "正在整理，稍等…"
+                if (ownsDrawer()) state.text = "正在整理，稍等…"
             }
         }
         fun showDraftCheck(check: DraftCheck) {
@@ -1319,6 +1325,9 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     fun hide() {
         plusEntry.clear()
         openingJob?.cancel(); ownerEpoch = null
+        // 口吻画像、依据弹窗都是独立窗口，抽屉关掉后不能留在屏幕上。
+        styleDialog?.dismiss(); styleDialog = null
+        factsActionRef = null
         dialog?.dismiss(); job?.cancel(); historyJob?.cancel(); session.cancel()
         talker = null
         // 目标（尤其是长按的那张图）只属于打开它的聊天，切走后不能留给下一个群。

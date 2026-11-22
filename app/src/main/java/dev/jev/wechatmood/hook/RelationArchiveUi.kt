@@ -690,7 +690,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 result.facts.isEmpty() -> showStatus("这次没有提取到新的事实", theme.muted)
                 else -> {
                     reload()
-                    showStatus("已更新：" + result.changeText(), theme.success)
+                    val changed = result.added + result.replaced + result.superseded > 0
+                    showStatus((if (changed) "已更新：" else "") + result.changeText(), theme.success)
                 }
             }
         }

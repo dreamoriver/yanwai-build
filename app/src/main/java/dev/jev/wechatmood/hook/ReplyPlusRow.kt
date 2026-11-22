@@ -35,10 +35,11 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
     }
 
     fun update(currentFooter: View?) {
-        nudgeBudget = 30
         if (footer !== currentFooter) {
             clear()
             footer = currentFooter
+            // 只在换面板时重置重试预算；否则每个 tick 都会把 30 帧上限重置掉。
+            nudgeBudget = 30
             currentFooter?.takeIf { it.isAttachedToWindow }?.let {
                 observer = it.viewTreeObserver.also { tree -> tree.addOnGlobalLayoutListener(layoutListener) }
                 it.addOnAttachStateChangeListener(attachListener)
@@ -53,7 +54,7 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
      */
     private fun requestRefresh() {
         val now = android.os.SystemClock.uptimeMillis()
-        // 以前 120ms 一档，点开「＋」后第一帧经常被延后；48ms 只多一点遍历，体感是立刻出现。
+        // 以前 120ms 一档，点开「＋」后第一帧经常被延后；48ms（约 20 次/秒）体感是立刻出现。
         val wait = 48 - (now - lastRefreshAt)
         if (wait <= 0) {
             lastRefreshAt = now
@@ -172,6 +173,9 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
     fun clear() {
         pendingRefresh?.let { footer?.removeCallbacks(it) }
         pendingRefresh = null
+        nudge = false
+        nudgeView = null
+        nudgeBudget = 0
         observer?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layoutListener)
         observer = null
         footer?.removeOnAttachStateChangeListener(attachListener)

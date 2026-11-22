@@ -88,7 +88,10 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
             // 记下这条档案对应哪个聊天和备注名，到期通知点开才能进对会话。
             if (key != null) {
                 val name = withContext(Dispatchers.IO) {
-                    runCatching { ReplyDatabaseHistory.contactNames(listOf(selected))[selected] }.getOrNull()
+                    runCatching {
+                        ReplyDatabaseHistory.contactNames(listOf(selected))[selected]
+                            ?: ReplyDatabaseHistory.groupNames(listOf(selected))[selected]
+                    }.getOrNull()
                 }
                 RelationFactBridge.rememberContact(activity, key, selected, name.orEmpty())
             }
@@ -130,6 +133,7 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
     }
 
     private fun render() {
+        val group = talker?.endsWith("@chatroom") == true
         listContainer.removeAllViews()
         val now = System.currentTimeMillis()
         // 与提醒侧同一口径：只有时间型条目才算待办，否则「工作」「喜好」带个日期就只显示不提醒。
@@ -144,8 +148,11 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         }.sortedByDescending { it.updatedAt }.take(HANDLED_LIMIT)
 
         if (todos.isEmpty()) {
-            listContainer.addView(kit.body("这个联系人还没有带时间的约定"))
-            listContainer.addView(kit.caption("打开一次「帮我回」会自动整理；也可以在抽屉里点「更新关系档案」"))
+            listContainer.addView(kit.body(if (group) "这个群还没有带时间的约定" else "这个联系人还没有带时间的约定"))
+            listContainer.addView(kit.caption(
+                if (group) "在「附加 · 群聊纪要」里点一次「整理一次」，之后群里说好的时间会自动进来"
+                else "打开一次「帮我回」会自动整理；也可以在抽屉里点「更新关系档案」"
+            ))
         }
         if (overdue.isNotEmpty()) {
             listContainer.addView(kit.sectionLabel("已过期 ${overdue.size} 条"))

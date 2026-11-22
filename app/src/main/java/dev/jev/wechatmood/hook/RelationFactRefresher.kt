@@ -100,7 +100,8 @@ internal object RelationFactRefresher {
         snapshot: Snapshot? = null): Result {
         // 快照必须和 key 对得上：账号或联系人变了，说明调用方抓的是别的聊天。
         if (snapshot != null) verify(key, snapshot)
-        val live = if (snapshot != null && snapshot.messages.isNotEmpty()) {
+        // 有快照就只认快照：快照消息为空也不能回落当前屏幕，否则切聊天后会把 B 的内容按 A 的 key 落库。
+        val live = if (snapshot != null) {
             ReplyContext(snapshot.talker, snapshot.messages)
         } else {
             runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull()
@@ -111,6 +112,7 @@ internal object RelationFactRefresher {
         withContext(Dispatchers.IO) {
             val name = runCatching {
                 ReplyDatabaseHistory.contactNames(listOf(live.talker))[live.talker]
+                    ?: ReplyDatabaseHistory.groupNames(listOf(live.talker))[live.talker]
             }.getOrNull()
             RelationFactBridge.rememberContact(context, key, live.talker, name.orEmpty())
         }

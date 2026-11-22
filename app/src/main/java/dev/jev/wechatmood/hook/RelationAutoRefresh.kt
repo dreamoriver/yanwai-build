@@ -95,7 +95,10 @@ internal object RelationAutoRefresh {
         val fresh = window.count { it.id > meta.lastMessageId }
         val stale = if (group) GROUP_STALE_MS else STALE_MS
         val freshTarget = if (group) GROUP_FRESH_MESSAGES else FRESH_MESSAGES
-        val due = meta.lastAt <= 0 || gap > stale || fresh >= freshTarget
+        // 群聊第一次不进自动整理：一个没见过的群上传 50 条消息给模型，隐私和费用都超出预期。
+        // 用户在「附加 · 群聊纪要」点过一次「整理一次」后，才开始按 7 天/50 条自动更新。
+        val due = if (group && meta.lastAt <= 0) false
+            else meta.lastAt <= 0 || gap > stale || fresh >= freshTarget
         MoodLog.i("RELATION_FACT_AUTOPAGE due=$due gap_hours=${gap / 3600_000L} fresh=$fresh window=${window.size}")
         if (!due) return
         val started = RelationFactRefresher.launch(activity, key, settings, snapshot = snapshot) { result, error ->

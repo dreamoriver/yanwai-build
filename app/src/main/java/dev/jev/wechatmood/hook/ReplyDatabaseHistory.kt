@@ -580,9 +580,12 @@ object ReplyDatabaseHistory {
             for (name in names) {
                 if (out.containsKey(name)) continue
                 runCatching {
-                    query(db, "SELECT nickname FROM chatroom WHERE username = ? LIMIT 1", arrayOf(name)).use {
+                    // chatroom 表的主键是 chatroomname，群名在 displayname；没有 username/nickname 列。
+                    query(db, "SELECT displayname FROM chatroom WHERE chatroomname = ? LIMIT 1", arrayOf(name)).use {
                         if (it.moveToFirst()) {
-                            it.getString(0)?.trim()?.takeIf(String::isNotBlank)?.let { value -> out[name] = value }
+                            val raw = it.getString(0)?.trim().orEmpty()
+                            val value = dev.jev.wechatmood.core.TextClean.name(raw).trim()
+                            if (value.isNotEmpty()) out[name] = value
                         }
                     }
                 }
@@ -619,7 +622,7 @@ object ReplyDatabaseHistory {
                             }
                             var matched: Pair<String, String>? = null
                             for (candidate in candidates) {
-                                val key = ReplyContactKey.of(account, candidate)?.value ?: continue
+                                val key = ReplyContactKey.of(account, candidate, allowGroup = true)?.value ?: continue
                                 if (key in keys && key !in result) {
                                     matched = key to candidate
                                     break
@@ -661,7 +664,7 @@ object ReplyDatabaseHistory {
                             }.getOrNull()
                         }.flatten()
                         val candidate = talkers.firstOrNull { talker ->
-                            accounts.any { account -> ReplyContactKey.of(account, talker)?.value == key }
+                            accounts.any { account -> ReplyContactKey.of(account, talker, allowGroup = true)?.value == key }
                         }
                         if (candidate != null) {
                             val name = contactNames(listOf(candidate))[candidate].orEmpty()

@@ -34,6 +34,9 @@ internal object RelationChatBadge {
     private var talker: String? = null
     private var lastLookup = 0L
     private var lastRefresh = 0L
+    private var retryAfter = 0L
+    private var lastHiddenTalker: String? = null
+    private var lastLoggedBadge: String? = null
     private var checking = false
     private var due = 0
     private var future = 0
@@ -43,6 +46,10 @@ internal object RelationChatBadge {
     fun update(activity: Activity, currentTalker: String?) {
         if (currentTalker == null) {
             detach()
+            talker = null
+            lastRefresh = 0
+            lastHiddenTalker = null
+            lastLoggedBadge = null
             return
         }
         if (currentTalker != talker) {
@@ -51,14 +58,23 @@ internal object RelationChatBadge {
             due = 0
             future = 0
             lastRefresh = 0
+            lastHiddenTalker = null
+            lastLoggedBadge = null
         }
         val now = SystemClock.uptimeMillis()
         if (dot?.isAttachedToWindow != true || host?.isAttachedToWindow != true) {
             detach()
+            if (now < retryAfter) return
             if (now - lastLookup < LOOKUP_INTERVAL_MS) return
             lastLookup = now
-            val title = findTitle(activity) ?: run {
-                MoodLog.i("RELATION_BADGE_HIDDEN")
+            val title = findTitle(activity)
+            if (title == null) {
+                // 找不到就退避 2 秒，并且同一个会话只记一次日志：这里跑在微信主线程上。
+                retryAfter = now + 2_000
+                if (lastHiddenTalker != currentTalker) {
+                    lastHiddenTalker = currentTalker
+                    MoodLog.i("RELATION_BADGE_HIDDEN")
+                }
                 return
             }
             attach(activity, title)
@@ -78,19 +94,29 @@ internal object RelationChatBadge {
             checking = false
             if (talker != currentTalker) return@launch
             if (badge == null) {
-                MoodLog.i("RELATION_BADGE_NO_DATA")
+                if (lastLoggedBadge != "none") {
+                    lastLoggedBadge = "none"
+                    MoodLog.i("RELATION_BADGE_NO_DATA")
+                }
                 dot?.visibility = View.GONE
                 return@launch
             }
             due = badge.due
             future = badge.future
             paint()
-            MoodLog.i("RELATION_BADGE due=$due future=$future")
+            // 圆点 8 秒刷新一次，只在数字变化时写字，避免主线程上反复落盘。
+            val mark = due.toString() + "/" + future
+            if (lastLoggedBadge != mark) {
+                lastLoggedBadge = mark
+                MoodLog.i("RELATION_BADGE due=$due future=$future")
+            }
         }
     }
 
     private fun attach(activity: Activity, title: TextView) {
         val parent = title.parent as? LinearLayout ?: run {
+            // 标题容器不是 LinearLayout 时不要每 400ms 重试，等页面下一次重建。
+            retryAfter = SystemClock.uptimeMillis() + 3_000
             MoodLog.i("RELATION_BADGE_SKIP parent=" + (title.parent?.javaClass?.simpleName ?: "null"))
             return
         }
@@ -140,13 +166,21 @@ internal object RelationChatBadge {
         val root = activity.window?.decorView as? ViewGroup ?: return null
         val chat = descendants(root).filterIsInstance<ViewGroup>()
             .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") } ?: return null
-        val density = activity.resources.displayMetrics.density
+        val metrics = activity.resources.displayMetrics
+        // 标题栏在 ChatFooter 上方；排除 ListView（消息气泡）和 EditText（输入框）。
+        val footerY = descendants(chat)
+            .firstOrNull { it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter" }
+            ?.let { screenY(it) } ?: Int.MAX_VALUE
+        val limitY = footerY - (40 * metrics.density).toInt()
+        val titleSize = 15 * metrics.scaledDensity
         return descendants(chat)
             .filterIsInstance<TextView>()
-            .filter { it.isShown && it.text.isNotBlank() && it.textSize >= 16 * density }
+            .filter { it !is android.widget.EditText }
+            .filter { it.isShown && it.text.isNotBlank() && it.textSize >= titleSize }
             .filter { tv ->
                 generateSequence(tv.parent as? View) { it.parent as? View }.none { it is android.widget.ListView }
             }
+            .filter { screenY(it) < limitY }
             .minByOrNull { screenY(it) }
     }
 
