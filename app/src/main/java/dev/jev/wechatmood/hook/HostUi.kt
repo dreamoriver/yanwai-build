@@ -29,6 +29,7 @@ class HostUi(private val activity: Activity) {
         status = value
         messages = current
         replyUi.update(currentTalker)
+        RelationChatBadge.update(activity, currentTalker)
         syncControl()
     }
 
@@ -117,9 +118,8 @@ class HostUi(private val activity: Activity) {
     /** ＋面板里「附加」弹出的功能面板。 */
     private fun showFeaturePanel() {
         val current = talker
-        // 关系档案与待办只针对私聊：群聊没有联系人档案，摊开只会误导。
-        val privateChat = current != null && !current.endsWith("@chatroom")
-        FeaturePanel(activity, current, replyAvailable = current != null, factsAvailable = privateChat,
+        // 私聊是关系档案，群聊是群聊纪要；两边都按会话存，共用同一套待办与提醒。
+        FeaturePanel(activity, current, replyAvailable = current != null, factsAvailable = current != null,
             analysisEnabled = ModulePrefs.isChatEnabled(current),
             onReply = {
                 // 抽屉要求还停在这个聊天上；切走了就说清楚，别让按钮看起来没反应。

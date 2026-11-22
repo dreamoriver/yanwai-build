@@ -87,8 +87,14 @@ object StyleAnalyzer {
             .sortedBy { kotlin.math.abs(it.codePointCount(0, it.length) - median) }
             .distinct()
             .take(3)
-            .map { it.take(MAX_SAMPLE_LENGTH) }
+            .map { clip(it, MAX_SAMPLE_LENGTH) }
         return StyleProfile(mine.size, median, p90, question, exclaim, period, particles, emoji, openers, samples)
+    }
+
+    /** 长句按码点截断并留省略号：直接 take 会把 emoji 切成半个，也会让句子看起来说到一半。 */
+    private fun clip(text: String, max: Int): String {
+        if (text.codePointCount(0, text.length) <= max) return text
+        return text.substring(0, text.offsetByCodePoints(0, max - 1)) + "…"
     }
 
     private fun countOf(text: String, piece: String): Int {

@@ -442,7 +442,9 @@ internal object RelationReminder {
     private suspend fun names(talkers: List<String>): Map<String, String> {
         if (talkers.isEmpty()) return emptyMap()
         return withContext(Dispatchers.IO) {
-            runCatching { ReplyDatabaseHistory.contactNames(talkers) }.getOrDefault(emptyMap())
+            val direct = runCatching { ReplyDatabaseHistory.contactNames(talkers) }.getOrDefault(emptyMap())
+            val groups = runCatching { ReplyDatabaseHistory.groupNames(talkers) }.getOrDefault(emptyMap())
+            direct + groups
         }
     }
 }

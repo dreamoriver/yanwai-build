@@ -58,6 +58,8 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
     private var autoTarget = false
     /** 当前会话的关系档案，生成回复时随上下文一起给模型。 */
     private var facts: List<RelationFact> = emptyList()
+    /** 「更新关系档案」按钮：点完先改字，避免点了像没反应。 */
+    private var factsActionRef: TextView? = null
     private var draftTargetMedia: String? = null
     private var draftText: String = ""
     private var draftLastIncoming: String? = null
@@ -77,6 +79,66 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
             updateNotice()
         }
     }
+    /**
+     * 口吻画像：只展示模型参考的说话习惯，不提供「关掉」开关。
+     *
+     * 以前这段摘要只发给模型，用户看不到，觉得回复不像自己时无从核对。
+     * 这里把摘要和几条示例短语摊开，明确说明不会逐字模仿。
+     */
+    private fun showStyleProfile(profile: StyleProfile?) {
+        val dialog = Dialog(activity)
+        val theme = ReplyTheme(activity)
+        val box = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(theme.dp(20), theme.dp(16), theme.dp(20), theme.dp(16))
+            background = theme.shape(theme.surface, ReplyMetrics.RADIUS_PANEL, theme.border)
+        }
+        box.addView(theme.label("口吻画像", ReplyMetrics.TEXT_TITLE, theme.ink, bold = true))
+        if (profile == null) {
+            box.addView(theme.label("聊天里「我」的文字还不够，至少 8 条才能看出习惯。",
+                ReplyMetrics.TEXT_BODY, theme.muted).apply {
+                setPadding(0, theme.dp(8), 0, theme.dp(8))
+            })
+        } else {
+            box.addView(theme.label(profile.summary(), ReplyMetrics.TEXT_BODY, theme.ink).apply {
+                setPadding(0, theme.dp(8), 0, theme.dp(6))
+                setLineSpacing(theme.dp(3).toFloat(), 1f)
+                setTextIsSelectable(true)
+            })
+            if (profile.samples.isNotEmpty()) {
+                box.addView(theme.label("我最近这样说话", ReplyMetrics.TEXT_CAPTION, theme.accent, bold = true).apply {
+                    setPadding(0, theme.dp(6), 0, theme.dp(2))
+                })
+                profile.samples.take(3).forEach { sample ->
+                    box.addView(theme.label("· " + sample, ReplyMetrics.TEXT_BODY, theme.muted).apply {
+                        setPadding(0, theme.dp(2), 0, 0)
+                        // 极窄的聊天窗口里再折一次，末尾必须有省略号，不能半句消失。
+                        maxLines = 2
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    })
+                }
+            }
+            box.addView(theme.label("回复会照这个习惯写，不会逐字模仿。",
+                ReplyMetrics.TEXT_CAPTION, theme.muted).apply {
+                setPadding(0, theme.dp(8), 0, 0)
+            })
+        }
+        box.addView(theme.action("关闭", primary = true) { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
+        dialog.setContentView(box)
+        dialog.window?.apply {
+            setBackgroundDrawableResource(android.R.color.transparent)
+            setGravity(Gravity.BOTTOM)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0.35f)
+        }
+        dialog.setOnShowListener {
+            dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.show()
+    }
+
     private fun updateNotice() {
         val captured = snapshot ?: return
         val latest = MessageSniffer.replyBoundary() ?: return
@@ -351,8 +413,16 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         }
         roleEditor.addView(identityBackground, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         var refreshFacts: (Boolean) -> Unit = {}
-        roleEditor.addView(action("更新关系档案", quiet = true) { refreshFacts(false) },
-            LinearLayout.LayoutParams(-1, dp(40)).apply { bottomMargin = dp(6) })
+        val factActions = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+        // 按钮自己就是进度：点完立刻改字，不必去底部状态行找结果。
+        val factsAction = action("更新关系档案", quiet = true) { refreshFacts(false) }
+        factsActionRef = factsAction
+        factActions.addView(factsAction,
+            LinearLayout.LayoutParams(0, dp(40), 1f).apply { rightMargin = dp(6) })
+        factActions.addView(action("口吻画像 ▾", quiet = true) {
+            showStyleProfile(StyleProfileCache.of(talker.orEmpty(), live.messages))
+        }, LinearLayout.LayoutParams(0, dp(40), 1f))
+        roleEditor.addView(factActions, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         val instruction = EditText(activity).apply {
             hint = "这次想怎么回？如：委婉拒绝、别太正式（选填）"
             textSize = 14f; setTextColor(theme.ink); setHintTextColor(theme.muted)
@@ -587,7 +657,10 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
         }
 
         fun doRefreshFacts(auto: Boolean) {
-            if (!auto && busy) return@doRefreshFacts
+            if (!auto && busy) {
+                toast("正在生成回复，稍后再整理档案")
+                return@doRefreshFacts
+            }
             val key = owner.key
             if (key == null) {
                 if (!auto) toast("账号或联系人尚未确认，暂时不能整理档案")
@@ -598,29 +671,44 @@ class ReplyHostUi(private val activity: Activity, createAnalysisControl: () -> V
                 if (!auto) toast("请先在「回复」里配置模型")
                 return@doRefreshFacts
             }
-            if (!auto) state.text = "正在整理关系档案…"
+            if (!auto) {
+                state.text = "正在整理关系档案…"
+                factsActionRef?.apply { text = "整理中…"; isEnabled = false }
+            }
             // 独立 scope：关掉抽屉或切走聊天都不会把这次请求掐断。
             // 但抽取必须用打开时的账号、联系人与消息：异步等待期间切到别的聊天，
             // 再从头读屏幕就会把 B 的消息按 A 的键存下去。
             val snapshot = owner.account?.let { account ->
                 RelationFactRefresher.Snapshot(account, owner.talker, live.messages)
             }
+            // 结果同时写进按钮和 Toast：底部状态行经常不在视野里，用户以为没点动。
+            fun finishFacts(message: String, toastText: String?) {
+                factsActionRef?.apply { text = "更新关系档案"; isEnabled = true }
+                if (ownsDrawer()) state.text = message
+                if (!auto && toastText != null) toast(toastText)
+            }
             val started = RelationFactRefresher.launch(activity, key, settings, snapshot = snapshot) { result, error ->
                 when {
                     error != null -> {
                         MoodLog.w("RELATION_FACTS_FAILED " + error.javaClass.simpleName)
-                        if (!auto && ownsDrawer()) state.text = "关系档案更新失败：" + (error.message ?: "请重试")
+                        finishFacts("关系档案更新失败：" + (error.message ?: "请重试"),
+                            "整理失败：" + (error.message ?: "请重试"))
                     }
-                    result == null -> Unit
-                    result.nothingNew -> if (!auto && ownsDrawer()) state.text = "最近没有新消息，不用整理"
-                    result.facts.isEmpty() -> if (!auto && ownsDrawer()) state.text = "这次没有提取到新的事实"
-                    else -> if (ownsDrawer()) {
+                    result == null -> finishFacts("关系档案没有更新", null)
+                    result.nothingNew -> finishFacts("最近没有新消息，不用整理", "最近没有新消息")
+                    result.facts.isEmpty() -> finishFacts("这次没有提取到新的事实",
+                        "看了 ${result.scanned} 条，没有可整理的新事实")
+                    else -> {
                         facts = result.facts
-                        if (!auto) state.text = "关系档案已更新：${result.facts.size} 条"
+                        finishFacts("关系档案已更新：" + result.changeText(),
+                            "档案已更新：" + result.changeText())
                     }
                 }
             }
-            if (!started && !auto && ownsDrawer()) state.text = "正在整理，稍等…"
+            if (!started && !auto) {
+                factsActionRef?.text = "整理中…"
+                state.text = "正在整理，稍等…"
+            }
         }
         fun showDraftCheck(check: DraftCheck) {
             if (!check.parsed) {

@@ -219,13 +219,13 @@ object ReplyDatabaseHistory {
         val out = mutableListOf<MessageMetadata>()
         for (db in databases) {
             runCatching {
-                query(db, "SELECT * FROM message WHERE talker = ? AND type = 1 AND msgId < ? " +
+                query(db, "SELECT * FROM message WHERE talker = ? AND type IN (1, 34) AND msgId < ? " +
                     "ORDER BY msgId DESC LIMIT ?", arrayOf(talker, msgId.toString(), limit.toString())).use { cursor ->
                     while (cursor.moveToNext()) out += metadata(cursor)
                 }
             }
             runCatching {
-                query(db, "SELECT * FROM message WHERE talker = ? AND type = 1 AND msgId > ? " +
+                query(db, "SELECT * FROM message WHERE talker = ? AND type IN (1, 34) AND msgId > ? " +
                     "ORDER BY msgId ASC LIMIT ?", arrayOf(talker, msgId.toString(), limit.toString())).use { cursor ->
                     while (cursor.moveToNext()) out += metadata(cursor)
                 }
@@ -233,6 +233,35 @@ object ReplyDatabaseHistory {
             if (out.isNotEmpty()) break
         }
         out.sortedBy { it.createdAt }
+    }
+
+    /**
+     * 依据弹窗用：微信已经保存的语音转写。
+     *
+     * 只读 VoiceTransText，不调用微信原生转写，也不等待；查不到就当作没有，
+     * 界面会写「没有已保存的转写」，而不是把 [dev.jev.wechatmood.voice.VoiceText.WAITING] 当成正文。
+     */
+    suspend fun voiceTranscripts(talker: String, msgIds: List<Long>,
+        accountScope: String? = null): Map<Long, String> = withContext(Dispatchers.IO) {
+        if (msgIds.isEmpty()) return@withContext emptyMap()
+        val databases = databasesForScope(
+            synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }, accountScope)
+        val out = LinkedHashMap<Long, String>()
+        for (db in databases) {
+            for (id in msgIds) {
+                if (id <= 0 || out.containsKey(id)) continue
+                runCatching {
+                    query(db, "SELECT content FROM VoiceTransText WHERE msgId = ? LIMIT 1",
+                        arrayOf(id.toString())).use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            cursor.getString(0)?.trim()?.takeIf(String::isNotBlank)?.let { out[id] = it }
+                        }
+                    }
+                }
+            }
+            if (out.size == msgIds.size) break
+        }
+        out
     }
 
     /** 诊断用：列出主库的表名，便于确认群昵称实际存在哪张表。 */
@@ -536,6 +565,31 @@ object ReplyDatabaseHistory {
             runCatching { fillByAlias(db, "rcontact", names, result) }
         }
         result
+    }
+
+    /**
+     * 群名：rcontact 通常拿不到 @chatroom 的昵称，单独查 chatroom 表。
+     * 表或字段缺失时返回空，调用方回退到「待办」而不是编一个名字。
+     */
+    suspend fun groupNames(wanted: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
+        val names = wanted.filter { it.endsWith("@chatroom") }.distinct()
+        if (names.isEmpty()) return@withContext emptyMap()
+        val out = LinkedHashMap<String, String>()
+        val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        for (db in databases) {
+            for (name in names) {
+                if (out.containsKey(name)) continue
+                runCatching {
+                    query(db, "SELECT nickname FROM chatroom WHERE username = ? LIMIT 1", arrayOf(name)).use {
+                        if (it.moveToFirst()) {
+                            it.getString(0)?.trim()?.takeIf(String::isNotBlank)?.let { value -> out[name] = value }
+                        }
+                    }
+                }
+            }
+            if (out.size == names.size) break
+        }
+        out
     }
 
     /**

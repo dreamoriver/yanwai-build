@@ -21,6 +21,7 @@ import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.RelationFactBridge
 import dev.jev.wechatmood.reply.FactTimes
 import dev.jev.wechatmood.reply.RelationFact
+import dev.jev.wechatmood.reply.RelationDue
 import dev.jev.wechatmood.reply.RelationFacts
 import dev.jev.wechatmood.reply.RelationMeta
 import dev.jev.wechatmood.reply.ReplyContactKey
@@ -54,6 +55,14 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
     private var snapshot: RelationFactRefresher.Snapshot? = null
     private var meta: RelationMeta = RelationMeta()
     private var contactKey: ReplyContactKey? = null
+    /** 群聊纪要页的简报：今天要处理几条、之后还有几条，点一下进群待办。 */
+    private val briefText: TextView = theme.label("", ReplyMetrics.TEXT_CAPTION, theme.accent, bold = true).apply {
+        setPadding(0, theme.dp(2), 0, 0)
+        isClickable = true
+        isFocusable = true
+        visibility = View.GONE
+        setOnClickListener { RelationTodoUi(activity, talker).show() }
+    }
     private var refreshing = false
     private var removedExpanded = false
     private var supersededExpanded = false
@@ -84,8 +93,12 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         val dialog = Dialog(activity).also { this.dialog = it }
         val root = kit.root()
         val column = kit.content(root)
-        column.addView(kit.heading("关系档案"))
-        column.addView(kit.caption("从聊天里整理出的事实；可以先补一条，也可以把不对的移出去").apply {
+        val group = talker?.endsWith("@chatroom") == true
+        column.addView(kit.heading(if (group) "群聊纪要" else "关系档案"))
+        column.addView(kit.caption(
+            if (group) "从群聊里整理的约定、时间地点和提到我的事；可以补一条，也可以把不对的移出去"
+            else "从聊天里整理出的事实；可以先补一条，也可以把不对的移出去"
+        ).apply {
             setPadding(0, theme.dp(4), 0, theme.dp(8))
         })
         column.addView(searchField, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
@@ -94,6 +107,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             contentDescription = "整理设置，点击修改"
             setOnClickListener { openSettings() }
         })
+        if (group) column.addView(briefText)
 
         val actions = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -130,9 +144,9 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
 
         val selected = talker
         MoodLog.i("RELATION_ARCHIVE_OPEN talker=${selected != null} group=${selected?.endsWith("@chatroom") == true}")
-        if (selected == null || selected.endsWith("@chatroom")) {
-            showStatus("档案只针对私聊；群聊没有联系人档案", theme.warning)
-            summaryText.text = "返回一个私聊再打开"
+        if (selected == null) {
+            showStatus("还没识别到当前聊天，先回到聊天页等一会儿", theme.warning)
+            summaryText.text = "返回一个聊天再打开"
             return
         }
         showStatus("正在读取…", theme.muted)
@@ -142,7 +156,10 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             // 记下这条档案对应哪个聊天和备注名，到期通知点开才能进对会话。
             if (key != null) {
                 val name = withContext(Dispatchers.IO) {
-                    runCatching { ReplyDatabaseHistory.contactNames(listOf(selected))[selected] }.getOrNull()
+                    runCatching {
+                        ReplyDatabaseHistory.contactNames(listOf(selected))[selected]
+                            ?: ReplyDatabaseHistory.groupNames(listOf(selected))[selected]
+                    }.getOrNull()
                 }
                 RelationFactBridge.rememberContact(activity, key, selected, name.orEmpty())
             }
@@ -161,7 +178,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         val account = withContext(Dispatchers.IO) { ReplyDatabaseHistory.replyAccount(live) }
         // 之后切去别的聊天也不影响：整理和依据查询都用这份快照定位账号。
         snapshot = account?.let { RelationFactRefresher.Snapshot(it, selected, live.messages) }
-        return ReplyContactKey.of(account, selected)
+        return ReplyContactKey.of(account, selected, allowGroup = true)
     }
 
     private fun reload() {
@@ -188,6 +205,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
     }
 
     private fun render() {
+        val group = talker?.endsWith("@chatroom") == true
         listContainer.removeAllViews()
         searchField.visibility = if (items.size >= 6) View.VISIBLE else View.GONE
         // 搜索只影响列表；顶部「有效 N 条」始终是全部档案的数量。
@@ -219,11 +237,22 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         summary.setSpan(ForegroundColorSpan(theme.accent), start, summary.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         summary.setSpan(StyleSpan(Typeface.BOLD), start, summary.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         summaryText.text = summary
+        if (group) {
+            val timed = items.filter { it.isOpen && it.isTimed && it.occurredAt > 0 }
+            val due = RelationDue.select(timed).size
+            briefText.text = "今天要处理 " + due + " 条 · 之后 " + (timed.size - due) + " 条 ›"
+            briefText.visibility = if (timed.isEmpty()) View.GONE else View.VISIBLE
+            briefText.contentDescription = "群待办：今天 " + due + " 条，之后 " + (timed.size - due) + " 条，点击打开"
+        }
 
         if (active.isEmpty()) {
             // 只有已移出/已作废时，别说「还没有档案」，语义对不上。
             listContainer.addView(kit.body(
-                if (items.isEmpty()) "这个联系人还没有档案" else "没有有效条目，已处理过的在下面"
+                when {
+                    items.isNotEmpty() -> "没有有效条目，已处理过的在下面"
+                    group -> "这个群还没有纪要"
+                    else -> "这个联系人还没有档案"
+                }
             ))
             listContainer.addView(kit.caption("点「整理一次」读最近聊天自动整理，或「添加一条」自己写"))
         }
@@ -473,20 +502,28 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 kit.info("依据消息", "这条消息已经不在本机数据库里了（可能被清理过）")
                 return@launch
             }
-            val body = message.analysisText() ?: message.evidenceBody()
-            // 把读到的真实类型写进日志：用户说那条明明是文字，得能看出到底读成了什么。
             val nearby = withContext(Dispatchers.IO) {
                 ReplyDatabaseHistory.nearbyText(selected, messageId, snapshot?.account, limit = 3)
             }
+            // 语音依据优先用微信已经保存的转写，查不到才显示占位，不拿「等待转写」当正文。
+            val voiceIds = (nearby + message).filter { it.type == 34 }.map { it.messageId }.distinct()
+            val transcripts = if (voiceIds.isEmpty()) emptyMap() else withContext(Dispatchers.IO) {
+                ReplyDatabaseHistory.voiceTranscripts(selected, voiceIds, snapshot?.account)
+            }
+            val body = if (message.type == 34) transcripts[message.messageId]
+                else message.analysisText() ?: message.evidenceBody()
+            // 把读到的真实类型写进日志：用户说那条明明是文字，得能看出到底读成了什么。
             MoodLog.i("RELATION_EVIDENCE type=" + message.type + " send=" + message.isSend +
                 " len=" + message.content.length + " shown=" + (body?.length ?: -1) +
-                " nearby=" + nearby.size + " nearText=" + nearby.count { it.plainText() != null })
-            openEvidence(message, body, nearby)
+                " nearby=" + nearby.size + " nearText=" + nearby.count { it.plainText() != null } +
+                " voice=" + voiceIds.size + " transcript=" + transcripts.size)
+            openEvidence(message, body, nearby, transcripts)
         }
     }
 
     /** 依据弹窗：先给一条完整的时间线，再用小字说明这条在其中的位置。 */
-    private fun openEvidence(message: MessageMetadata, body: String?, nearby: List<MessageMetadata>) {
+    private fun openEvidence(message: MessageMetadata, body: String?, nearby: List<MessageMetadata>,
+        transcripts: Map<Long, String> = emptyMap()) {
         val dialog = Dialog(activity).also { addDialog = it }
         val root = kit.root()
         val column = kit.content(root)
@@ -519,7 +556,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 })
             }
             if (item.createdAt > 0) previous = item.createdAt
-            timeline.addView(evidenceLine(item, item.messageId == message.messageId, body),
+            timeline.addView(evidenceLine(item, item.messageId == message.messageId, body, transcripts),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
         }
         val scroll = PanelMaxScroll(activity, (activity.resources.displayMetrics.heightPixels * 0.42f).toInt()).apply {
@@ -543,7 +580,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
     }
 
     /** 时间线一行：时间与说话人在上，正文在下；本条描边加粗，前后条压到两行做背景。 */
-    private fun evidenceLine(item: MessageMetadata, current: Boolean, body: String?): View {
+    private fun evidenceLine(item: MessageMetadata, current: Boolean, body: String?,
+        transcripts: Map<Long, String>): View {
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(theme.dp(12), theme.dp(9), theme.dp(12), theme.dp(9))
@@ -555,14 +593,13 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
         } else "时间未知"
         row.addView(theme.label("$stamp · ${item.speaker()}" + if (current) " · 本条" else "",
             ReplyMetrics.TEXT_CAPTION, if (current) theme.accent else theme.muted, bold = current))
-        // 本条用已解析好的正文（引用、合并转发也能显示）；前后条只认纯文字。
-        val text = if (current) {
-            body?.takeIf { it.isNotBlank() } ?: item.plainText()?.replace("\n", " ")?.takeIf { it.isNotBlank() }
-        } else {
-            item.plainText()?.replace("\n", " ")?.takeIf { it.isNotBlank() }
-        }
+        // 本条用已解析好的正文（引用、合并转发也能显示）；语音优先用微信保存的转写。
+        val text = (if (current) body else null)
+            ?.takeIf { it.isNotBlank() }
+            ?: transcripts[item.messageId]
+            ?: item.plainText()?.replace("\n", " ")?.takeIf { it.isNotBlank() }
         row.addView(theme.label(
-            text ?: "〔${item.evidenceKind()}，没有可显示的正文〕",
+            text ?: if (item.type == 34) "〔语音，没有已保存的转写〕" else "〔${item.evidenceKind()}，没有可显示的正文〕",
             ReplyMetrics.TEXT_BODY,
             if (text == null) theme.muted else theme.ink
         ).apply {
@@ -653,7 +690,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 result.facts.isEmpty() -> showStatus("这次没有提取到新的事实", theme.muted)
                 else -> {
                     reload()
-                    showStatus("已更新：有效 ${result.facts.size} 条 · 看了 ${result.scanned} 条", theme.success)
+                    showStatus("已更新：" + result.changeText(), theme.success)
                 }
             }
         }

@@ -181,8 +181,28 @@ object RelationDue {
 
     fun select(facts: List<RelationFact>, now: Long = System.currentTimeMillis()): List<RelationFact> =
         facts.filter { it.isOpen && it.isTimed && it.occurredAt > 0 }
-            .filter { FactTimes.overdue(it.occurredAt, now) || FactTimes.sameDay(it.occurredAt, now) }
+            .filter {
+                FactTimes.overdue(it.occurredAt, now) ||
+                    FactTimes.sameDay(it.occurredAt, now) ||
+                    dueTomorrow(it.occurredAt, now)
+            }
             .sortedBy { it.occurredAt }
+
+    /**
+     * 提前一晚报：前一天 20:00 之后，把明天的约定也放进提醒。
+     *
+     * 很多人不会在约定当天再打开微信；只在当天早上提醒，等于事后才说。
+     * 只提前一晚，不再往前扩，避免待办天天挂着「还有三天」。
+     */
+    private fun dueTomorrow(value: Long, now: Long): Boolean {
+        if (value <= 0) return false
+        val today = FactTimes.startOfDay(now)
+        if (FactTimes.startOfDay(value) != today + 86_400_000L) return false
+        return now >= today + LEAD_HOUR * 3_600_000L
+    }
+
+    /** 提前提醒从晚上八点开始，和大多数人的下班时间对齐。 */
+    private const val LEAD_HOUR = 20
 
     /**
      * 逾期天数：只到日期的条目按整天算，当天到期不算逾期。
@@ -217,6 +237,9 @@ object RelationDue {
         return FactTimes.label(fact.occurredAt, now) + suffix + " · " + fact.text
     }
 }
+
+/** 聊天标题圆点的两种状态：今天要处理几条、更远处还有几条。 */
+data class ChatBadge(val due: Int, val future: Int)
 
 /**
  * 事实存储：一条事实一行，[payload] 存完整对象，其余列只用于查询与排序。
@@ -330,6 +353,25 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
 
     /** 含已作废、已完成，用于合并和排查。 */
     fun listAll(key: ReplyContactKey): List<RelationFact> = rows(key, null)
+
+    /**
+     * 聊天标题的小圆点用：这个会话有没有今天要处理的事、还有没有更远的待办。
+     *
+     * 只读本地库，不请求模型；talker 到 key 的映射来自整理时写下的 contact_dir，
+     * 没有档案时返回 null，界面据此不显示圆点。
+     */
+    fun badge(talker: String, now: Long = System.currentTimeMillis()): ChatBadge? {
+        if (talker.isBlank()) return null
+        val key = contactKeyForTalker(talker) ?: return null
+        val timed = listAll(ReplyContactKey(key)).filter { it.isOpen && it.isTimed && it.occurredAt > 0 }
+        if (timed.isEmpty()) return ChatBadge(0, 0)
+        val due = timed.count { RelationDue.select(listOf(it), now).isNotEmpty() }
+        return ChatBadge(due, timed.size - due)
+    }
+
+    private fun contactKeyForTalker(talker: String): String? =
+        db.query("SELECT contact_key FROM relation_contact_dir WHERE talker = ?", listOf(talker))
+            ?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
 
     private fun rows(key: ReplyContactKey, filter: String?): List<RelationFact> {
         val where = if (filter == null) "contact_key = ?" else "contact_key = ? AND $filter"

@@ -21,6 +21,10 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
     private var blockedPanel: ViewGroup? = null
     private var entryView: android.widget.TextView? = null
     private var refreshing = false
+    /** 面板还在测量时下一帧再试，最多连续追 30 帧，之后交给普通布局回调。 */
+    private var nudge = false
+    private var nudgeView: View? = null
+    private var nudgeBudget = 0
     private var lastStatus: String? = null
     private var lastRefreshAt = 0L
     private var pendingRefresh: Runnable? = null
@@ -31,6 +35,7 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
     }
 
     fun update(currentFooter: View?) {
+        nudgeBudget = 30
         if (footer !== currentFooter) {
             clear()
             footer = currentFooter
@@ -48,7 +53,8 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
      */
     private fun requestRefresh() {
         val now = android.os.SystemClock.uptimeMillis()
-        val wait = 120 - (now - lastRefreshAt)
+        // 以前 120ms 一档，点开「＋」后第一帧经常被延后；48ms 只多一点遍历，体感是立刻出现。
+        val wait = 48 - (now - lastRefreshAt)
         if (wait <= 0) {
             lastRefreshAt = now
             refresh()
@@ -84,7 +90,20 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
             blockedPanel = panel
             runCatching { restoreContent() }
             MoodLog.w("REPLY_PLUS_ROW_FAILED " + error.javaClass.simpleName)
-        } finally { refreshing = false }
+        } finally {
+            refreshing = false
+            if (nudge) {
+                nudge = false
+                val view = nudgeView
+                if (view != null && nudgeBudget > 0) {
+                    nudgeBudget--
+                    view.postOnAnimation {
+                        lastRefreshAt = 0
+                        refresh()
+                    }
+                }
+            }
+        }
     }
 
     private fun syncRow() {
@@ -103,7 +122,13 @@ internal class ReplyPlusRow(private val activity: Activity, private val createAn
         // Match the measured host structure, not obfuscated IDs or tile positions.
         val content = found.getChildAt(0) as? LinearLayout
         if (found.childCount != 1 || content == null || descendants(content).none { it.javaClass.name.endsWith(".MMFlipper") }) { status("SKIPPED structure"); return }
-        if (found.height < (180 * activity.resources.displayMetrics.density).toInt()) { status("WAITING panel_measure"); return }
+        if (found.height < (180 * activity.resources.displayMetrics.density).toInt()) {
+            // 面板展开动画期间高度还没测出来：下一帧就再来，别等下一次全局布局。
+            status("WAITING panel_measure")
+            nudge = true
+            nudgeView = found
+            return
+        }
         val theme = ReplyTheme(activity)
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL

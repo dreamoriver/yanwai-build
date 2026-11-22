@@ -3,6 +3,7 @@ package dev.jev.wechatmood.core
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import dev.jev.wechatmood.reply.ChatBadge
 import dev.jev.wechatmood.reply.DueContact
 import dev.jev.wechatmood.reply.RelationFact
 import dev.jev.wechatmood.reply.RelationFacts
@@ -107,6 +108,13 @@ object RelationFactBridge {
     fun rememberContact(context: Context, key: ReplyContactKey, talker: String, name: String = "") = runCatching {
         store(context).rememberContact(key, talker, name)
     }.onFailure { MoodLog.w("RELATION_CONTACT_DIR_FAILED " + it.javaClass.simpleName) }
+
+    /** 聊天标题圆点：只读本地库，talker 没有档案时返回 null。 */
+    fun badge(context: Context, talker: String?): ChatBadge? = runCatching {
+        if (talker.isNullOrBlank()) return@runCatching null
+        runPendingClearThrottled(context)
+        store(context).badge(talker)
+    }.getOrNull()
 
     /** 全部联系人的到期条目；读不到就返回空，宁可这次不提醒也不抛到界面。 */
     fun dueContacts(context: Context, now: Long = System.currentTimeMillis()): List<DueContact> = runCatching {

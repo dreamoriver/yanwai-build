@@ -30,9 +30,14 @@ data class ReplyIdentitySetting(val relationship: ReplyRelationship = ReplyRelat
 data class ReplyContactKey(val value: String) {
     init { require(value.matches(Regex("[0-9a-f]{64}"))) }
     companion object {
-        fun of(account: String?, talker: String?): ReplyContactKey? {
+        /**
+         * [allowGroup] 给关系档案与待办用：它们按会话存，群聊也是一个独立的会话。
+         * 回复身份、角色这类「联系人」语义仍只认私聊，所以默认 false。
+         */
+        fun of(account: String?, talker: String?, allowGroup: Boolean = false): ReplyContactKey? {
             if (account == null || !account.matches(Regex("[0-9a-f]{64}")) || talker == null ||
-                !talker.matches(Regex("[A-Za-z0-9_@.\\-]{1,256}")) || talker.endsWith("@chatroom")) return null
+                !talker.matches(Regex("[A-Za-z0-9_@.\\-]{1,256}"))) return null
+            if (!allowGroup && talker.endsWith("@chatroom")) return null
             return ReplyContactKey(AnalysisCacheKey.digest("reply-contact-v1", account, talker))
         }
     }

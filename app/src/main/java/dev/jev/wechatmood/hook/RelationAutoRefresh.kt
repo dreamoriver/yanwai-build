@@ -25,6 +25,9 @@ internal object RelationAutoRefresh {
     private const val DELAY_MS = 6_000L
     private const val STALE_MS = 3 * 24 * 3600_000L
     private const val FRESH_MESSAGES = 30
+    /** 群聊更贵也更吵：一周一次、或新增 50 条才整理，避免每个活跃群都反复请求模型。 */
+    private const val GROUP_STALE_MS = 7 * 24 * 3600_000L
+    private const val GROUP_FRESH_MESSAGES = 50
     private val handler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var pending: Runnable? = null
@@ -57,20 +60,23 @@ internal object RelationAutoRefresh {
 
     private suspend fun check(activity: Activity) {
         val talker = MessageSniffer.currentReplyTalker() ?: return
-        if (talker.endsWith("@chatroom")) return
+        val group = talker.endsWith("@chatroom")
         val live = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull() ?: return
         if (live.talker != talker) return
         val settings = ModulePrefs.replySettings()
         if (!settings.isConfigured) return
         val account = withContext(Dispatchers.IO) { ReplyDatabaseHistory.replyAccount(live) } ?: return
-        val key = ReplyContactKey.of(account, talker) ?: return
+        val key = ReplyContactKey.of(account, talker, allowGroup = true) ?: return
         // 6 秒延迟期间用户可能已经切走：整理只认这次读到的账号、联系人与消息。
         val snapshot = RelationFactRefresher.Snapshot(account, talker, live.messages)
         // 到期提醒只受「显示档案」本身影响，关掉自动整理不该把提醒一起停掉。
         val facts = withContext(Dispatchers.IO) { runCatching { RelationFactBridge.load(activity, key) }.getOrDefault(emptyList()) }
         // 哈希键换不回聊天对象：顺手把聊天对象和备注名记一份，提醒点开才能进对会话。
         withContext(Dispatchers.IO) {
-            val name = runCatching { ReplyDatabaseHistory.contactNames(listOf(talker))[talker] }.getOrNull()
+            val name = runCatching {
+                ReplyDatabaseHistory.contactNames(listOf(talker))[talker]
+                    ?: ReplyDatabaseHistory.groupNames(listOf(talker))[talker]
+            }.getOrNull()
             RelationFactBridge.rememberContact(activity, key, talker, name.orEmpty())
         }
         RelationReminder.check(activity, key, talker, facts)
@@ -87,7 +93,9 @@ internal object RelationAutoRefresh {
             runCatching { ReplyDatabaseHistory.load(live, ReplyContext.MAX_MESSAGES) }.getOrNull()?.messages
         }.orEmpty()
         val fresh = window.count { it.id > meta.lastMessageId }
-        val due = meta.lastAt <= 0 || gap > STALE_MS || fresh >= FRESH_MESSAGES
+        val stale = if (group) GROUP_STALE_MS else STALE_MS
+        val freshTarget = if (group) GROUP_FRESH_MESSAGES else FRESH_MESSAGES
+        val due = meta.lastAt <= 0 || gap > stale || fresh >= freshTarget
         MoodLog.i("RELATION_FACT_AUTOPAGE due=$due gap_hours=${gap / 3600_000L} fresh=$fresh window=${window.size}")
         if (!due) return
         val started = RelationFactRefresher.launch(activity, key, settings, snapshot = snapshot) { result, error ->

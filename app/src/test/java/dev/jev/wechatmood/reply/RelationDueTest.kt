@@ -14,8 +14,8 @@ class RelationDueTest {
 
     private fun today(hour: Int): Long = FactTimes.startOfDay(System.currentTimeMillis()) + hour * 3_600_000L
 
-    @Test fun `only today and overdue timed items are due`() {
-        val now = today(20)
+    @Test fun `only today and overdue timed items are due before eight pm`() {
+        val now = today(10)
         val facts = listOf(
             fact("约定", "今天下午见面", today(14)),
             fact("重要日期", "昨天生日", today(9) - 86_400_000L),
@@ -28,6 +28,24 @@ class RelationDueTest {
         assertEquals("昨天生日", due.first().text)
         assertTrue(due.none { it.text == "明天见面" })
         assertTrue(due.none { it.text == "在游戏公司做运营" })
+    }
+
+    @Test fun `tomorrow is pulled in only after eight pm`() {
+        val facts = listOf(
+            fact("约定", "明天见面", today(10) + 86_400_000L),
+            fact("约定", "后天见面", today(10) + 2 * 86_400_000L),
+        )
+        assertTrue(RelationDue.select(facts, today(19)).isEmpty())
+        val lead = RelationDue.select(facts, today(20))
+        assertEquals(1, lead.size)
+        assertEquals("明天见面", lead.first().text)
+    }
+
+    @Test fun `day only tomorrow is also pulled in`() {
+        val tomorrow = FactTimes.startOfDay(today(10) + 86_400_000L)
+        val item = fact("重要日期", "明天生日", tomorrow)
+        assertTrue(RelationDue.select(listOf(item), today(19)).isEmpty())
+        assertEquals(1, RelationDue.select(listOf(item), today(20)).size)
     }
 
     @Test fun `day only item is not overdue before the day ends`() {

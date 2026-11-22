@@ -45,8 +45,12 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         val dialog = Dialog(activity).also { this.dialog = it }
         val root = kit.root()
         val column = kit.content(root)
-        column.addView(kit.heading("待办"))
-        column.addView(kit.caption("对方说过的约定和重要日期，只列有明确时间的").apply {
+        val group = talker?.endsWith("@chatroom") == true
+        column.addView(kit.heading(if (group) "群待办" else "待办"))
+        column.addView(kit.caption(
+            if (group) "群里说好的约定和重要日期，只列有明确时间的"
+            else "对方说过的约定和重要日期，只列有明确时间的"
+        ).apply {
             setPadding(0, theme.dp(4), 0, theme.dp(8))
         })
         column.addView(statusText)
@@ -72,9 +76,9 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
 
         val selected = talker
         MoodLog.i("RELATION_TODO_OPEN talker=${selected != null} group=${selected?.endsWith("@chatroom") == true}")
-        if (selected == null || selected.endsWith("@chatroom")) {
-            showStatus("待办只针对私聊；群聊没有联系人档案", theme.warning)
-            listContainer.addView(kit.body("返回一个私聊再打开"))
+        if (selected == null) {
+            showStatus("还没识别到当前聊天，先回到聊天页等一会儿", theme.warning)
+            listContainer.addView(kit.body("返回一个聊天再打开"))
             return
         }
         showStatus("正在读取…", theme.muted)
@@ -102,7 +106,7 @@ internal class RelationTodoUi(private val activity: Activity, private val talker
         val live = runCatching { MessageSniffer.replyContext(requireBottom = false) }.getOrNull() ?: return null
         if (live.talker != selected) return null
         val account = withContext(Dispatchers.IO) { ReplyDatabaseHistory.replyAccount(live) }
-        return ReplyContactKey.of(account, selected)
+        return ReplyContactKey.of(account, selected, allowGroup = true)
     }
 
     private fun reload() {

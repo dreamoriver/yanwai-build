@@ -73,8 +73,13 @@ internal class FeaturePanel(
                 "消息量、活跃成员与时段", onStats)
         }
         if (factsAvailable) {
-            row("关系档案", "整理过的事实，可移出或补一条", onFacts)
-            row("待办", "带时间的约定与重要日期", onTodos)
+            if (talker?.endsWith("@chatroom") == true) {
+                row("群聊纪要", "群里的约定、时间地点和提到我的事", onFacts)
+                row("群待办", "群里带时间的约定与重要日期", onTodos)
+            } else {
+                row("关系档案", "整理过的事实，可移出或补一条", onFacts)
+                row("待办", "带时间的约定与重要日期", onTodos)
+            }
         }
         body.addView(group, LinearLayout.LayoutParams(-1, -2))
 

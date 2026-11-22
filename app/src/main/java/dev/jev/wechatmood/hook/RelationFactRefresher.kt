@@ -42,7 +42,17 @@ internal object RelationFactRefresher {
     }
 
     /** facts 是合并后的有效条目；nothingNew 表示增量模式下没有比水位更新的消息。 */
-    data class Result(val facts: List<RelationFact>, val scanned: Int, val nothingNew: Boolean)
+    data class Result(val facts: List<RelationFact>, val scanned: Int, val nothingNew: Boolean,
+        val added: Int = 0, val replaced: Int = 0, val superseded: Int = 0) {
+        /** 给界面的一句话：只报实际发生的动作，不再用「已更新 N 条」盖掉替换和作废。 */
+        fun changeText(): String = buildString {
+            if (added > 0) append("新增 ").append(added).append(" 条")
+            if (replaced > 0) { if (isNotEmpty()) append(" · "); append("替换 ").append(replaced).append(" 条") }
+            if (superseded > 0) { if (isNotEmpty()) append(" · "); append("作废 ").append(superseded).append(" 条") }
+            if (isEmpty()) append("没有新增")
+            append(" · 看了 ").append(scanned).append(" 条")
+        }
+    }
 
     /**
      * 一次整理用的页面快照：账号、联系人和消息取自同一时刻。
@@ -54,7 +64,7 @@ internal object RelationFactRefresher {
 
     /** 快照与目标联系人必须一致；不一致就整次作废，不能把 B 的消息按 A 的键写下去。 */
     internal fun verify(key: ReplyContactKey, snapshot: Snapshot) {
-        check(ReplyContactKey.of(snapshot.account, snapshot.talker) == key) { "聊天已切换，本次整理已取消" }
+        check(ReplyContactKey.of(snapshot.account, snapshot.talker, allowGroup = true) == key) { "聊天已切换，本次整理已取消" }
     }
 
     /** 已在跑同一联系人时返回 false，UI 据此提示“正在整理”而不是再发一次请求。 */
@@ -121,7 +131,12 @@ internal object RelationFactRefresher {
         if (messages.isEmpty()) return Result(emptyList(), 0, incremental)
         // 把已有档案一起给模型，它才能指出哪条被替换（换工作、搬家、改称呼）。
         val existing = withContext(Dispatchers.IO) { runCatching { RelationFactBridge.load(context, key) }.getOrDefault(emptyList()) }
-        val extracted = withContext(Dispatchers.IO) { FactExtractor().extract(settings, messages, existing, limit = limit) }
+        // 保存前后各读一次全量，用来算这次到底新增/作废了什么；只读开放条目会漏掉被替换的旧说法。
+        val beforeAll = withContext(Dispatchers.IO) { runCatching { RelationFactBridge.loadAll(context, key) }.getOrDefault(emptyList()) }
+        val extracted = withContext(Dispatchers.IO) {
+            FactExtractor().extract(settings, messages, existing, limit = limit,
+                group = live.talker.endsWith("@chatroom"))
+        }
         if (extracted.isEmpty()) {
             // 模型明确回了空数组（这段只是闲聊）：水位往前走，否则每次打开面板都重传同一批。
             // 抽不出正文的情况已经在 extract 里抛错，不会走到这里，也就不会误推进水位。
@@ -136,7 +151,15 @@ internal object RelationFactRefresher {
             RelationFactBridge.save(context, key, extracted, System.currentTimeMillis(),
                 watermark.coerceAtLeast(meta.lastMessageId))
         }
-        MoodLog.i("RELATION_FACT_SAVED count=${saved.size} replaced=${extracted.count { it.replaces.isNotEmpty() }}")
-        return Result(saved, messages.size, false)
+        val afterAll = withContext(Dispatchers.IO) { runCatching { RelationFactBridge.loadAll(context, key) }.getOrDefault(emptyList()) }
+        val beforeIds = beforeAll.map { it.factId }.toSet()
+        val beforeStatus = beforeAll.associate { it.factId to it.status }
+        val added = afterAll.count { it.factId !in beforeIds }
+        val superseded = afterAll.count {
+            it.status == RelationFact.STATUS_SUPERSEDED && beforeStatus[it.factId] != RelationFact.STATUS_SUPERSEDED
+        }
+        val replaced = extracted.count { it.replaces.isNotEmpty() }
+        MoodLog.i("RELATION_FACT_SAVED count=${saved.size} replaced=$replaced added=$added superseded=$superseded")
+        return Result(saved, messages.size, false, added, replaced, superseded)
     }
 }

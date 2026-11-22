@@ -17,7 +17,8 @@ import java.util.Locale
 class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
     suspend fun extract(settings: ReplySettings, messages: List<ReplyMessage>,
         existing: List<RelationFact> = emptyList(),
-        now: Long = System.currentTimeMillis(), limit: Int = MAX_MESSAGES): List<RelationFact> {
+        now: Long = System.currentTimeMillis(), limit: Int = MAX_MESSAGES,
+        group: Boolean = false): List<RelationFact> {
         check(settings.isConfigured) { "请先配置回复模型" }
         val usable = messages.filter { it.text.isNotBlank() && !it.text.startsWith("【引用") }
             .takeLast(limit.coerceIn(10, MAX_MESSAGES))
@@ -45,7 +46,7 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
             val payload = JSONObject().put("model", settings.model).put("stream", false)
                 .put("max_tokens", tokens).put("temperature", 0.2)
                 .put("messages", JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", instructions(now, existing)))
+                    .put(JSONObject().put("role", "system").put("content", instructions(now, existing, group)))
                     .put(JSONObject().put("role", "user").put("content", transcript)))
             val facts = client.request(settings, payload, parse = { body ->
                 parseOrNull(body, messageIdAt, messageTimeAt)
@@ -125,8 +126,10 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
             return items.joinToString("\n") { "- [" + it.kind + "] " + it.text }
         }
 
-        private fun instructions(now: Long, existing: List<RelationFact> = emptyList()): String {
+        private fun instructions(now: Long, existing: List<RelationFact> = emptyList(),
+            group: Boolean = false): String {
             val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm EEEE", Locale.CHINA).format(Date(now))
+            if (group) return groupInstructions(stamp, existing)
             return """你是聊天里的信息整理助手。下面是一段微信聊天记录，每行形如「[序号] 发送时间 说话人: 内容」。
 「我」是用户自己，其他说话人都是「对方」。只整理跟「我」和「对方」这两个人直接相关的内容。
 只输出 JSON 数组，不要任何解释或 Markdown。
@@ -162,5 +165,43 @@ ${existingBlock(existing)}
 当前时间：$stamp。
 示例：[{"kind":"约定","text":"周六帮他搬家","evidence":8,"occurred_at":"2026-10-24T09:00"},{"kind":"工作","text":"换到新公司做运营","evidence":3,"replaces":"在游戏公司做运营"},{"kind":"重要日期","text":"下周三面试","evidence":12,"occurred_at":"2026-10-28T00:00"}]"""
         }
+
+        /**
+         * 群聊提示词：说话人不止两个，只收「我」需要知道或参与的事。
+         * 群里的闲聊和别人的私事不进纪要，否则档案会迅速变成没用的聊天摘要。
+         */
+        private fun groupInstructions(stamp: String, existing: List<RelationFact>): String = """你是微信群聊的信息整理助手。下面是一段微信群聊记录，每行形如「[序号] 发送时间 说话人: 内容」。
+「我」是用户自己，其他说话人都是群成员。只整理与「我」直接相关、以后会用到的内容。
+只输出 JSON 数组，不要任何解释或 Markdown。
+kind 只能是：工作、城市、家人、喜好、忌口、宠物、重要日期、约定、称呼。
+每条字段：
+- kind：上面九种之一
+- text：不超过 30 个字的陈述句，例如「周六下午三点在西门集合」
+- evidence：这条取自哪条消息的序号，不确定填 0
+- occurred_at：只有「约定」「重要日期」要填，格式 YYYY-MM-DDTHH:mm，只说了日期就写 YYYY-MM-DDT00:00，含糊说法（过两天、有空、改天）填空字符串
+- replaces：这条替换了下面已有纪要里的哪一条，就填那条的原句；改期、换地点、取消都算。没有就填空字符串
+
+只写这四类，其它一律不写：
+1. 群里说定、需要我参与或知道的事：时间、地点、集合、分工、要带的东西
+2. 有人 @我、点名让我做或回话的事
+3. 重要日期：活动、报名截止、聚会、考试、出发
+4. 明确的群规则或边界（比如不能发什么、不要@谁）
+
+不写这些：
+- 群成员之间的闲聊、八卦、别人的私事
+- 我自己的信息、重复的信息、推测出来的信息
+- 没有具体内容的情绪和态度
+
+判据：这条以后会不会让我漏掉一件要做的事，或者让我在群里说错话？答不上来就不要写。
+其它规则：
+1. 不要编造，不要补充聊天里没说过的时间、地点和人。
+2. 同一件事只写一次；改期或换说法用 replaces 指向旧的那条。
+3. 上面四类里有内容就必须写，哪怕只有一条；一条都没有才输出 []。
+4. 换算「周五」「明天」这类相对日期时，以该条消息自己的发送时间为基准，不要用当前时间。
+
+下面是我已经存下的纪要，只用来判断哪条被替换，不要当成新的信息复述：
+${existingBlock(existing)}
+当前时间：$stamp。
+示例：[{"kind":"约定","text":"周六下午三点在西门集合","evidence":8,"occurred_at":"2026-10-24T15:00"},{"kind":"约定","text":"报名截止改到周五","evidence":12,"replaces":"这周三报名截止"},{"kind":"重要日期","text":"下周三面试","evidence":15,"occurred_at":"2026-10-28T00:00"}]"""
     }
 }
