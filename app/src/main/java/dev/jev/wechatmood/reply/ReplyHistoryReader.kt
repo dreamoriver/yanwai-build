@@ -16,14 +16,15 @@ object ReplyHistoryReader {
      * 图片(3)、表情(47) 没有可读正文，但漏掉它们模型就看不到中间的图片和表情，
      * 只能在占位里保留「这里发过一张图」。
      */
-    internal val HISTORY_TYPES = setOf(1, 3, 34, 42, 43, 47, 48, 49, 62, 822083633)
-    private val TYPE_LIST = HISTORY_TYPES.joinToString(", ")
+    internal val HISTORY_TYPES = setOf(1, 3, 34, 42, 43, 47, 48, 49, 62)
+    /** appmsg 的高位 flag 不固定，按低 16 位比较，新变体不用再补常量。 */
+    private val TYPE_LIST = "(type & 65535) IN (" + HISTORY_TYPES.joinToString(", ") + ")"
     /**
      * 旧写法对每行做 length(trim(content))，在几百人的群里等于全表扫一遍再排序，
      * 实测取 100 条要三十多秒。改成从锚点 msgId 往前按主键倒序取，空白内容交给
      * ReplyContext.collect 过滤，走索引就快得多。
      */
-    private fun historySql(limit: Int) = "SELECT $FIELDS FROM message WHERE talker = ? AND msgId <= CAST(? AS INTEGER) AND type IN ($TYPE_LIST) " +
+    private fun historySql(limit: Int) = "SELECT $FIELDS FROM message WHERE talker = ? AND msgId <= CAST(? AS INTEGER) AND $TYPE_LIST " +
         "AND isSend IN (0, 1) ORDER BY msgId DESC LIMIT ${limit + 1}"
 
     fun read(loaded: ReplyContext, sources: List<ReplyHistoryQuery>, limit: Int = ReplyContext.MAX_MESSAGES,

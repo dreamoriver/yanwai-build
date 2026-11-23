@@ -142,7 +142,7 @@ class ReplyHistoryReaderTest {
             assertEquals(oddTalker, args.first())
             if (!sql.contains("msgId = ?")) {
                 queriedHistory = true
-                assertTrue(sql.contains("type IN (${ReplyHistoryReader.HISTORY_TYPES.joinToString(", ")})"))
+                assertTrue(sql.contains("(type & 65535) IN (${ReplyHistoryReader.HISTORY_TYPES.joinToString(", ")})"))
                 assertTrue(sql.contains("LIMIT 101"))
                 assertTrue(sql.contains("ORDER BY msgId DESC"))
             }

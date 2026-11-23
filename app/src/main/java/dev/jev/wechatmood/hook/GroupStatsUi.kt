@@ -214,7 +214,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         dbMessages = rows.map {
             dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
                 // 合并转发先摊平成「谁说了什么」，卡片取标题/描述，实在没有才留占位。
-                it.analysisText() ?: it.evidenceBody() ?: "[媒体]", voice = it.voiceSource(),
+                it.materialText(), voice = it.voiceSource(),
                 senderId = it.senderId(), type = it.type)
         }
         // 诊断：库里查出来的语音引用，到 ReplyMessage 里还剩多少。
@@ -676,8 +676,21 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         - 没交代结果的事，写成还悬着、没下文，不要替他们补结局。
         - 【图片：…】是识别出来的描述，可以当内容用，但可能认错；金额、人名这类硬事实，素材正文没确认就别断言。
           【图片，未识别】和 [媒体] 是读不到内容的占位，不要猜。
+        - 链接、公众号文章、文件和文档（Word、PPT、Excel、PDF、压缩包等）在素材里只有标题或文件名，正文和文件内容都没读过。
+          可以说「有人转了篇讲 X 的文章」「有人发了个叫「预算.xlsx」的表」，但不要总结文章内容，
+          也不要补标题、文件名里没有的数字、时间或结论。
         - 语音已转写的按普通发言读；「【语音，未转写】」「【语音未能转写，内容未知】」读不到内容，
           不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
+        - 【视频】【表情】【小视频】【系统消息】也只有类型没有内容：可以提「有人发了个视频」，
+          不要猜拍了什么、说了什么，也不要把「媒体」「占位」这些词写进正文。
+        - 转账的金额和备注是消息里真有的，可以写；红包只有祝福语、没有金额，不要猜金额，
+          也不要写「金额未知」这种话。
+        - 转账素材里的「转出」「转入」是方向，照原样写，不要写反；金额照抄——0.01 就是 0.01 元，
+          不要换算成「一毛」「一块」这类说法。
+        - 【红包·已被领取】【转账·已收款】是状态消息，可以写「对方领了/收了」；同一笔转账不要
+          写成两个人互相转，只按带方向的转账条目描述一次。
+        - 【转账·待领取】是还没被收，【转账·已收款】是已经收了；可以照实写，不要反过来说。
+          红包没有【已被领取】就当还没被领。
         - 素材里的「群友N」「未获取昵称#N」「群成员」都只是代号，不是真名，别猜是谁，也不要把不同代号当成同一个人。
         - 每行开头的 HH:mm 是当天时间；跨零点的消息可能属于前一天，别把时间说反。
         - 素材是按时间轴抽样的片段，不代表消息多少，别拿它推断热度。
@@ -715,7 +728,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         - 把分歧原样摆出来，别和稀泥，也别替他们下结论。
 
         硬性要求：
-        - 统计行只用来判断热度：可以说谁说得最多、哪个时段最热闹，但不要报条数、人数这些数字。
+        - 统计行只用来判断热度：可以说谁说得最多，但不要报条数、人数这些数字。
         __SHARED_RULES__
 
         语气像边想边说的口头转述，短句。可以损事：笑他们干的蠢事，不笑人的外貌、家境、身体或性别。
@@ -792,9 +805,11 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         check(pool.isNotEmpty()) { "这个时段没有消息，把范围放宽一点再试" }
         // 诊断：素材里到底有多少条语音/图片，以及 voice 引用是否带上了。
         dev.jev.wechatmood.core.MoodLog.i("STATS_MEDIA_SCAN total=${pool.size} " +
-            "type34=${pool.count { it.type == 34 }} voices=${pool.count { it.voice != null }} " +
+            "type34=${pool.count { it.type == 34 }} calls=${pool.count { it.type == 50 }} " +
+            "voices=${pool.count { it.voice != null }} " +
             "waiting=${pool.count { it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }} " +
-            "images=${pool.count { it.type == 3 }} media=${pool.count { it.text == "[媒体]" }}")
+            "images=${pool.count { it.type == 3 }} media=${pool.count { it.text == "[媒体]" }} " +
+            "mediaTypes=${pool.filter { it.text == "[媒体]" }.groupingBy { it.type }.eachCount()}")
         // 语音在库里只有「【语音，等待转写】」占位：先按上限逐条转写，转出来的当正文喂模型。
         // 没转的留明确占位（未转写 / 未能转写），提示词里说清那是读不到内容，
         // 别让模型去评论占位符本身，也别让它以为「都在发语音」就是聊了什么。
@@ -807,7 +822,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val keep = buildList {
             val images = pool.withIndex().filter { it.value.type == 3 }.map { it.index }.takeLast(MAX_STATS_IMAGES)
             val forwards = pool.withIndex()
-                .filter { it.value.type in setOf(49, 822083633) && it.value.text.startsWith("聊天记录：") }
+                .filter { (it.value.type and 0xFFFF) == 49 && it.value.text.startsWith("聊天记录：") }
                 .map { it.index }.takeLast(MAX_STATS_FORWARDS)
             addAll(images); addAll(forwards)
         }.distinct()
@@ -876,10 +891,18 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             dev.jev.wechatmood.core.MoodLog.i("STATS_IMAGE_DIGEST images=${imageRows.size} " +
                 "budget=$imageBudget ok=${images.size}")
         }
+        // 只有类型、没有内容的行（【红包】【通话记录】【位置】这类）也不是可读素材：
+        // 整段都是它们时，别让模型对着一屏方括号硬编内容。
+        val bareTypes = setOf(
+            "【红包】", "【转账】", "【通话记录】", "【链接】", "【文件】", "【合并转发】",
+            "【引用回复】", "【链接、引用或转发】", "【名片】", "【位置】", "【视频】",
+            "【小视频】", "【表情】", "【系统消息】",
+        )
         fun isPlaceholder(text: String) = text == dev.jev.wechatmood.voice.VoiceText.WAITING ||
             text == dev.jev.wechatmood.voice.VoiceText.SKIPPED ||
-            text == dev.jev.wechatmood.voice.VoiceText.FAILED || text == "[媒体]" || text == "[图片，未识别]"
-        val readable = pool.map { row ->
+            text == dev.jev.wechatmood.voice.VoiceText.FAILED || text == "[媒体]" ||
+            text == "[图片，未识别]" || text in bareTypes
+        var readable = pool.map { row ->
             when {
                 row.text != dev.jev.wechatmood.voice.VoiceText.WAITING -> row
                 transcripts[row.id] != null -> row.copy(text = transcripts.getValue(row.id),
@@ -897,8 +920,28 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 else -> row
             }
         }
+        // 转账领没领取：同一段素材里，金额相同的「已收款」状态条目只配对一次；
+        // 配上的转出标成已收款，没配上的标成待领取。状态条目本身不重复保留。
+        fun amountOf(text: String) = text.substringAfter("：", "").substringBefore("】", "").trim()
+        val paidTransfers = readable.filter { it.text.startsWith("【转账·已收款") }
+            .map { amountOf(it.text) }.filter { it.isNotEmpty() }.toMutableList()
+        val settledReadable = readable.mapNotNull { row ->
+            when {
+                row.text.startsWith("【转账·已收款") -> null
+                row.text.startsWith("【转账·转出") -> {
+                    val value = amountOf(row.text)
+                    if (value.isEmpty()) row else {
+                        val matched = paidTransfers.remove(value)
+                        row.copy(text = if (matched) "【转账·已收款：$value】" else "【转账·待领取：$value】")
+                    }
+                }
+                else -> row
+            }
+        }
+        readable = settledReadable
         check(readable.any { !isPlaceholder(it.text) }) {
-            "这个时段 ${pool.size} 条消息里，语音和图片都没能读出内容；可以先播放一次语音、把图片点开再试，或者把范围放宽"
+            "这个时段 ${pool.size} 条消息里没有可读的正文（语音、图片没识别，或只有红包、通话这类提示）；" +
+                "可以先播放一次语音、把图片点开，或者把范围放宽"
         }
         // 表格里已经算好的显示名一并并进来，总结里的「未获取昵称#N」才能和表格对上号。
         val resolved = namesFor(readable.map { it.speaker }.distinct()) + shownNames
@@ -938,7 +981,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         var lastFinish = ""
         var correction = ""
         // 第二版按新上限收口：群里 400 字，私聊 330 字，留一点句号余量。
-        val textLimit = if (isGroup) 400 else 340
+        val textLimit = if (isGroup) 400 else 330
         var lastIssue = ""
         val prompt = if (isGroup) groupSummaryPrompt else privateSummaryPrompt
         repeat(2) { attempt ->
@@ -996,6 +1039,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 correction = "\n\n上一版的问题：$issue。重写：直接写正文，不要开场白和套话，" +
                     "不要逐句复述，控制在 $textLimit 字以内。"
                 if (clean.length > partial.length) partial = clean
+                // 话被长度掐断时，第二版要更多 token，不能只按形状问题处理。
+                if (answer.second == "length") maxTokens = 8000
                 return@repeat
             }
             if (clean.length > partial.length) partial = clean
@@ -1006,7 +1051,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                 "STATS_AI_TRUNCATED chars=${partial.length} issue=${lastIssue.ifEmpty { "-" }}")
             // 截断也按同一套字数收口：以前这里直接 take(3000)，提示词要的 400 字等于白写。
             return Analysis(trimToLength(partial, textLimit), body.size, pool.size,
-                if (lastIssue.isNotEmpty()) "输出没完全按要求来（$lastIssue），可以再点一次重试"
+                if (lastIssue.isNotEmpty()) "输出" + when (lastIssue) {
+                    "过长" -> "偏长"
+                    "开场白" -> "带了开场白"
+                    "套话" -> "带了套话"
+                    "逐人复述" -> "写成了逐人复述"
+                    else -> "没完全按要求来"
+                } + "，可以再点一次重试"
                 else "输出被长度上限截断，可以再点一次重试")
         }
         throw IllegalStateException("模型没返回正文（$lastFinish，素材 ${body.size} 条）")
@@ -1018,13 +1069,17 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
      */
     private fun summaryIssue(text: String, limit: Int): String? {
         val head = text.take(30)
-        if (head.contains("以下是") || head.startsWith("总结") || head.startsWith("群聊总结")) return "开场白"
-        if ((text.contains("首先") && text.contains("其次")) || text.contains("总而言之") ||
+        if (head.contains("以下是") || head.startsWith("总结")) return "开场白"
+        // 「首先」只在句首才算套话，正文里照抄的原话不该被误判。
+        if (FIRST_SECOND.containsMatchIn(text) || text.contains("总而言之") ||
             text.contains("值得一提的是")) return "套话"
         if (text.contains("甲说") && text.contains("乙说")) return "逐人复述"
-        if (text.length > limit + 60) return "过长"
+        // 多写十几二十字交给 trim 在句号处收口，不为这点溢出多跑一次完整请求。
+        if (text.length > limit + 20) return "过长"
         return null
     }
+
+    private val FIRST_SECOND = Regex("(^|[。！？\\n])首先")
 
     /**
      * 提示词只是软约束，模型想写长还是会写长。超了就在句号处收口，
@@ -1032,9 +1087,11 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
      */
     private fun trimToLength(text: String, limit: Int = 400): String {
         if (text.length <= limit) return text
-        val head = text.take(limit + 80)
+        // 只在 limit 以内找句号：以前多留 80 字的窗口，提示词和 CHANGELOG 写的上限都不作数。
+        val head = text.take(limit)
         val cut = head.indexOfLast { it in "。！？…\n" }
-        return if (cut >= limit / 2) head.take(cut + 1).trim() else head.take(limit).trim()
+        // 找不到句读时就近硬切，不留一个没有标点的尾巴在外面。
+        return if (cut >= limit / 2) head.take(cut + 1).trim() else head.trim()
     }
 
     /** 按类型填数字：文字 / 图片 / 语音 / 视频 / 表情 / 其它，一次填完。 */

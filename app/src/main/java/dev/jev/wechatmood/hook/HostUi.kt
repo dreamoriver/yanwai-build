@@ -114,7 +114,7 @@ class HostUi(private val activity: Activity) {
                     // 28 条语音会全部变成占位，模型只能说「都在发语音」。
                     dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
                         // 合并转发先摊平成「谁说了什么」，卡片取标题/描述，实在没有才留占位。
-                        it.analysisText() ?: it.evidenceBody() ?: "[媒体]", voice = it.voiceSource(),
+                        it.materialText(), voice = it.voiceSource(),
                         senderId = it.senderId(), type = it.type)
                 }
             }

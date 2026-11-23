@@ -285,7 +285,7 @@ object MessageSniffer {
         val ancestors = generateSequence(view) { it.parent as? View }.toSet()
         // 不限接收方向、也不依赖会话名：长按的 view 本身已经定位到消息。
         val candidates = current.filter { it.first in ancestors }.mapNotNull { it.second.metadata }
-            .filter { it.type == 49 && dev.jev.wechatmood.reply.ForwardDigest.isForward(it.content) }
+            .filter { it.isAppMessage() && dev.jev.wechatmood.reply.ForwardDigest.isForward(it.content) }
             .distinct()
         MoodLog.i("FORWARD_LOOKUP ancestors=${ancestors.size} rows=${current.size} matched=${candidates.size} " +
             "types=" + current.filter { it.first in ancestors }.mapNotNull { it.second.metadata?.type }.distinct())
@@ -385,7 +385,7 @@ object MessageSniffer {
             target == null -> null
             target.type == 3 -> "图片"
             target.type == 47 -> "表情"
-            target.type == 49 || target.type == 822083633 -> when (target.quotedMessage()?.type) {
+            target.isAppMessage() -> when (target.quotedMessage()?.type) {
                 3 -> "图片"
                 47 -> "表情"
                 else -> null

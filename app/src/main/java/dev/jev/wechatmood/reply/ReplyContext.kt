@@ -56,6 +56,9 @@ data class ReplyContext(val talker: String, val messages: List<ReplyMessage>, va
             62 -> "小视频"
             else -> "类型$type"
         }
+        /** 按 code point 截断，别把 emoji 地名切成半个代理对。 */
+        private fun String.takePoints(max: Int): String =
+            if (codePointCount(0, length) <= max) this else substring(0, offsetByCodePoints(0, max))
         /** 合并转发给模型的上限：条数与每条字数，超出后要明确告诉模型被截断。 */
         private const val FORWARD_ITEMS = 40
         private const val FORWARD_ITEM_CHARS = 150
@@ -71,13 +74,14 @@ data class ReplyContext(val talker: String, val messages: List<ReplyMessage>, va
             // 这里按内容是否可用筛选，不能因为正文超长就把整条消息丢掉。
             // 图片、表情这类没有正文的消息也要留一条占位：漏掉它们，模型就看不到
             // 「说了句话又连发三张图」这种节奏，只能对着一个省略数量瞎猜。
-            val eligible = same.filter { it.isSend in 0..1 && when (it.type) {
+            val eligible = same.filter { it.isSend in 0..1 && (it.isAppMessage() || when (it.type) {
                 1 -> it.content.isNotBlank()
                 34 -> it.voiceSource() != null
+                // 语音/视频通话记录不是占位：有正文就按正文，取消的通话留【通话记录】。
+                50 -> true
                 in MEDIA_TYPES -> true
-                49, 822083633 -> true
                 else -> it.plainText() != null
-            } }
+            }) }
             var budget = MAX_CHARACTERS
             var trimmed = eligible.size > maxMessages
             // 媒体占位不能把有正文的消息挤光：最多占所选条数的三分之一，多出来的按时间从早到晚丢弃。
@@ -95,8 +99,12 @@ data class ReplyContext(val talker: String, val messages: List<ReplyMessage>, va
                 // 引用消息的 content 是 XML，取解析后的文本，别把标签塞给模型。
                 val body = when {
                     record.type == 34 -> VoiceText.WAITING
-                    record.type in MEDIA_TYPES -> "【${mediaLabel(record.type)}】"
-                    record.type == 49 || record.type == 822083633 -> {
+                    // 通话记录本身有正文（「通话时长 02:31」），解析不出时才退回占位。
+                    record.type == 50 -> record.callText() ?: "【通话记录】"
+                    record.type in MEDIA_TYPES -> record.mediaText()?.takePoints(60)
+                        ?.let { "【${mediaLabel(record.type)}：$it】" }
+                        ?: "【${mediaLabel(record.type)}】"
+                    record.isAppMessage() -> {
                         // 引用消息要把「被引用的原文」和「这次新写的话」一起给模型，
                         // 只留其中一边很容易答非所问；解析失败也要留占位，不能整条丢掉。
                         val own = record.plainText().orEmpty()

@@ -512,7 +512,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 ReplyDatabaseHistory.voiceTranscripts(selected, voiceIds, snapshot?.account)
             }
             val body = if (message.type == 34) transcripts[message.messageId]
-                else message.analysisText() ?: message.evidenceBody()
+                else message.materialText().takeIf { it != "[媒体]" }
             // 把读到的真实类型写进日志：用户说那条明明是文字，得能看出到底读成了什么。
             MoodLog.i("RELATION_EVIDENCE type=" + message.type + " send=" + message.isSend +
                 " len=" + message.content.length + " shown=" + (body?.length ?: -1) +

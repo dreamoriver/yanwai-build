@@ -384,7 +384,7 @@ object ReplyDatabaseHistory {
                 }.getOrDefault(0L)
                 val since = if (sample > 1_000_000_000_000L) sinceMillis else sinceMillis / 1000
                 runCatching {
-                    query(db, "SELECT content FROM message WHERE talker = ? AND type IN (49, 822083633) " +
+                    query(db, "SELECT content FROM message WHERE talker = ? AND (type & 65535) = 49 " +
                         "AND createTime >= ? ORDER BY createTime DESC LIMIT 400",
                         arrayOf(talker, since.toString())).use { cursor ->
                         while (cursor.moveToNext()) {
