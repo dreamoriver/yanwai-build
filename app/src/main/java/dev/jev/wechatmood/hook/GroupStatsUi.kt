@@ -663,18 +663,43 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     }.trim()
 
     /**
+     * 群聊和私聊共用的硬性约束。
+     * 以前两边各抄一份，改一边漏一边（群聊就漏了输出收口），统一从这里取。
+     */
+    private val summarySharedRules = """
+        - 合并。同一件事来回说十句，那是同一件事，不是十件。
+        - 不逐人报价。禁止「甲说……乙说……丙又接……」；一个话题最多点两个名字，只有这个人真的带着观点时才点名。
+        - 引用克制，最多引两句原话；能说清的地方就不引。引号里必须是素材原文照抄，不能改写。
+        - 小事不写。只有一两句寒暄、没结论的插科打诨，半句带过或者干脆不写。
+        - 宁可漏，不要全。漏掉边角话题没关系，主线错了才叫失败。
+        - 素材少就写短，别硬凑：不到 40 条消息就老实写短；只是日常闲聊，就照实说在聊什么，别硬编冲突。
+        - 没交代结果的事，写成还悬着、没下文，不要替他们补结局。
+        - 【图片：…】是识别出来的描述，可以当内容用，但可能认错；金额、人名这类硬事实，素材正文没确认就别断言。
+          【图片，未识别】和 [媒体] 是读不到内容的占位，不要猜。
+        - 语音已转写的按普通发言读；「【语音，未转写】」「【语音未能转写，内容未知】」读不到内容，
+          不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
+        - 素材里的「群友N」「未获取昵称#N」「群成员」都只是代号，不是真名，别猜是谁，也不要把不同代号当成同一个人。
+        - 每行开头的 HH:mm 是当天时间；跨零点的消息可能属于前一天，别把时间说反。
+        - 素材是按时间轴抽样的片段，不代表消息多少，别拿它推断热度。
+        - 不评价这些人好不好，也不用「首先/其次」「总而言之」「值得一提的是」，不加小标题，不编号。
+        - 只输出正文：不要写「以下是总结」这类开场，也不要解释你是怎么写的。
+    """.trimIndent()
+
+    /**
      * 群聊转述的提示词：三十秒说清主线，只挑最大的两三个话题，不逐人报价。
      * 早先那版要求「能说清的事都要点到、每件事都点出是谁说的、能说全就说全」，
      * 模型照做就成了照抄聊天记录的流水账——要求写全，等于要求复述。
      * 素材里的 speaker 已经换成昵称，模型不该再看到 wxid。
      */
     private val groupSummaryPrompt = """
-        你在一个微信群里待了一整天，现在用三十秒跟没进群的人讲清楚这群人在折腾什么。
+        你在一个微信群里潜水看了一天，现在用三十秒跟没进群的人讲清楚这群人在折腾什么。
+        素材里的「我」是用户本人；你是旁观转述的人，不要把自己当成群成员，也不要用「我」代指素材里的任何人。
 
         好笑、具体、有画面感，但只准用素材里真有的东西：人、事、数字、原话、分歧。
         热闹不是靠形容词堆出来的，是靠把某件荒唐的小事说清楚。
 
-        只写三段，全文 250 到 420 字。超过 420 字这版就算废了。
+        只写三段，180 到 400 字，宁短勿长。超过 400 字这版就算废了。
+        第一段一句，第二段两到三句，第三段一句；某段没东西可写就压成半句，不要为凑字数展开。
 
         第一段，一句：这群人这阵子最较劲的是哪件事。要用最具体的那一版说法（谁、为了什么、卡在哪），
         别写成「最近大家在讨论……」这种开场。
@@ -690,52 +715,32 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         - 把分歧原样摆出来，别和稀泥，也别替他们下结论。
 
         硬性要求：
-        - 统计行只用来判断热度，不要写进正文，也别提「多少条」「多少人」。
-        - 合并。十个人围着同一件事说十句，那是同一件事。
-        - 不逐人报价。禁止「甲说……乙说……丙又接……」；一个话题最多点两个昵称，
-          只有这个人真的带着观点时才点名。
-        - 引用克制。全文最多三句原话，不引也能说清的地方就不要引。
-        - 小事不写。一两个人搭话、没结论的插科打诨，半句带过或者干脆不写。
-        - 宁可漏，不要全。漏掉边角话题没关系，主线错了才叫失败。
-        - 素材少就写短：不到 40 条消息，120 到 250 字就算完；就是普通闲聊，就老实说他们在闲扯什么，
-          别硬编冲突，也别总结出什么群体规律。
-        - 【图片：…】是对图片的一句话描述，可以当内容用；【图片，未识别】和 [媒体] 才是读不到内容的占位，不要猜。
-          「未获取昵称#N」是没查到昵称的人，别猜是谁。
-        - 语音已转写的就按普通发言读；「【语音，未转写】」「【语音未能转写，内容未知】」是读不到内容的占位，
-          不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
-        - 不评价这个群好不好，不用「首先/其次」「总而言之」「值得一提的是」，不加小标题，不编号。
+        - 统计行只用来判断热度：可以说谁说得最多、哪个时段最热闹，但不要报条数、人数这些数字。
+        __SHARED_RULES__
 
-        语气像边想边说的口头转述，短句，可以刻薄一点。
+        语气像边想边说的口头转述，短句。可以损事：笑他们干的蠢事，不笑人的外貌、家境、身体或性别。
 
-        示范（只学密度和口吻，内容别照抄，人名价格都是编的）：
-        这两天主要在折腾搬家，一边比价一边骂中介，顺带问了句周末谁有空搭把手。
-        主力是两个人，一个坚持自己搬能省一半，一个说上次闪了腰不值当，最后折中找了半日搬家公司，还被「半天也算一天」这句话堵了回去。搬完顺带聊到楼下停车位，有人报 300 一个月，贵得没人接话。
-        倒是「谁顺手带个早饭」这点小事吵了半天，几个人排队点单，剩下的都在笑话他们。
+        示范（只学密度和口吻，内容别照抄）：
+        这两天主要在折腾搬家，一边比价一边骂中介，顺手问了句周末谁有空搭把手。最后折中找了半日搬家公司，
+        还被「半天也算一天」堵了回去。倒是「谁顺手带个早饭」这点小事吵了半天，一群人排队点单，剩下的在看笑话。
 
-    """.trimIndent()
+    """.trimIndent().replace("__SHARED_RULES__", summarySharedRules)
 
     /** 私聊用的是「转述这段聊天」的提示词：同一套写全的要求用在两个人身上更像流水账。 */
     private val privateSummaryPrompt = """
         你和一个人聊了一整天，现在用三十秒跟朋友转述这段聊天在聊什么。
+        素材里的「我」是用户本人，「对方」就是和你聊天的这个人。
 
-        只写两段，全文 200 到 350 字。超过 350 字这版就算废了。
+        只写两段，180 到 330 字，宁短勿长。超过 330 字这版就算废了。
 
         第一段，一两句，说清这段聊天主要在聊什么、聊到哪一步了（约好了什么、还在等什么答复）。
         第二段，挑两三个具体的事，一个一两句，写清楚对方的态度或者你们的分歧。
 
         硬性要求：
-        - 只写对方和我，不要出现第三个人，也不要把自己说过的话逐句复述一遍。
-        - 合并。同一件事来回说了十句，那是同一件事，不是十件。
-        - 引用克制，全文最多两句原话；不引也能说清的地方就不要引。
-        - 小事不写。只有一两句寒暄、没结论的，半句带过或者干脆不写。
-        - 宁可漏，不要全。漏掉边角话题没关系，主线错了才叫失败。
-        - 素材少就写短，别硬凑：不到 40 条消息，写到 100 到 200 字就算完；
-          如果只是日常寒暄没什么事，就照实说，别硬编出情绪和矛盾。
-        - 【图片：…】是对图片的一句话描述，可以当内容用；【图片，未识别】和 [媒体] 才是读不到内容的占位，不要猜。
-        - 语音已转写的就按普通发言读；「【语音，未转写】」「【语音未能转写，内容未知】」是读不到内容的占位，
-          不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
-        - 不写统计数字，不评价这段关系，不用「首先/其次」「总而言之」「值得一提的是」，
-          不加小标题，不编号。
+        - 主要写对方和我之间的事，不要把自己说过的话逐句复述一遍；素材里提到的家人、同事这些第三方可以出现，
+          但只写素材里真有的态度，不要替他们编。
+        - 不写统计数字，不评价这段关系。
+        __SHARED_RULES__
 
         语气像边想边说的口头转述，短句。
 
@@ -743,8 +748,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         这两天主要在说周末见面的事，从去哪吃饭聊到几点结束，最后定在周六下午，具体地方还没定。
         一个想找离家近的，另一个嫌那边没好吃的，来回推了三四个店，谁也没拍板。中间还夹了句「你上次说的那家关了」，于是又绕回起点。
 
-        只输出正文，不要写「以下是总结」这类开场，也不要解释你是怎么写的。
-    """.trimIndent()
+    """.trimIndent().replace("__SHARED_RULES__", summarySharedRules)
 
     /** 一次请求拿到一段转述，顺带回报用了多少素材。 */
     /**
@@ -912,11 +916,11 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             append("共 ${statsSnapshot.total} 条 · ${statsSnapshot.senders} 人参与 · 人均 ${statsSnapshot.perCapita} 条")
             val top = statsSnapshot.members.filter { it.name != "我" }.take(6).map { member ->
                 // 以前查不到名字就退回 it.name，等于把 wxid 直接写进提示词。
-                val name = shownNames[member.name]
+                shownNames[member.name]
                     ?: GroupTranscript.label(member.name, resolved[member.name])
                     ?: "群成员"
-                "$name ${member.count} 条"
             }
+            // 只给名字不给条数：正文允许说谁最活跃，但按提示词的要求不报数字。
             if (top.isNotEmpty()) append("；发言最多：").append(top.joinToString("、"))
             if (waitingVoices > 0) append("；其中 $waitingVoices 条是语音，${transcripts.size} 条已转写成正文，其余未转写")
             val imageCount = pool.count { it.type == 3 && it.text == "[媒体]" }
@@ -932,6 +936,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         var maxTokens = 4000
         var partial = ""
         var lastFinish = ""
+        var correction = ""
+        // 第二版按新上限收口：群里 400 字，私聊 330 字，留一点句号余量。
+        val textLimit = if (isGroup) 400 else 340
+        var lastIssue = ""
         val prompt = if (isGroup) groupSummaryPrompt else privateSummaryPrompt
         repeat(2) { attempt ->
             val payload = JSONObject().put("model", current.model).put("stream", false)
@@ -941,7 +949,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
                     .put(JSONObject().put("role", "user").put("content",
                         "时段：${windowLabel(range)}（实际数据 ${spanText(pool)}）\n统计：$statsLine\n" +
                             "该时段可读消息（${readable.size} 条，按时间顺序抽了 ${body.size} 条）：\n" +
-                            body.joinToString("\n"))))
+                            body.joinToString("\n") + correction)))
             val answer = try {
                 withContext(Dispatchers.IO) {
                     client.request(current, payload, parse = { raw ->
@@ -970,32 +978,59 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             }
             val clean = TextClean.plain(answer.first).trim()
             lastFinish = "finish=${answer.second} reasoning=${answer.third} chars=${clean.length} tokens=$maxTokens"
-            dev.jev.wechatmood.core.MoodLog.i("STATS_AI_ALL attempt=${attempt + 1} $lastFinish")
+            val issue = if (clean.isNotBlank()) summaryIssue(clean, textLimit) else null
+            dev.jev.wechatmood.core.MoodLog.i(
+                "STATS_AI_ALL attempt=${attempt + 1} $lastFinish issue=${issue ?: "-"}")
             // finish_reason=length 说明话被掐在半路，直接重试要更多 token，不把半截文本当结果。
-            if (clean.isNotBlank() && answer.second != "length") {
+            if (clean.isNotBlank() && answer.second != "length" && issue == null) {
                 val unnamed = labels.values.count { it.startsWith("群友") || it.startsWith("未获取昵称") }
                 dev.jev.wechatmood.core.MoodLog.i(
                     "STATS_AI_POOL pool=${pool.size} lines=${body.size} speakers=${labels.size} unnamed=$unnamed")
-                return Analysis(trimToLength(clean, if (isGroup) 420 else 370), body.size, pool.size)
+                return Analysis(trimToLength(clean, textLimit), body.size, pool.size)
                     .also { remember(selectedKey(pool, range, limit), it) }
+            }
+            // 开场白、套话、逐人复述、明显超长：把问题写回请求再要一次，不让用户自己点重试。
+            if (issue != null && attempt == 0) {
+                lastIssue = issue
+                dev.jev.wechatmood.core.MoodLog.w("STATS_AI_RETRY issue=$issue chars=${clean.length}")
+                correction = "\n\n上一版的问题：$issue。重写：直接写正文，不要开场白和套话，" +
+                    "不要逐句复述，控制在 $textLimit 字以内。"
+                if (clean.length > partial.length) partial = clean
+                return@repeat
             }
             if (clean.length > partial.length) partial = clean
             maxTokens = 8000
         }
         if (partial.isNotBlank()) {
-            dev.jev.wechatmood.core.MoodLog.w("STATS_AI_TRUNCATED chars=${partial.length}")
+            dev.jev.wechatmood.core.MoodLog.w(
+                "STATS_AI_TRUNCATED chars=${partial.length} issue=${lastIssue.ifEmpty { "-" }}")
             // 截断也按同一套字数收口：以前这里直接 take(3000)，提示词要的 400 字等于白写。
-            return Analysis(trimToLength(partial, if (isGroup) 420 else 370), body.size, pool.size,
-                "输出被长度上限截断，可以再点一次重试")
+            return Analysis(trimToLength(partial, textLimit), body.size, pool.size,
+                if (lastIssue.isNotEmpty()) "输出没完全按要求来（$lastIssue），可以再点一次重试"
+                else "输出被长度上限截断，可以再点一次重试")
         }
         throw IllegalStateException("模型没返回正文（$lastFinish，素材 ${body.size} 条）")
+    }
+
+    /**
+     * 提示词管不住的形状问题：开场白、套话、逐人复述、明显超长。
+     * 返回问题名给第二次请求用，null 表示可以收。
+     */
+    private fun summaryIssue(text: String, limit: Int): String? {
+        val head = text.take(30)
+        if (head.contains("以下是") || head.startsWith("总结") || head.startsWith("群聊总结")) return "开场白"
+        if ((text.contains("首先") && text.contains("其次")) || text.contains("总而言之") ||
+            text.contains("值得一提的是")) return "套话"
+        if (text.contains("甲说") && text.contains("乙说")) return "逐人复述"
+        if (text.length > limit + 60) return "过长"
+        return null
     }
 
     /**
      * 提示词只是软约束，模型想写长还是会写长。超了就在句号处收口，
      * 宁可少一个收尾，也不要留半句话。
      */
-    private fun trimToLength(text: String, limit: Int = 420): String {
+    private fun trimToLength(text: String, limit: Int = 400): String {
         if (text.length <= limit) return text
         val head = text.take(limit + 80)
         val cut = head.indexOfLast { it in "。！？…\n" }
