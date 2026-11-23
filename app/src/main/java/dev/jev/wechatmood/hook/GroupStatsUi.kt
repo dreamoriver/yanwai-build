@@ -798,6 +798,23 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         // 先按条数抽样，再只处理抽中的语音和图片：反过来会把最后没进素材的消息也转一遍
         // （106 条只喂 56 行时尤其明显，转了等于白等）。
         var picked = GroupTranscript.sample(pool.size)
+        // 图片和合并转发的信息量集中在少数几条，按时间段抽样很容易整段漏掉；
+        // 抽完再把它们补回来，并从非保留项里挤掉同样条数，总行数不变。
+        val keep = buildList {
+            val images = pool.withIndex().filter { it.value.type == 3 }.map { it.index }.takeLast(MAX_STATS_IMAGES)
+            val forwards = pool.withIndex()
+                .filter { it.value.type in setOf(49, 822083633) && it.value.text.startsWith("聊天记录：") }
+                .map { it.index }.takeLast(MAX_STATS_FORWARDS)
+            addAll(images); addAll(forwards)
+        }.distinct()
+        if (keep.isNotEmpty()) {
+            val merged = (picked + keep).distinct().sorted()
+            picked = if (merged.size <= picked.size) merged else {
+                val extra = merged.size - picked.size
+                val drop = merged.filter { it !in keep }.take(extra).toSet()
+                merged.filter { it !in drop }
+            }
+        }
         val pickedRows = picked.mapNotNull { pool.getOrNull(it) }
         // 最近优先：群总结最该看到刚说完的话，和抽样「最后一窗锚定最新消息」保持一致。
         val voiceRows = pickedRows.filter { it.voice != null && it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }
@@ -1126,6 +1143,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         const val MAX_STATS_TRANSCRIPTS = 10
         /** 一次分析最多识别这么多张图片：每张一次视觉模型调用，最近优先。 */
         const val MAX_STATS_IMAGES = 5
+        /** 抽样后至少保留这几条合并转发：一条能带出好几段对话，被抽掉最可惜。 */
+        const val MAX_STATS_FORWARDS = 3
         /** 进程内转写缓存：同一条语音（msgId 全局唯一）不带重复跑原生转写。 */
         val voiceTextCache = HashMap<Long, String>()
     }
