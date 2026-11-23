@@ -64,6 +64,11 @@ class ReplyHostUi(private val activity: Activity,
     private var draftTargetMedia: String? = null
     private var draftText: String = ""
     private var draftLastIncoming: String? = null
+    /** 打开面板各阶段耗时：临时诊断用，定位「读取最近 N 条」到底卡在哪一步。 */
+    private var openStartedAt = 0L
+    private fun timing(stage: String) {
+        if (openStartedAt > 0L) MoodLog.i("REPLY_TIMING stage=$stage cost=${android.os.SystemClock.elapsedRealtime() - openStartedAt}ms")
+    }
 
     fun update(currentTalker: String?) {
         if (dialog?.isShowing == true && savingRoleWindow !== dialog && drawerRolesRevision != ModulePrefs.analysisSettings()?.rolesRevision) hide()
@@ -173,6 +178,7 @@ class ReplyHostUi(private val activity: Activity,
     }
 
     fun open(focusMessageId: Long? = null, imageDataUri: String? = null, retry: Int = 0): Boolean {
+        if (retry == 0) openStartedAt = android.os.SystemClock.elapsedRealtime()
         MoodLog.i("REPLY_OPEN_ENTER focus=${focusMessageId ?: 0} knownTalker=${talker != null} " +
             "dialog=${dialog?.isShowing == true} visible=${dialog?.window?.decorView?.isShown == true} " +
             "opening=${openingJob?.isActive == true}")
@@ -208,6 +214,7 @@ class ReplyHostUi(private val activity: Activity,
             toast(message.ifBlank { "读取聊天失败" })
             return true
         }
+        timing("context1")
         // 从附加面板进来没有长按目标：默认回对方最后一条消息。
         // 以前要求「正文非空」，会把最后一条是图片/语音时跳过它，转而去回更早那句；
         // 现在按消息取，占位由 replyTargetText 说明类型。
@@ -231,21 +238,29 @@ class ReplyHostUi(private val activity: Activity,
                 val rolesRevision = ModulePrefs.analysisSettings()?.rolesRevision
                 check(generation != null) { "设置尚未连接" }
                 val account = withContext(Dispatchers.IO) { ReplyDatabaseHistory.replyAccount(live) }
+                timing("account")
                 val owner = ReplyIdentityOwner(epoch, account, selectedTalker)
                 val identity = owner.key?.let { ReplyIdentityBridge.load(activity, it) } ?: ReplyIdentitySetting()
+                timing("identity")
                 val background = owner.key?.let { ReplyIdentityBridge.loadBackground(activity, it) } ?: ContactBackground()
+                timing("background")
                 val loadedFacts = owner.key?.let { key -> withContext(Dispatchers.IO) { RelationFactBridge.load(activity, key) } }.orEmpty()
+                timing("facts")
                 val preferredLimit = ReplyLimitBridge.load(activity, account)
+                timing("limit")
                 ensureActive()
                 if (generation != ModulePrefs.analysisSettings()?.generation || rolesRevision != ModulePrefs.analysisSettings()?.rolesRevision) return@launch
                 if (!owner.isCurrent(ReplyDatabaseHistory.pendingAccountScope(), MessageSniffer.currentReplyTalker())) return@launch
                 val latestPage = MessageSniffer.replyContext(requireBottom = false, focusId = targetFocusId)
+                timing("context2")
                 val latestAccount = withContext(Dispatchers.IO) { ReplyDatabaseHistory.replyAccount(latestPage) }
+                timing("account2")
                 if (generation != ModulePrefs.analysisSettings()?.generation || rolesRevision != ModulePrefs.analysisSettings()?.rolesRevision ||
                     !owner.isCurrent(ReplyDatabaseHistory.pendingAccountScope(), MessageSniffer.currentReplyTalker()) ||
                     !owner.acceptsAccount(latestAccount)) return@launch
                 // All reads finish before the editor is created, so a late load cannot erase typed text.
                 openResolved(focusMessageId, live, owner, identity, preferredLimit, background, imageDataUri, loadedFacts)
+                timing("dialog")
             } catch (e: CancellationException) { throw e }
             catch (error: Exception) {
                 MoodLog.e("REPLY_SETTINGS_READ_FAILED", error)
@@ -986,6 +1001,8 @@ class ReplyHostUi(private val activity: Activity,
             if (ownsDrawer()) composition.result?.let { history.remember(it, owner.historyScope) }
         }
         fun prepareHistory(limit: Int) {
+            val prepAt = android.os.SystemClock.elapsedRealtime()
+            fun mark(stage: String) { MoodLog.i("REPLY_TIMING stage=prep_" + stage + " cost=" + (android.os.SystemClock.elapsedRealtime() - prepAt) + "ms") }
             if (busy) return
             if (!ownsDrawer()) { window.dismiss(); return }
             if (!canGenerate()) { configure(); return }
@@ -1010,6 +1027,7 @@ class ReplyHostUi(private val activity: Activity,
                 }
                 targetImage?.let { if (ctx.targetImageDataUri == null) ctx.copy(targetImageDataUri = it) else ctx } ?: ctx
             }
+            mark("context")
             if (loaded.talker != selectedTalker) { reference.cancel(); window.dismiss(); return }
             historyJob = scope.launch {
                 try {
@@ -1019,6 +1037,7 @@ class ReplyHostUi(private val activity: Activity,
                         else runCatching { MessageSniffer.captureMediaImage(loaded.focusMessageId) }.getOrNull()
                             ?.let { loaded.copy(targetImageDataUri = it) } ?: loaded
                     val pending = ReplyDatabaseHistory.load(withImage, limit, owner.account)
+                    mark("load")
                     // 分母只用真正要调原生转写的条数：已有微信转写的不占额度，超过上限的也不转。
                     var voiceCount = 0
                     var voiceIndex = 0
@@ -1028,8 +1047,13 @@ class ReplyHostUi(private val activity: Activity,
                         ensureActive()
                         state.text = if (voiceCount > 0) "正在转写语音 ${++voiceIndex}/$voiceCount…"
                             else "正在转写语音…"
-                        NativeVoiceBridge.transcribe(source) {
-                            ownsDrawer() && ModulePrefs.canGenerateReply && reference.isCurrent(ticket)
+                        val voiceAt = android.os.SystemClock.elapsedRealtime()
+                        try {
+                            NativeVoiceBridge.transcribe(source) {
+                                ownsDrawer() && ModulePrefs.canGenerateReply && reference.isCurrent(ticket)
+                            }
+                        } finally {
+                            MoodLog.i("REPLY_TIMING stage=voice cost=" + (android.os.SystemClock.elapsedRealtime() - voiceAt) + "ms")
                         }
                     }
                     ensureActive()
@@ -1056,6 +1080,7 @@ class ReplyHostUi(private val activity: Activity,
                         else -> ""
                     }
                     updateNotice()
+                    mark("done")
                 } catch (e: CancellationException) { throw e }
                 catch (_: Exception) {
                     if (reference.isCurrent(ticket) && ownsDrawer()) state.text = "历史读取失败，请重试"

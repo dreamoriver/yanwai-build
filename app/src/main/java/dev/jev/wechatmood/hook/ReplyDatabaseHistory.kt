@@ -884,10 +884,14 @@ object ReplyDatabaseHistory {
      * 拿它们统计会让画像以为我「一条只发四个字」，媒体多的聊天里口吻描述直接失真。
      */
     private fun readStyleTexts(talker: String, databases: List<Any>, scope: String?): List<String> {
-        for (db in databasesForScope(databases, scope)) {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val dbs = databasesForScope(databases, scope)
+        for (db in dbs) {
             val texts = runCatching {
+                // 按 createTime 倒序才能直接用 (talker, createTime) 索引；ORDER BY msgId 在
+                // 「我」发言稀少的群里会退化成全表扫描（实测 4.6 秒），拖住整块「读取最近 N 条」。
                 query(db, "SELECT content FROM message WHERE talker = ? AND isSend = 1 AND type = 1 " +
-                    "AND length(trim(content)) > 0 ORDER BY msgId DESC LIMIT 200", arrayOf(talker)).use { cursor ->
+                    "AND length(trim(content)) > 0 ORDER BY createTime DESC LIMIT 200", arrayOf(talker)).use { cursor ->
                     buildList {
                         while (cursor.moveToNext()) {
                             cursor.getString(0)?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
@@ -895,6 +899,8 @@ object ReplyDatabaseHistory {
                     }
                 }
             }.getOrNull()
+            dev.jev.wechatmood.core.MoodLog.i("REPLY_STYLE_TEXTS rows=${texts?.size ?: -1} dbs=${dbs.size} " +
+                "took=${android.os.SystemClock.elapsedRealtime() - startedAt}ms")
             if (!texts.isNullOrEmpty()) return texts.asReversed()
         }
         return emptyList()
