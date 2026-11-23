@@ -57,10 +57,23 @@ class GroupStatsTest {
         assertEquals(GroupStatsCalculator.UNKNOWN, stats.members.first().name)
     }
 
-    @Test fun `percents always sum to one hundred`() {
-        assertEquals(100, GroupStatsCalculator.percents(listOf(1, 1, 1)).sum())
-        assertEquals(100, GroupStatsCalculator.percents(listOf(3, 3, 3, 3, 3, 3, 3)).sum())
-        assertEquals(100, GroupStatsCalculator.percents(listOf(7)).sum())
+    @Test fun `percents keep one decimal and still sum to one hundred`() {
+        assertEquals(100.0, GroupStatsCalculator.percents(listOf(1, 1, 1)).sum(), 0.001)
+        assertEquals(100.0, GroupStatsCalculator.percents(listOf(3, 3, 3, 3, 3, 3, 3)).sum(), 0.001)
+        assertEquals(100.0, GroupStatsCalculator.percents(listOf(7)).sum(), 0.001)
         assertTrue(GroupStatsCalculator.percents(emptyList()).isEmpty())
+        // 一条消息占 572 条时不该再显示 0%
+        val tiny = GroupStatsCalculator.percents(listOf(570, 1, 1))
+        assertEquals(0.2, tiny[1], 0.001)
+        assertEquals(100.0, tiny.sum(), 0.001)
+    }
+
+    @Test fun `kind summary lists only the types that appear`() {
+        val stats = GroupStatsCalculator.compute(listOf(
+            StatRecord(1_000, 0, 1, "文字", "甲"),
+            StatRecord(2_000, 0, 3, "[媒体]", "甲"),
+            StatRecord(3_000, 0, 47, "[媒体]", "乙")))
+        assertEquals("文字 1 · 图片 1 · 表情 1", stats.kindSummary())
+        assertEquals(3, stats.types.values.sum())
     }
 }

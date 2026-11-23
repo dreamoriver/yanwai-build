@@ -161,9 +161,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         else -> range.label
     }
 
-    /** 时段和条数已经由上面两个筛选按钮显示，这里只说结果，不重复。 */
-    private fun summaryText(): String =
-        "共 ${stats.total} 条 · ${stats.senders} 人发言 · 人均 ${stats.perCapita} 条"
+    /** 上面一行放数量类信息（范围、条数、人数、人均），大字那排只放消息类型。 */
+    private fun spanLineText(): String =
+        "数据范围 ${spanText()} · ${stats.total} 条 · ${stats.senders} 人发言 · 人均 ${stats.perCapita} 条 · 只在本机统计"
 
     private fun analysisTitle() = if (isGroup) "群里在聊什么" else "你们在聊什么"
 
@@ -239,10 +239,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         filters.addView(rangePill, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = theme.dp(8) })
         filters.addView(limitPill, LinearLayout.LayoutParams(0, -2, 1f))
         body.addView(filters)
-        val summaryLine = kit.caption(summaryText())
-        val spanLine = kit.caption("数据范围 ${spanText()} · 只在本机统计")
+        // 「共 N 条 / M 人发言」已经是大字里的数字，这里只留数据范围和人均，不重复。
+        val spanLine = kit.caption(spanLineText())
         val sourceLine = kit.caption(sourceNote)
-        body.addView(summaryLine)
         body.addView(spanLine)
         body.addView(sourceLine)
         captionLine(sourceLine, sourceNote)
@@ -251,12 +250,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, theme.dp(14), 0, theme.dp(6))
         }
-        val cells = listOf("条消息", "人发言", "图片语音", "个时段").map { number(it) }
+        // 上面就是全部的统计，下面只留成员表：条数和人数写在数据范围那一行，这里按类型分格。
+        val cells = (dev.jev.wechatmood.reply.GroupStatsCalculator.KIND_LABELS.map { number(it.second) } +
+            number("其它"))
         cells.forEach { numbers.addView(it.first, weight()) }
-        // 打开这一刻就把数字填上：以前只有换过筛选项才赋值，第一次进来四块只有标签。
         fillNumbers(cells)
         body.addView(numbers, LinearLayout.LayoutParams(-1, -2))
-
         body.addView(LinearLayout(activity), LinearLayout.LayoutParams(-1, theme.dp(6)))
         body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
         pageNames = pageSpeakerNames()
@@ -344,8 +343,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             stats = computeStats()
             rangePill.text = "时段 · ${StatsFilter.range.label}"
             limitPill.text = "条数 · ${StatsFilter.limitLabel}"
-            summaryLine.text = summaryText()
-            spanLine.text = "数据范围 ${spanText()} · 只在本机统计"
+            spanLine.text = spanLineText()
             captionLine(sourceLine, sourceNote)
             fillNumbers(cells)
             renderTop(currentNames)
@@ -359,8 +357,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             scope.launch {
                 // 新筛选可能要看更多消息：先重查，再刷新数字与表格。
                 reloadDb()
-                summaryLine.text = summaryText()
-                spanLine.text = "数据范围 " + spanText() + " · 只在本机统计"
+                spanLine.text = spanLineText()
                 captionLine(sourceLine, sourceNote)
                 fillNumbers(cells)
                 renderTop(currentNames)
@@ -454,7 +451,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val ordered = merged.entries.sortedByDescending { it.value }
         val percents = dev.jev.wechatmood.reply.GroupStatsCalculator.percents(ordered.map { it.value })
         ordered.forEachIndexed { index, entry ->
-            val row = tableRow(entry.key, "${entry.value}", "${percents[index]}%")
+            val row = tableRow(entry.key, "${entry.value}", "%.1f%%".format(percents[index]))
             val raw = rawByShown[entry.key]
             if (entry.key.startsWith("未获取昵称") && raw != null) {
                 row.setOnClickListener { promptName(raw, entry.key) }
@@ -614,6 +611,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             appendLine("说得最多：" + stats.topSenders.joinToString("、") {
                 "${displayedNames[it.first] ?: it.first}（${it.second} 条）"
             })
+        }
+        if (stats.kindSummary().isNotBlank()) {
+            appendLine("消息构成：" + stats.kindSummary())
         }
         if (stats.activeHours.isNotEmpty()) {
             appendLine("活跃时段：" + stats.activeHours.joinToString("、") { "${it} 点" })
@@ -845,13 +845,14 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         return if (cut >= limit / 2) head.take(cut + 1).trim() else head.take(limit).trim()
     }
 
-    /** 四个数字一次填完，避免各处漏填导致顶部只剩标签。 */
+    /** 按类型填数字：文字 / 图片 / 语音 / 视频 / 表情 / 其它，一次填完。 */
     private fun fillNumbers(cells: List<Pair<LinearLayout, TextView>>) {
-        if (cells.size < 4) return
-        cells[0].second.text = stats.total.toString()
-        cells[1].second.text = stats.senders.toString()
-        cells[2].second.text = (stats.media + stats.voice).toString()
-        cells[3].second.text = stats.activeHours.size.toString()
+        val labels = dev.jev.wechatmood.reply.GroupStatsCalculator.KIND_LABELS
+        labels.forEachIndexed { index, (type, _) ->
+            cells.getOrNull(index)?.second?.text = (stats.types[type] ?: 0).toString()
+        }
+        val known = labels.sumOf { stats.types[it.first] ?: 0 }
+        cells.getOrNull(labels.size)?.second?.text = (stats.types.values.sum() - known).coerceAtLeast(0).toString()
     }
 
     /** 空的状态行直接收起，界面上不留没有内容的一行。 */

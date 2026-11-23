@@ -26,7 +26,6 @@ object StatsImage {
     private val CARD = Color.parseColor("#1C2A24")
     private val INK = Color.parseColor("#E1EEE6")
     private val MUTED = Color.parseColor("#A6B9AF")
-    private val ACCENT = Color.parseColor("#8CD7C0")
 
     fun render(stats: GroupStats, names: Map<String, String>, analysis: String?, title: String): Bitmap {
         val titlePaint = text(48f, INK, Typeface.BOLD)
@@ -38,7 +37,7 @@ object StatsImage {
         val metaPaint = text(20f, MUTED)
 
         val bodyLines = analysis?.takeIf { it.isNotBlank() }?.let { wrap(it, bodyPaint, WIDTH - PAD * 2 - 48) } ?: emptyList()
-        val height = (PAD + 60 + 40 + 130 + 40 + stats.topSenders.size * 64 + 40 +
+        val height = (PAD + 60 + 40 + 130 + 40 + stats.topSenders.size * 52 + 40 +
             (if (bodyLines.isEmpty()) 0 else bodyLines.size * 44 + 90) + 60 + PAD).toInt().coerceAtLeast(900)
 
         val bitmap = Bitmap.createBitmap(WIDTH, height, Bitmap.Config.ARGB_8888)
@@ -51,13 +50,12 @@ object StatsImage {
         canvas.drawText(spanLabel(stats), PAD, y, subPaint)
         y += 46
 
-        // 三块数字
-        val cells = listOf(
-            stats.total.toString() to "条消息",
-            stats.senders.toString() to "人发言",
-            (stats.media + stats.voice).toString() to "图片语音",
-            stats.activeHours.size.toString() to "个时段",
-        )
+        // 和面板一致：大字只放消息类型，条数人数写在副标题里。
+        val known = dev.jev.wechatmood.reply.GroupStatsCalculator.KIND_LABELS
+            .sumOf { stats.types[it.first] ?: 0 }
+        val cells = dev.jev.wechatmood.reply.GroupStatsCalculator.KIND_LABELS.map { (type, label) ->
+            (stats.types[type] ?: 0).toString() to label
+        } + ((stats.types.values.sum() - known).coerceAtLeast(0).toString() to "其它")
         val cellWidth = (WIDTH - PAD * 2) / cells.size
         cells.forEachIndexed { index, (value, label) ->
             val cx = PAD + cellWidth * index + cellWidth / 2
@@ -69,14 +67,10 @@ object StatsImage {
         if (stats.topSenders.isNotEmpty()) {
             canvas.drawText("最活跃", PAD, y, labelPaint)
             y += 36
-            val max = stats.topSenders.first().second.coerceAtLeast(1)
             stats.topSenders.forEach { (name, count) ->
                 val shown = names[name] ?: fallbackName(name)
                 canvas.drawText(shown.take(14) + "（" + count + " 条）", PAD, y, rowPaint)
-                // 条形长度按最高值归一，直观看出谁说得最多。
-                val barWidth = (WIDTH - PAD * 2) * (count.toFloat() / max)
-                canvas.drawRoundRect(PAD, y + 12, PAD + barWidth, y + 22, 6 * DP, 6 * DP, fillPaint(ACCENT))
-                y += 64
+                y += 52
             }
             y += 12
         }
@@ -112,11 +106,13 @@ object StatsImage {
     }.getOrNull()
 
     /** 标题下面只写这次统计的时间范围，条数和人数在四块数字里已经有。 */
+    /** 副标题：时间范围 + 条数、人数、人均，和面板上面那一行说同一件事。 */
     private fun spanLabel(stats: GroupStats): String {
-        if (stats.earliest <= 0 || stats.latest <= 0) return "只在本机统计，不含聊天原文"
-        val format = SimpleDateFormat("HH:mm", Locale.CHINA)
-        return format.format(Date(stats.earliest)) + "–" + format.format(Date(stats.latest)) +
-            " · 只在本机统计"
+        val span = if (stats.earliest > 0 && stats.latest > 0) {
+            val format = SimpleDateFormat("HH:mm", Locale.CHINA)
+            format.format(Date(stats.earliest)) + "–" + format.format(Date(stats.latest)) + " · "
+        } else ""
+        return span + stats.total + " 条 · " + stats.senders + " 人发言 · 人均 " + stats.perCapita + " 条"
     }
 
     /** 名字不可见时用占位，避免图片里出现空行。 */
