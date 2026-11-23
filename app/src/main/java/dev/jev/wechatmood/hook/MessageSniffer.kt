@@ -372,7 +372,13 @@ object MessageSniffer {
             if (record.type in setOf(1, 34) && ++textCount >= ReplyContext.MAX_MESSAGES) break
         }
         val result = ReplyContext.collect(talker, messages.asReversed())
-        check(result.historyAnchor != null || result.messages.isNotEmpty()) { "暂时无法核对当前聊天，请重新进入后重试" }
+        if (result.historyAnchor == null && result.messages.isEmpty()) {
+            // 从「＋」面板进来时列表可能还在回收/重建：把现场记下来，别再只说一句「核对不了」。
+            dev.jev.wechatmood.core.MoodLog.w("REPLY_CONTEXT_EMPTY talker=" + talker.hashCode() +
+                " rows=" + rows.size + " count=" + count + " read=" + messages.size +
+                " attached=" + (scrollingView?.isAttachedToWindow == true))
+            error("暂时无法核对当前聊天，请重新进入后重试")
+        }
         // 图片/表情的正文是占位，长按目标另外记下类型与引用里的媒体，供请求层提示模型。
         val target = if (focusId > 0) messages.firstOrNull { it.messageId == focusId } else null
         var targetMedia = when {

@@ -172,7 +172,7 @@ class ReplyHostUi(private val activity: Activity,
         return found
     }
 
-    fun open(focusMessageId: Long? = null, imageDataUri: String? = null): Boolean {
+    fun open(focusMessageId: Long? = null, imageDataUri: String? = null, retry: Int = 0): Boolean {
         MoodLog.i("REPLY_OPEN_ENTER focus=${focusMessageId ?: 0} knownTalker=${talker != null} " +
             "dialog=${dialog?.isShowing == true} visible=${dialog?.window?.decorView?.isShown == true} " +
             "opening=${openingJob?.isActive == true}")
@@ -193,8 +193,20 @@ class ReplyHostUi(private val activity: Activity,
         }
         val epoch = ReplyDatabaseHistory.pendingAccountScope()
         ownerEpoch = epoch
-        val live = runCatching { MessageSniffer.replyContext(requireBottom = false, focusId = targetFocusId) }.getOrElse {
-            toast(it.message ?: "读取聊天失败"); return true
+        val live = runCatching { MessageSniffer.replyContext(requireBottom = false, focusId = targetFocusId) }.getOrElse { error ->
+            val message = error.message.orEmpty()
+            // 点「＋ → 附加」时聊天列表可能正在被面板盖住或重建，读一次是空的；
+            // 隔一帧再试，比当场甩一句「无法核对」好。
+            if (retry < 2 && (message.contains("核对当前聊天") || message.contains("识别当前聊天"))) {
+                MoodLog.w("REPLY_OPEN_RETRY retry=" + retry + " reason=" + message)
+                activity.window?.decorView?.postDelayed({
+                    runCatching { open(focusMessageId, imageDataUri, retry + 1) }
+                        .onFailure { toast(it.message ?: "读取聊天失败") }
+                }, 140L)
+                return true
+            }
+            toast(message.ifBlank { "读取聊天失败" })
+            return true
         }
         // 从附加面板进来没有长按目标：默认回对方最后一条消息。
         // 以前要求「正文非空」，会把最后一条是图片/语音时跳过它，转而去回更早那句；
