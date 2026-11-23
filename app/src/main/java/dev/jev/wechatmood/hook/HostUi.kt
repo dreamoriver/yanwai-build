@@ -110,8 +110,12 @@ class HostUi(private val activity: Activity) {
                         if (StatsFilter.limit == 0) 5000 else StatsFilter.limit, account)
                 }.getOrDefault(emptyList())
                 rows.map {
+                    // 语音要带上引用，统计里的「群里在聊什么」才转写得了；漏了这一步，
+                    // 28 条语音会全部变成占位，模型只能说「都在发语音」。
                     dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
-                        it.analysisText() ?: "[媒体]", senderId = it.senderId(), type = it.type)
+                        // 合并转发先摊平成「谁说了什么」，卡片取标题/描述，实在没有才留占位。
+                        it.analysisText() ?: it.evidenceBody() ?: "[媒体]", voice = it.voiceSource(),
+                        senderId = it.senderId(), type = it.type)
                 }
             }
             GroupStatsUi(activity, context, mapped, account).show()

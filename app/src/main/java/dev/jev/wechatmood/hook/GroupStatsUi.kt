@@ -122,6 +122,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             val stamp = if (it.time > 1_000_000_000_000L) it.time else it.time * 1000
             stamp >= since
         }
+        dev.jev.wechatmood.core.MoodLog.i("STATS_POOL source=${source.size} byTime=${byTime.size} " +
+            "type34=${byTime.count { it.type == 34 }} voice=${byTime.count { it.voice != null }} " +
+            "fromDb=${source === dbMessages}")
         return if (StatsFilter.limit > 0) byTime.takeLast(StatsFilter.limit) else byTime
     }
 
@@ -207,11 +210,19 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             return
         }
         sourceNote = ""
+        val buildStarted = android.os.SystemClock.elapsedRealtime()
         dbMessages = rows.map {
             dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
-                it.analysisText() ?: "[媒体]", voice = it.voiceSource(),
+                // 合并转发先摊平成「谁说了什么」，卡片取标题/描述，实在没有才留占位。
+                it.analysisText() ?: it.evidenceBody() ?: "[媒体]", voice = it.voiceSource(),
                 senderId = it.senderId(), type = it.type)
         }
+        // 诊断：库里查出来的语音引用，到 ReplyMessage 里还剩多少。
+        dev.jev.wechatmood.core.MoodLog.i("STATS_DB_VOICE rows=${rows.size} " +
+            "type34=${rows.count { it.type == 34 }} src=${rows.count { it.voiceSource() != null }} " +
+            "built=${dbMessages.size} voice=${dbMessages.count { it.voice != null }} " +
+            "waiting=${dbMessages.count { it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }} " +
+            "took=${android.os.SystemClock.elapsedRealtime() - buildStarted}ms")
         stats = computeStats()
         logBlankSamples()
         // 对比走同一条按时间查库的路：跟着这次刷新一起数一遍上一周期，不另开请求路径。
@@ -688,7 +699,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         - 宁可漏，不要全。漏掉边角话题没关系，主线错了才叫失败。
         - 素材少就写短：不到 40 条消息，120 到 250 字就算完；就是普通闲聊，就老实说他们在闲扯什么，
           别硬编冲突，也别总结出什么群体规律。
-        - [图片] 只当占位，不要猜内容；「未获取昵称#N」是没查到昵称的人，别猜是谁。
+        - 【图片：…】是对图片的一句话描述，可以当内容用；【图片，未识别】和 [媒体] 才是读不到内容的占位，不要猜。
+          「未获取昵称#N」是没查到昵称的人，别猜是谁。
         - 语音已转写的就按普通发言读；「【语音，未转写】」「【语音未能转写，内容未知】」是读不到内容的占位，
           不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
         - 不评价这个群好不好，不用「首先/其次」「总而言之」「值得一提的是」，不加小标题，不编号。
@@ -719,7 +731,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         - 宁可漏，不要全。漏掉边角话题没关系，主线错了才叫失败。
         - 素材少就写短，别硬凑：不到 40 条消息，写到 100 到 200 字就算完；
           如果只是日常寒暄没什么事，就照实说，别硬编出情绪和矛盾。
-        - [图片] 只当占位，不要猜内容。
+        - 【图片：…】是对图片的一句话描述，可以当内容用；【图片，未识别】和 [媒体] 才是读不到内容的占位，不要猜。
         - 语音已转写的就按普通发言读；「【语音，未转写】」「【语音未能转写，内容未知】」是读不到内容的占位，
           不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
         - 不写统计数字，不评价这段关系，不用「首先/其次」「总而言之」「值得一提的是」，
@@ -774,11 +786,22 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         // 素材由点击那一刻快照传进来：请求期间切了筛选，也不会拿新范围的数据配旧提示词。
         // 筛选后为空也不再偷偷退回整页消息——那会让「最近 1 小时」的分析里出现昨天的话。
         check(pool.isNotEmpty()) { "这个时段没有消息，把范围放宽一点再试" }
+        // 诊断：素材里到底有多少条语音/图片，以及 voice 引用是否带上了。
+        dev.jev.wechatmood.core.MoodLog.i("STATS_MEDIA_SCAN total=${pool.size} " +
+            "type34=${pool.count { it.type == 34 }} voices=${pool.count { it.voice != null }} " +
+            "waiting=${pool.count { it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }} " +
+            "images=${pool.count { it.type == 3 }} media=${pool.count { it.text == "[媒体]" }}")
         // 语音在库里只有「【语音，等待转写】」占位：先按上限逐条转写，转出来的当正文喂模型。
         // 没转的留明确占位（未转写 / 未能转写），提示词里说清那是读不到内容，
         // 别让模型去评论占位符本身，也别让它以为「都在发语音」就是聊了什么。
         val waitingVoices = pool.count { it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }
-        val voiceRows = pool.filter { it.voice != null && it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }
+        // 先按条数抽样，再只处理抽中的语音和图片：反过来会把最后没进素材的消息也转一遍
+        // （106 条只喂 56 行时尤其明显，转了等于白等）。
+        var picked = GroupTranscript.sample(pool.size)
+        val pickedRows = picked.mapNotNull { pool.getOrNull(it) }
+        // 最近优先：群总结最该看到刚说完的话，和抽样「最后一窗锚定最新消息」保持一致。
+        val voiceRows = pickedRows.filter { it.voice != null && it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }
+            .asReversed()
         // 预算只算真正要调原生转写的条数：命中缓存的直接拿来，不再占额度，
         // 这样语音多于 10 条的群，第二次分析会接着转下一批，不会永远卡在前 10 条。
         val uncached = voiceRows.count { synchronized(voiceTextCache) { voiceTextCache[it.id] } == null }
@@ -807,26 +830,59 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             dev.jev.wechatmood.core.MoodLog.i("STATS_VOICE_TRANSCRIBE voices=${voiceRows.size} " +
                 "budget=$transcriptBudget ok=${transcripts.size}")
         }
+        // 图片同样最近优先：历史图片在微信加密的 .dat 里（不做解密），只有页面还挂着的
+        // 能取到；识别过就写 ImageDigest 缓存，同一张图不重复调视觉模型。
+        val imageRows = pickedRows.filter { it.type == 3 && it.text == "[媒体]" }.asReversed()
+        val images = HashMap<Long, String>()
+        val imageBudget = minOf(imageRows.size, MAX_STATS_IMAGES)
+        var imageIndex = 0
+        // 取不到图的历史图片会 continue，限制一次最多摸这么多条，别把整段图片都遍历一遍。
+        for (row in imageRows.take(MAX_STATS_IMAGES * 4)) {
+            if (imageIndex >= imageBudget) break
+            val cached = dev.jev.wechatmood.reply.ImageDigest.cached(activity, context.talker, row.id)
+            if (cached != null) { images[row.id] = cached; continue }
+            val dataUri = runCatching { MessageSniffer.captureMediaImage(row.id) }.getOrNull() ?: continue
+            imageIndex++
+            onStage("正在识别图片 ${imageIndex}/${imageBudget}…")
+            val text = try {
+                dev.jev.wechatmood.reply.ImageDigest.describe(activity, current, context.talker, row.id, dataUri)
+            } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+            catch (_: Exception) { null }
+            if (!text.isNullOrBlank()) images[row.id] = text
+        }
+        if (imageBudget > 0) {
+            onStage("正在分析最近聊天…")
+            dev.jev.wechatmood.core.MoodLog.i("STATS_IMAGE_DIGEST images=${imageRows.size} " +
+                "budget=$imageBudget ok=${images.size}")
+        }
+        fun isPlaceholder(text: String) = text == dev.jev.wechatmood.voice.VoiceText.WAITING ||
+            text == dev.jev.wechatmood.voice.VoiceText.SKIPPED ||
+            text == dev.jev.wechatmood.voice.VoiceText.FAILED || text == "[媒体]" || text == "[图片，未识别]"
         val readable = pool.map { row ->
-            if (row.text != dev.jev.wechatmood.voice.VoiceText.WAITING) return@map row
-            transcripts[row.id]?.let { return@map row.copy(text = it, voiceState = dev.jev.wechatmood.voice.VoiceState.READY) }
             when {
+                row.text != dev.jev.wechatmood.voice.VoiceText.WAITING -> row
+                transcripts[row.id] != null -> row.copy(text = transcripts.getValue(row.id),
+                    voiceState = dev.jev.wechatmood.voice.VoiceState.READY)
                 row.id in tried -> row.copy(text = dev.jev.wechatmood.voice.VoiceText.FAILED,
                     voiceState = dev.jev.wechatmood.voice.VoiceState.FAILED)
                 else -> row.copy(text = dev.jev.wechatmood.voice.VoiceText.SKIPPED,
                     voiceState = dev.jev.wechatmood.voice.VoiceState.SKIPPED)
             }
+        }.map { row ->
+            val digest = images[row.id]
+            when {
+                digest != null -> row.copy(text = "【图片：$digest】")
+                row.type == 3 && row.text == "[媒体]" -> row.copy(text = "[图片，未识别]")
+                else -> row
+            }
         }
-        check(readable.any { it.text != dev.jev.wechatmood.voice.VoiceText.SKIPPED &&
-            it.text != dev.jev.wechatmood.voice.VoiceText.FAILED &&
-            it.text != dev.jev.wechatmood.voice.VoiceText.WAITING }) {
-            "这个时段 ${pool.size} 条消息里 ${waitingVoices} 条语音都没能转写，本机读不到聊天内容；可以先播放一次语音或稍后重试"
+        check(readable.any { !isPlaceholder(it.text) }) {
+            "这个时段 ${pool.size} 条消息里，语音和图片都没能读出内容；可以先播放一次语音、把图片点开再试，或者把范围放宽"
         }
         // 表格里已经算好的显示名一并并进来，总结里的「未获取昵称#N」才能和表格对上号。
         val resolved = namesFor(readable.map { it.speaker }.distinct()) + shownNames
         // 按整段抽样：单条均匀抽会把对话抽成碎片，模型看不出谁在接谁。
         // 条数由字符预算反算，抽完还超就再收一次，条数多到撑爆上下文会直接 400。
-        var picked = GroupTranscript.sample(readable.size)
         var transcript = GroupTranscript.lines(picked, readable, resolved, timestamps = true)
         while (transcript.first.joinToString("\n").length > GroupTranscript.BUDGET_CHARS && picked.size > 24) {
             picked = GroupTranscript.pick(readable.size, limit = picked.size / 2)
@@ -846,6 +902,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             }
             if (top.isNotEmpty()) append("；发言最多：").append(top.joinToString("、"))
             if (waitingVoices > 0) append("；其中 $waitingVoices 条是语音，${transcripts.size} 条已转写成正文，其余未转写")
+            val imageCount = pool.count { it.type == 3 && it.text == "[媒体]" }
+            if (imageCount > 0) append("；$imageCount 张图片，${images.size} 张已识别成文字")
         }
         // 长回答走非流式更稳：非流式只受读超时约束，这里单独放宽到 3 分钟。
         val client = ReplyHttpClient(HttpClients.shared.newBuilder()
@@ -1066,6 +1124,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val summaryCache = LinkedHashMap<String, Pair<Long, Analysis>>()
         /** 一次分析最多转写这么多条语音：原生转写每条约 2 秒，再多就成等转写了。 */
         const val MAX_STATS_TRANSCRIPTS = 10
+        /** 一次分析最多识别这么多张图片：每张一次视觉模型调用，最近优先。 */
+        const val MAX_STATS_IMAGES = 5
         /** 进程内转写缓存：同一条语音（msgId 全局唯一）不带重复跑原生转写。 */
         val voiceTextCache = HashMap<Long, String>()
     }

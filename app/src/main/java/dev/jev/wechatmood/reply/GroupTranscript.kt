@@ -15,6 +15,8 @@ object GroupTranscript {
     const val RUN = 4
     /** 单条消息留给模型的字数。 */
     const val MESSAGE_CHARS = 90
+    /** 合并转发摊平后的转录：一条能带出好几段对话，单独放宽，90 字会被截成一句。 */
+    const val MERGE_CHARS = 320
 
     /**
      * 先按字符预算算出能放几条，再交给 [pick] 抽。
@@ -84,7 +86,8 @@ object GroupTranscript {
                 label(message.speaker, resolved[message.speaker]) ?: "群友${++unnamed}"
             }
             val text = message.text.replace("\n", " ").trim().let {
-                if (it.length > MESSAGE_CHARS) it.take(MESSAGE_CHARS) + "…" else it
+                val cap = if (it.startsWith("聊天记录：")) MERGE_CHARS else MESSAGE_CHARS
+                if (it.length > cap) it.take(cap) + "…" else it
             }
             if (text.isEmpty()) continue
             val stamp = clock?.let { format ->
