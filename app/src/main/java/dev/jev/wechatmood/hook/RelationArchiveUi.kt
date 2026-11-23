@@ -452,6 +452,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             }
             showStatus("已导入，现在有效 " + open + " 条", theme.success)
             load(key)
+            RelationReminder.refresh(activity, key, talker)
+            RelationChatBadge.update(activity, talker, force = true)
         }
     }
 
@@ -630,6 +632,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             }
             load(key)
             RelationReminder.refresh(activity, key, talker)
+            RelationChatBadge.update(activity, talker, force = true)
         }
     }
 
@@ -645,6 +648,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             }
             load(key)
             RelationReminder.refresh(activity, key, talker)
+            RelationChatBadge.update(activity, talker, force = true)
         }
     }
 
@@ -660,6 +664,7 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
             }
             load(key)
             RelationReminder.refresh(activity, key, talker)
+            RelationChatBadge.update(activity, talker, force = true)
             showStatus("已彻底删除，之后的自动整理不会再抽回这条", theme.success)
         }
     }
@@ -690,6 +695,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 result.facts.isEmpty() -> showStatus("这次没有提取到新的事实", theme.muted)
                 else -> {
                     reload()
+                    RelationReminder.refreshAsync(activity, key, talker)
+                    RelationChatBadge.update(activity, talker, force = true)
                     val changed = result.added + result.replaced + result.superseded > 0
                     showStatus((if (changed) "已更新：" else "") + result.changeText(), theme.success)
                 }
@@ -808,6 +815,8 @@ internal class RelationArchiveUi(private val activity: Activity, private val tal
                 return@launch
             }
             load(key)
+            RelationReminder.refresh(activity, key, talker)
+            RelationChatBadge.update(activity, talker, force = true)
             showStatus("已添加", theme.success)
         }
     }

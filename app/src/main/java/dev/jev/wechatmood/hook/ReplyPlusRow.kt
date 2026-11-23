@@ -169,10 +169,12 @@ internal class ReplyPlusRow(private val activity: Activity, private val open: ()
             // The old root may have WRAP_CONTENT height. A weighted child needs the panel's full bounds.
             found.addView(host, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             status("ATTACHED")
+            active = this
         }.onFailure { blockedPanel = found; restoreContent(); MoodLog.w("REPLY_PLUS_ROW_FAILED ${it.javaClass.simpleName}") }
     }
 
     fun clear() {
+        if (active === this) active = null
         pendingRefresh?.let { footer?.removeCallbacks(it) }
         pendingRefresh = null
         nudge = false
@@ -200,6 +202,11 @@ internal class ReplyPlusRow(private val activity: Activity, private val open: ()
         panel = null; wrapper = null; original = null; originalParams = null; row = null
     }
 
+    /** 档案窗口改完状态后立即刷新入口文案，不用等下一次面板布局。 */
+    fun refreshBadgeLabel() {
+        entryView?.post { updateEntryLabel() }
+    }
+
     private fun descendants(root: View): List<View> = buildList {
         fun visit(view: View, depth: Int) {
             if (depth > 30 || size >= 1500) return
@@ -207,5 +214,14 @@ internal class ReplyPlusRow(private val activity: Activity, private val open: ()
             if (view is ViewGroup) for (i in 0 until view.childCount) visit(view.getChildAt(i), depth + 1)
         }
         visit(root, 0)
+    }
+
+    companion object {
+        /** 当前挂在聊天页上的那一行。整个进程只有一个聊天页，清空时置 null，不留 Activity。 */
+        @Volatile private var active: ReplyPlusRow? = null
+
+        fun notifyBadgeChanged() {
+            active?.refreshBadgeLabel()
+        }
     }
 }

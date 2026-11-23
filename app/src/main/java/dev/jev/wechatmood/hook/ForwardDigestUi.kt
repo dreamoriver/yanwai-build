@@ -11,6 +11,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import dev.jev.wechatmood.core.ModulePrefs
+import dev.jev.wechatmood.core.UsageKind
 import dev.jev.wechatmood.reply.ForwardDigest
 import dev.jev.wechatmood.reply.ForwardDigestProtocol
 import dev.jev.wechatmood.reply.ReplyContext
@@ -104,7 +105,8 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
                 return@launch
             }
             runCatching {
-                ReplyHttpClient().request(settings, ForwardDigestProtocol.payload(settings, message),
+                ReplyHttpClient(kind = UsageKind.DIGEST).request(settings,
+                    ForwardDigestProtocol.payload(settings, message),
                     ForwardDigestProtocol::parse, onPartial = { partial ->
                     if (partial.isNotBlank()) {
                         // 显示前再清洗一次：模型会把输入里的填充原样复述出来。

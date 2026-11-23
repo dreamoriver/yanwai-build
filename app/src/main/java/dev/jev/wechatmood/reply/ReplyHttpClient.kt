@@ -2,6 +2,7 @@ package dev.jev.wechatmood.reply
 
 import dev.jev.wechatmood.core.HttpClients
 import dev.jev.wechatmood.core.MoodLog
+import dev.jev.wechatmood.core.UsageKind
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -12,9 +13,11 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resumeWithException
 
+/** [kind] 只影响用量统计的归类，默认按「回复」算。 */
 class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newBuilder()
     .connectTimeout(15, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
-    .readTimeout(90, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS).build()) {
+    .readTimeout(90, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS).build(),
+    private val kind: String = UsageKind.REPLY) {
     suspend fun generate(settings: ReplySettings, context: ReplyContext, draft: String, direction: String,
         knowledge: String, previous: String = "", focusMessageId: Long? = null,
         relationship: ReplyRelationship = ReplyRelationship.UNSPECIFIED, customRelationship: String = "",
@@ -32,7 +35,7 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
         // 不能用「去掉图片再试一次」：真的把图去掉，模型只会答「没有收到图片」，
         // 那句话会被当成描述缓存下来。宁可失败，也不要假描述。
         return request(settings, ReplyProtocol.digestPayload(settings, dataUri), ReplyProtocol::parseDigest,
-            imageFallback = false)
+            imageFallback = false, kind = UsageKind.IMAGE)
     }
 
     suspend fun findTopics(settings: ReplySettings, context: ReplyContext, draft: String, notes: String,
@@ -43,26 +46,27 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
     }
 
     internal suspend fun <T> request(settings: ReplySettings, payload: JSONObject, parse: (String) -> T,
-        onPartial: ((String) -> Unit)? = null, imageFallback: Boolean = true): T =
+        onPartial: ((String) -> Unit)? = null, imageFallback: Boolean = true,
+        kind: String = this.kind): T =
         try {
-            once(settings, payload, parse, onPartial)
+            once(settings, payload, parse, onPartial, kind)
         } catch (error: IllegalStateException) {
             // 输出被截断说明 max_tokens 不够，放宽上限重试一次，比让用户手动点重试好。
             if (error.message?.contains("截断") == true) {
-                once(settings, JSONObject(payload.toString()).put("max_tokens", 2400), parse, onPartial)
+                once(settings, JSONObject(payload.toString()).put("max_tokens", 2400), parse, onPartial, kind)
             } else if (imageFallback && hasImage(payload)) {
                 // 图片必须最先回退：若先去掉 response_format / stream_options，重试仍带着图片，
                 // 再失败就直接抛错，纯文本兜底永远走不到。
                 MoodLog.w("REPLY_FALLBACK_TEXT 模型不接受图片，已回退纯文本：${error.message?.take(60)}")
-                once(settings, withoutImage(payload), parse, onPartial)
+                once(settings, withoutImage(payload), parse, onPartial, kind)
             } else if (payload.has("response_format")) {
                 // 一些服务不支持 response_format，会直接 400；去掉再试。
                 MoodLog.w("RESPONSE_FORMAT_UNSUPPORTED 去掉 response_format 重试")
-                once(settings, JSONObject(payload.toString()).apply { remove("response_format") }, parse, onPartial)
+                once(settings, JSONObject(payload.toString()).apply { remove("response_format") }, parse, onPartial, kind)
             } else if (payload.has("stream_options")) {
                 // 一些网关不认 stream_options，直接 400；去掉参数再试，不影响回复本身。
                 MoodLog.w("REPLY_STREAM_OPTIONS_UNSUPPORTED 去掉 stream_options 重试")
-                once(settings, JSONObject(payload.toString()).apply { remove("stream_options") }, parse, onPartial)
+                once(settings, JSONObject(payload.toString()).apply { remove("stream_options") }, parse, onPartial, kind)
             } else throw error
         }
 
@@ -93,7 +97,7 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
     }
 
     private suspend fun <T> once(settings: ReplySettings, payload: JSONObject, parse: (String) -> T,
-        onPartial: ((String) -> Unit)?): T =
+        onPartial: ((String) -> Unit)?, kind: String): T =
         suspendCancellableCoroutine { continuation ->
             val call = client.newCall(Request.Builder().url(settings.endpoint).header("Authorization", "Bearer ${settings.apiKey}")
                 .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build())
@@ -121,9 +125,9 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
                             }
                             val body = requireNotNull(reply.body) { "模型没有返回内容，请重试" }
                             val streaming = payload.optBoolean("stream") && body.contentType()?.toString()?.contains("event-stream") == true
-                            if (streaming) streamBody(body, onPartial) else {
+                            if (streaming) streamBody(body, onPartial, kind) else {
                                 dev.jev.wechatmood.core.MoodLog.i("REPLY_STREAM off type=${body.contentType()}")
-                                readWhole(body)
+                                readWhole(body, kind)
                             }
                         }.let(parse)
                     }.recoverCatching { error ->
@@ -136,19 +140,20 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
         }
 
     /** usage 只在服务返回时才有；流式拼出来的响应没有 usage，至少要记一次请求。 */
-    private fun reportUsage(body: String) {
+    private fun reportUsage(body: String, kind: String) {
         val usage = runCatching { JSONObject(body).optJSONObject("usage") }.getOrNull()
         dev.jev.wechatmood.core.UsageReporter.report(
             usage?.optLong("prompt_tokens", 0L) ?: 0L,
-            usage?.optLong("completion_tokens", 0L) ?: 0L)
+            usage?.optLong("completion_tokens", 0L) ?: 0L,
+            kind = kind)
     }
 
-    private fun readWhole(body: ResponseBody): String {
+    private fun readWhole(body: ResponseBody, kind: String): String {
         val source = body.source()
         source.request(1024 * 1024L + 1)
         check(source.buffer.size <= 1024 * 1024L) { "模型响应过长，请换一个模型后重试" }
         val text = source.readUtf8()
-        reportUsage(text)
+        reportUsage(text, kind)
         return text
     }
 
@@ -156,7 +161,7 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
      * SSE 逐段读取。第一个候选一旦完整就先回调给界面，不必等整组 3–5 条都生成完。
      * 返回体拼成普通 Chat Completions 响应，复用 [ReplyProtocol.parse] 与截断判断。
      */
-    private fun streamBody(body: ResponseBody, onPartial: ((String) -> Unit)?): String {
+    private fun streamBody(body: ResponseBody, onPartial: ((String) -> Unit)?, kind: String): String {
         val source = body.source()
         val content = StringBuilder()
         var truncated = false
@@ -198,7 +203,7 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
         // 只记耗时和长度，不记内容：用于确认流式是否真的生效。
         dev.jev.wechatmood.core.MoodLog.i(
             "REPLY_STREAM ok chars=${content.length} first=${if (firstAt == 0L) -1 else firstAt - startedAt}ms total=${System.currentTimeMillis() - startedAt}ms usage=${usagePrompt}+${usageCompletion}")
-        dev.jev.wechatmood.core.UsageReporter.report(usagePrompt, usageCompletion)
+        dev.jev.wechatmood.core.UsageReporter.report(usagePrompt, usageCompletion, kind = kind)
         return JSONObject().put("choices", JSONArray().put(JSONObject()
             .put("message", JSONObject().put("content", content.toString()).put("refusal", JSONObject.NULL))
             .put("finish_reason", if (truncated) "length" else "stop"))).toString()

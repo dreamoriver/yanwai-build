@@ -31,6 +31,9 @@ internal object RelationChatBadge {
 
     private var dot: View? = null
     private var host: ViewGroup? = null
+    /** 挂圆点时临时压缩标题，摘除时把原始 maxWidth 还回去。 */
+    private var titleView: TextView? = null
+    private var originalMaxWidth = 0
     private var talker: String? = null
     private var lastLookup = 0L
     private var lastRefresh = 0L
@@ -45,7 +48,7 @@ internal object RelationChatBadge {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** 由 HostUi 每次聊天页刷新时调用；内部自己节流，不在每次滚动时遍历整棵树。 */
-    fun update(activity: Activity, currentTalker: String?) {
+    fun update(activity: Activity, currentTalker: String?, force: Boolean = false) {
         if (currentTalker == null) {
             detach()
             talker = null
@@ -65,6 +68,8 @@ internal object RelationChatBadge {
             debugScan = true
         }
         val now = SystemClock.uptimeMillis()
+        // 档案刚改完状态：跳过 8 秒节流，马上重读一次，别让圆点停在旧数字上。
+        if (force) lastRefresh = 0
         if (dot?.isAttachedToWindow != true || host?.isAttachedToWindow != true) {
             detach()
             if (now < retryAfter) return
@@ -154,6 +159,13 @@ internal object RelationChatBadge {
                 return
             }
         }
+        // 标题常常占满整个标题容器（长群名尤其明显）：不给圆点让位，它就被挤出可见区域。
+        if (parent.width > 0) {
+            titleView = title
+            originalMaxWidth = title.maxWidth
+            title.ellipsize = android.text.TextUtils.TruncateAt.END
+            title.maxWidth = (parent.width - size - dp(title, 6)).coerceAtLeast(dp(title, 60))
+        }
         val index = parent.indexOfChild(title)
         parent.addView(view, (index + 1).coerceAtMost(parent.childCount), params)
         dot = view
@@ -177,6 +189,9 @@ internal object RelationChatBadge {
         dot?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
         dot = null
         host = null
+        titleView?.let { if (originalMaxWidth > 0) it.maxWidth = originalMaxWidth }
+        titleView = null
+        originalMaxWidth = 0
     }
 
     /**

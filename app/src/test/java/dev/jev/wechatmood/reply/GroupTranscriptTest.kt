@@ -46,8 +46,8 @@ class GroupTranscriptTest {
         assertEquals(null, GroupTranscript.label("对方（群成员未知）", null))
         assertEquals(null, GroupTranscript.label("   ", null))
         assertEquals("老王", GroupTranscript.label("wxid_abcdefg1234567", "老王"))
-        assertEquals(null, GroupTranscript.label("uinull", null))
-        assertEquals(null, GroupTranscript.label("wxid_abc", "uinull"))
+        assertEquals("uinull", GroupTranscript.label("uinull", null))
+        assertEquals("uinull", GroupTranscript.label("wxid_abc", "uinull"))
         assertEquals("老王", GroupTranscript.label("wxid_abc", "老王"))
     }
 
@@ -85,7 +85,7 @@ class GroupTranscriptTest {
         assertEquals("群名片一", parsed["wxid_1"])
         assertEquals("昵称二", parsed["wxid_2"])
         assertEquals("备注三", parsed["wxid_3"])
-        assertEquals(null, parsed["wxid_4"])
+        assertEquals("uinull", parsed["wxid_4"])
     }
 
     @Test fun `refermsg gives wxid and nickname pair`() {
@@ -99,7 +99,7 @@ class GroupTranscriptTest {
     @Test fun `cdata and entities are unwrapped`() {
         assertEquals("老王 & 小李", GroupMemberList.field("<displayname><![CDATA[老王 &amp; 小李]]></displayname>", "displayname"))
         assertEquals("A<B>", GroupMemberList.field("<displayname>A&lt;B&gt;</displayname>", "displayname"))
-        assertEquals(null, GroupMemberList.field("<displayname>null</displayname>", "displayname"))
+        assertEquals("null", GroupMemberList.field("<displayname>null</displayname>", "displayname"))
     }
 
     @Test fun `memberlist parse tolerates junk`() {

@@ -71,9 +71,11 @@ class JevHttpClient(private val client: Call.Factory = HttpClients.shared.newBui
             throw IllegalStateException("$reason（HTTP ${response.code}）")
         }
         val usage = json?.optJSONObject("usage")
+        // JEV 只做情绪与意图分析，用量统一记到「分析」。
         dev.jev.wechatmood.core.UsageReporter.report(
             usage?.optLong("prompt_tokens", 0L) ?: 0L,
-            usage?.optLong("completion_tokens", 0L) ?: 0L)
+            usage?.optLong("completion_tokens", 0L) ?: 0L,
+            kind = dev.jev.wechatmood.core.UsageKind.ANALYSIS)
         return body
     }
 

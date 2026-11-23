@@ -6,9 +6,7 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
-import android.widget.Switch
 import android.widget.TextView
-import android.widget.Toast
 import dev.jev.wechatmood.core.RelationFactBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,12 +16,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 「附加」入口弹出的功能面板：帮回、统计、档案、待办，最后是自动分析开关。
+ * 「附加」入口弹出的功能面板。
  *
- * 「找话题」不单列一行：它本来就在「帮我回」抽屉里，同一个抽屉开两次反而让人以为有两套逻辑。
- *
- * 一块卡片装功能行、行间用细线分隔，不再每项各占一个圆角卡片：
- * 那样项一多就碎，和微信自己的列表也不像。
+ * 第一层只留三件事：帮我回、统计、关系。档案、待办、温度、总览、时间线收进「关系」二级：
+ * 一个弹窗里既有当前聊天又有全部会话，行数一多名字就互相打架，也看不出哪些是全局的。
  */
 internal class FeaturePanel(
     private val activity: Activity,
@@ -39,9 +35,7 @@ internal class FeaturePanel(
 ) {
     private val kit = PanelKit(activity)
     private val theme = kit.theme
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var factsBadge: TextView? = null
-    private var todosBadge: TextView? = null
+    private var relationBadge: TextView? = null
 
     private fun badgeView(): TextView = theme.label("", ReplyMetrics.TEXT_CAPTION, theme.accent, bold = true).apply {
         setPadding(theme.dp(7), theme.dp(2), theme.dp(7), theme.dp(2))
@@ -60,27 +54,22 @@ internal class FeaturePanel(
     }
 
     /** 缓存是上一次进聊天写的；打开面板时再读一次本地库，避免要开关几次才出数字。 */
-    private fun refreshCounts() {
+    private fun refreshBadge(layer: CoroutineScope, onCounts: (dev.jev.wechatmood.reply.ChatBadge) -> Unit = {}) {
         val current = talker ?: return
-        scope.launch {
+        layer.launch {
             val badge = withContext(Dispatchers.IO) {
                 runCatching { RelationFactBridge.badge(activity, current) }.getOrNull()
             } ?: return@launch
             if (activity.isFinishing || activity.isDestroyed) return@launch
             RelationBadge.update(activity, current, badge.due, badge.open, badge.timed)
-            setBadge(factsBadge, badge.open)
-            setBadge(todosBadge, badge.timed)
+            onCounts(badge)
         }
     }
 
     fun show() {
         val dialog = Dialog(activity)
-        val body = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(theme.dp(20), theme.dp(16), theme.dp(20), theme.dp(20))
-            background = theme.shape(theme.surface, ReplyMetrics.RADIUS_PANEL, theme.border)
-        }
-
+        val layer = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val body = body()
         body.addView(kit.heading("言外"))
         body.addView(kit.caption(
             when {
@@ -90,50 +79,111 @@ internal class FeaturePanel(
             }
         ).apply { setPadding(0, theme.dp(4), 0, theme.dp(12)) })
 
-        // 功能行放在同一张卡里，行间一条 1dp 分隔线；卡片本身不加内边距，交给每一行。
-        val group = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            background = theme.shape(theme.card, ReplyMetrics.RADIUS_CARD, theme.border)
-        }
+        val card = card()
         var first = true
-        // 面板一打开就告诉用户「为什么会有提醒」：档案里总共几条待办、今天要处理几条。
-        val counts = RelationBadge.counts(activity, talker)
-        fun row(title: String, subtitle: String, action: () -> Unit, badgeView: TextView? = null) {
-            if (!first) group.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)))
-            group.addView(kit.listRow(title, subtitle, badgeView = badgeView) {
+        fun row(title: String, subtitle: String, action: () -> Unit, badge: TextView? = null) {
+            if (!first) card.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)))
+            card.addView(kit.listRow(title, subtitle, badgeView = badge) {
                 dialog.dismiss()
                 action()
             }, LinearLayout.LayoutParams(-1, -2))
             first = false
         }
+
         if (replyAvailable) {
             // 找话题不另开一行：抽屉里本来就有「找找话题」按钮，两个入口进同一个地方只会让人犯嘀咕。
             row("帮我回", "生成 3–5 条候选，找话题也在里面", onReply)
         }
         if (talker != null) {
-            row(if (talker?.endsWith("@chatroom") == true) "群聊统计" else "聊天统计",
+            row(if (talker.endsWith("@chatroom")) "群聊统计" else "聊天统计",
                 "消息量、活跃成员与时段", onStats)
         }
         if (factsAvailable) {
-            factsBadge = badgeView()
-            todosBadge = badgeView()
-            setBadge(factsBadge, counts.open)
-            setBadge(todosBadge, counts.timed)
-            if (talker?.endsWith("@chatroom") == true) {
-                row("群聊纪要", "群里的约定、时间地点和提到我的事", onFacts, factsBadge)
-                row("群待办", "群里带时间的约定与重要日期", onTodos, todosBadge)
-            } else {
-                row("关系档案", "整理过的事实，可移出或补一条", onFacts, factsBadge)
-                row("待办", "带时间的约定与重要日期", onTodos, todosBadge)
-            }
-            row("关系温度", "久未联系、悬着的约定与本周要处理", onTemperature)
-            row("历史纪要", "存下来的 AI 转述，可回看或转成待办", onDigests)
+            val badge = badgeView()
+            relationBadge = badge
+            row("关系", "档案、待办、温度、总览与时间线", { showRelationSheet() }, badge)
         }
-        body.addView(group, LinearLayout.LayoutParams(-1, -2))
+        body.addView(card, LinearLayout.LayoutParams(-1, -2))
 
-        body.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)).apply {
-            topMargin = theme.dp(14)
+        body.addView(theme.action("关闭", primary = true) { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
+        present(dialog, body, layer)
+        if (factsAvailable) {
+            refreshBadge(layer) { setBadge(relationBadge, it.timed) }
+        }
+    }
+
+    /**
+     * 关系的二级页：上面只放这个聊天，下面单独标出「全部会话」。
+     * 第一层不再出现「总览」「时间线」这些全局入口，名字和当前聊天混在一起看不清。
+     */
+    private fun showRelationSheet() {
+        val current = talker ?: return
+        val group = current.endsWith("@chatroom")
+        val dialog = Dialog(activity)
+        val layer = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val body = body()
+        body.addView(kit.heading("关系"))
+        body.addView(kit.caption("先在「这个聊天」里找，跨会话的放在下面").apply {
+            setPadding(0, theme.dp(4), 0, theme.dp(10))
         })
+
+        val card = card()
+        var first = true
+        fun row(title: String, subtitle: String, action: () -> Unit, badge: TextView? = null) {
+            if (!first) card.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)))
+            card.addView(kit.listRow(title, subtitle, badgeView = badge) {
+                dialog.dismiss()
+                action()
+            }, LinearLayout.LayoutParams(-1, -2))
+            first = false
+        }
+
+        body.addView(kit.sectionLabel("这个聊天"))
+        val factsBadge = badgeView()
+        val todosBadge = badgeView()
+        row(if (group) "群聊纪要" else "关系档案", "整理过的事实，可移出或补一条", onFacts, factsBadge)
+        row(if (group) "群待办" else "待办", "带时间的约定与重要日期", onTodos, todosBadge)
+        row("关系温度", "久未联系、悬着的约定与本周要处理", onTemperature)
+        row("历史纪要", "存下来的 AI 转述，可回看或转成待办", onDigests)
+        row("关系时间线", "这个聊天的档案、纪要与情绪按时间排", { RelationTimelineUi(activity, current).show() })
+        body.addView(card, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(kit.sectionLabel("全部会话"))
+        val global = card()
+        var firstGlobal = true
+        fun globalRow(title: String, subtitle: String, action: () -> Unit) {
+            if (!firstGlobal) global.addView(kit.divider(), LinearLayout.LayoutParams(-1, theme.dp(1).coerceAtLeast(1)))
+            global.addView(kit.listRow(title, subtitle) {
+                dialog.dismiss()
+                action()
+            }, LinearLayout.LayoutParams(-1, -2))
+            firstGlobal = false
+        }
+        globalRow("关系总览", "所有会话的待办按到期时间排", { RelationOverviewUi(activity).show() })
+        body.addView(global, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(theme.action("关闭", primary = true) { dialog.dismiss() },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
+        present(dialog, body, layer)
+        refreshBadge(layer) { badge ->
+            setBadge(factsBadge, badge.open)
+            setBadge(todosBadge, badge.timed)
+        }
+    }
+
+    private fun body(): LinearLayout = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(theme.dp(20), theme.dp(16), theme.dp(20), theme.dp(20))
+        background = theme.shape(theme.surface, ReplyMetrics.RADIUS_PANEL, theme.border)
+    }
+
+    private fun card(): LinearLayout = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        background = theme.shape(theme.card, ReplyMetrics.RADIUS_CARD, theme.border)
+    }
+
+    private fun present(dialog: Dialog, body: LinearLayout, layer: CoroutineScope) {
         dialog.setContentView(body)
         dialog.window?.apply {
             setBackgroundDrawableResource(android.R.color.transparent)
@@ -147,8 +197,7 @@ internal class FeaturePanel(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        dialog.setOnDismissListener { scope.cancel() }
+        dialog.setOnDismissListener { layer.cancel() }
         dialog.show()
-        refreshCounts()
     }
 }

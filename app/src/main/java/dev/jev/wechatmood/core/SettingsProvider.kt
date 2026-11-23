@@ -77,7 +77,8 @@ class SettingsProvider : ContentProvider() {
                     result
                 }
                 "usage_add" -> {
-                    UsageMeter.add(ctx, extras?.getLong("prompt", 0L) ?: 0L, extras?.getLong("completion", 0L) ?: 0L)
+                    UsageMeter.add(ctx, extras?.getLong("prompt", 0L) ?: 0L, extras?.getLong("completion", 0L) ?: 0L,
+                        UsageKind.normalize(extras?.getString("kind")))
                     Bundle()
                 }
                 "usage_today" -> {

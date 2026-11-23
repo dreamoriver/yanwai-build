@@ -19,6 +19,8 @@ internal object RelationBadge {
                 .putInt(talker + ":open", open)
                 .putInt(talker + ":timed", timed)
                 .apply()
+            // 数字变了入口文案就要跟着变：否则「附加（提醒）」会一直停在旧状态。
+            ReplyPlusRow.notifyBadgeChanged()
         }
     }
 
@@ -42,6 +44,7 @@ internal object RelationBadge {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putInt(talker + ":due", due)
                 .apply()
+            ReplyPlusRow.notifyBadgeChanged()
         }
     }
 

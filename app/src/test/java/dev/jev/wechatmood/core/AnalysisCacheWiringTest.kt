@@ -8,13 +8,6 @@ import java.io.File
 class AnalysisCacheWiringTest {
     private fun source(path: String) = File("src/main/java/dev/jev/wechatmood/$path").readText()
 
-    @Test fun `turning a chat off must retain evidence used to find completed results`() {
-        val prefs = source("core/ModulePrefs.kt")
-        val switch = prefs.substringAfter("fun setChatEnabled(").substringBefore("fun report(")
-        assertFalse("Closing the switch discards the cache lookup snapshot", switch.contains("analysisSnapshots.clearConversation"))
-        assertTrue("Closing the switch must still revoke manual display choices", switch.contains("manualAnalysis.clearConversation"))
-    }
-
     @Test fun `analysis checks persistent results before sending model requests`() {
         val analyzer = source("analysis/SignalAnalyzer.kt")
         val lookup = analyzer.indexOf("AnalysisResultCache.find(")

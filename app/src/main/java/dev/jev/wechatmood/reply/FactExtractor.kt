@@ -1,6 +1,7 @@
 package dev.jev.wechatmood.reply
 
 import dev.jev.wechatmood.core.MoodLog
+import dev.jev.wechatmood.core.UsageKind
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -14,7 +15,7 @@ import java.util.Locale
  * 输出必须是 JSON 数组，越界或非法项直接丢弃，不做二次解释。
  * 约定的相对时间在这里换算成绝对时间，之后不再依赖自然语言。
  */
-class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient()) {
+class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient(kind = UsageKind.RELATION)) {
     suspend fun extract(settings: ReplySettings, messages: List<ReplyMessage>,
         existing: List<RelationFact> = emptyList(),
         now: Long = System.currentTimeMillis(), limit: Int = MAX_MESSAGES,

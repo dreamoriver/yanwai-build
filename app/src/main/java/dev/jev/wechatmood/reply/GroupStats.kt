@@ -68,6 +68,9 @@ data class GroupStats(
     }
 }
 
+/** 一个统计时间窗：[start] 含、[end] 不含，单位毫秒。 */
+data class StatsWindow(val start: Long, val end: Long)
+
 object GroupStatsCalculator {
     const val SAMPLE_LIMIT = 5000
     private val LINK = Regex("https?://", RegexOption.IGNORE_CASE)
@@ -182,5 +185,46 @@ object GroupStatsCalculator {
             index++
         }
         return tenths.map { it / 10.0 }
+    }
+
+    /**
+     * 紧邻的等长窗口：最近 3 小时 → 再往前那 3 小时。
+     * 用于「最近 N 小时」几个筛选项；「今天」要用 [previousDayWindow]，
+     * 否则比的是昨天下午到午夜，不是「昨天同一时段」。
+     * 窗口不合法或短到没有意义（刚过零点、时间戳为 0）时返回 null，界面就不显示对比。
+     */
+    fun previousWindow(sinceMillis: Long, nowMillis: Long): StatsWindow? {
+        if (sinceMillis <= 0 || nowMillis <= sinceMillis) return null
+        val span = nowMillis - sinceMillis
+        // 不到 1 分钟的窗口，上一周期基本也是空的，比出来只会是「持平」误导人。
+        if (span < 60_000L) return null
+        return StatsWindow(sinceMillis - span, sinceMillis)
+    }
+
+    /**
+     * 昨天同一时间窗：今天 00:00～现在 → 昨天 00:00～昨天同一时刻。
+     * 「今天」档用它；起点按整天往前挪，不跟当前窗口的长度走。
+     */
+    fun previousDayWindow(sinceMillis: Long, nowMillis: Long): StatsWindow? {
+        if (sinceMillis <= 0 || nowMillis <= sinceMillis) return null
+        val span = nowMillis - sinceMillis
+        if (span < 60_000L) return null
+        val start = sinceMillis - 86_400_000L
+        return StatsWindow(start, start + span)
+    }
+
+    /**
+     * 和上一周期比条数，返回人话结论：「比上一时段多 34%」「比上一时段少 12%」「与上一时段持平」。
+     * 上一周期一条都没有时返回 null：没有基数，百分比会炸，界面这一行也不显示。
+     */
+    fun compare(current: Int, previous: Int): String? {
+        if (previous <= 0) return null
+        // 按整数百分比四舍五入：差不到 0.5% 就算持平，别冒出「多 0%」这种话。
+        val percent = kotlin.math.round((current - previous) * 100.0 / previous).toInt()
+        return when {
+            percent == 0 -> "与上一时段持平"
+            percent > 0 -> "比上一时段多 $percent%"
+            else -> "比上一时段少 ${-percent}%"
+        }
     }
 }

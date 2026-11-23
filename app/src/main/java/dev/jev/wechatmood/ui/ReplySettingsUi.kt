@@ -9,6 +9,7 @@ import dev.jev.wechatmood.R
 import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.core.SettingsProvider
+import dev.jev.wechatmood.core.UsageKind
 import dev.jev.wechatmood.databinding.ReplySettingsBinding
 import dev.jev.wechatmood.reply.*
 import kotlinx.coroutines.*
@@ -167,7 +168,8 @@ class ReplySettingsUi(private val activity: AppCompatActivity, private val bindi
                 val example = ReplyContext("sample", listOf(
                     ReplyMessage(1, "我", System.currentTimeMillis() - 60000, "最近忙完了，周末想出去走走。"),
                     ReplyMessage(2, "对方", System.currentTimeMillis(), "好呀，你有什么想去的地方吗？")))
-                val suggestion = ReplyHttpClient().generate(settings, example, "想去公园", "自然简短", knowledge)
+                val suggestion = ReplyHttpClient(kind = UsageKind.CHECK)
+                    .generate(settings, example, "想去公园", "自然简短", knowledge)
                 status("回复连接成功 · 可手动生成", R.color.status_success)
                 val preview = suggestion.parts.mapIndexed { index, text -> "${index + 1}. $text" }.joinToString("\n\n")
                 result("示例回复（${suggestion.parts.size} 条）：\n$preview\n\n${suggestion.reason}\n\n接口和回复格式可用，聊天入口请在微信中体验。")

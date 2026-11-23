@@ -16,6 +16,7 @@ import dev.jev.wechatmood.core.HttpClients
 import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.RelationFactBridge
 import dev.jev.wechatmood.core.TextClean
+import dev.jev.wechatmood.core.UsageKind
 import dev.jev.wechatmood.reply.GroupStats
 import dev.jev.wechatmood.reply.DigestArchive
 import dev.jev.wechatmood.reply.GroupStatsCalculator
@@ -83,6 +84,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private var analysisText: String = ""
     /** 数据来源说明：账号没确认、或库里这个时段没消息时写在界面上，别让人以为筛选没生效。 */
     private var sourceNote: String = ""
+    /** 上一周期的条数；null 表示这次没有可比的上一周期（账号没确认、刚过零点、库没查到）。 */
+    private var previousTotal: Int? = null
+    /** 「与上一时段对比」那一行；没有结论时整行收起，不占位。 */
+    private var compareLine: TextView? = null
     /** 进行中的分析请求；切筛选或重新点一次时取消，别让旧范围白花钱。 */
     private var analysisJob: Job? = null
     /** 请求代次：回来时对不上就说明筛选换过了，结果直接丢掉。 */
@@ -183,6 +188,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             // 账号没确认时不查库（会混进另一个账号同群的消息），界面要说清楚只剩页面数据。
             sourceNote = "没确认当前登录账号，只统计页面上可见的 " + context.messages.size + " 条"
             dev.jev.wechatmood.core.MoodLog.i("STATS_RELOAD_NO_SCOPE page=" + context.messages.size)
+            // 没查库也就没有上一周期，对比行跟着收起。
+            previousTotal = null
+            updateCompareLine()
             return
         }
         val limit = if (StatsFilter.limit == 0) 5000 else StatsFilter.limit
@@ -193,6 +201,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         if (rows.isEmpty()) {
             sourceNote = "库里没有这个时段的消息，页面上的 " + context.messages.size + " 条也不在范围内"
             dev.jev.wechatmood.core.MoodLog.i("STATS_RELOAD_EMPTY range=" + StatsFilter.range)
+            // 当前窗口都空了，上一周期的数也不能留：否则对比行会拿旧结论配新空白。
+            previousTotal = null
+            updateCompareLine()
             return
         }
         sourceNote = ""
@@ -202,6 +213,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }
         stats = computeStats()
         logBlankSamples()
+        // 对比走同一条按时间查库的路：跟着这次刷新一起数一遍上一周期，不另开请求路径。
+        refreshCompare()
     }
 
     /**
@@ -242,8 +255,13 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         // 「共 N 条 / M 人发言」已经是大字里的数字，这里只留数据范围和人均，不重复。
         val spanLine = kit.caption(spanLineText())
         val sourceLine = kit.caption(sourceNote)
+        // 与上一周期对比：一行结论，不画图表；没有可比的上一周期就整行不占位。
+        val compare = kit.caption("")
+        compareLine = compare
+        captionLine(compare, "")
         body.addView(spanLine)
         body.addView(sourceLine)
+        body.addView(compare)
         captionLine(sourceLine, sourceNote)
 
         val numbers = LinearLayout(activity).apply {
@@ -345,6 +363,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             limitPill.text = "条数 · ${StatsFilter.limitLabel}"
             spanLine.text = spanLineText()
             captionLine(sourceLine, sourceNote)
+            // 上一周期的数还没查：先收起对比行，等 reloadDb 里数完再显示，别拿旧窗口的结论配新数字。
+            previousTotal = null
+            updateCompareLine()
             fillNumbers(cells)
             renderTop(currentNames)
             renderActiveHours(activeBox)
@@ -417,6 +438,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         scope.launch {
             logBlankSamples()
             renderTop(namesFor(stats.members.map { it.name }))
+            // 打开窗口时也算一次对比：不然这一行要等用户切一次筛选才出现。
+            refreshCompare()
             // 打开窗口时命中的缓存不抢滚动位置：先让人看到数字，再自己往下翻。
             cachedAnalysis()?.let { renderAnalysis(it, scrollToBottom = false) }
         }
@@ -769,7 +792,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         // 长回答走非流式更稳：非流式只受读超时约束，这里单独放宽到 3 分钟。
         val client = ReplyHttpClient(HttpClients.shared.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(180, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).build())
+            .readTimeout(180, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).build(),
+            kind = UsageKind.DIGEST)
         // 推理模型会先把 max_tokens 花在 reasoning 上：日志里 1200 全被思考吃掉、正文 0 字，
         // 等于每次总结都白跑一次再重试。起始给 4000，够一次写完又不会让模型放飞。
         var maxTokens = 4000
@@ -861,6 +885,62 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         line.visibility = if (value.isBlank()) View.GONE else View.VISIBLE
     }
 
+    /** 对比行文字：没有可比的上一周期就是空串，行随 [captionLine] 整行收起。 */
+    private fun updateCompareLine() {
+        val line = compareLine ?: return
+        val previous = previousTotal ?: run {
+            captionLine(line, "")
+            return
+        }
+        captionLine(line, GroupStatsCalculator.compare(stats.total, previous).orEmpty())
+    }
+
+    /**
+     * 数一遍上一周期的条数：复用按时间查库的 statMessages，只看列表大小，不重建整张表。
+     * 账号没确认、窗口算不出来、查库报错都当作「没有上一周期」，界面不显示这一行。
+     */
+    private suspend fun refreshCompare() {
+        val now = System.currentTimeMillis()
+        val since = StatsFilter.sinceMillis(now)
+        // 「今天」比昨天同一时段；「最近 N 小时」比紧邻的前 N 小时。
+        val window = if (StatsFilter.range == StatsFilter.Range.TODAY) {
+            GroupStatsCalculator.previousDayWindow(since, now)
+        } else {
+            GroupStatsCalculator.previousWindow(since, now)
+        }
+        // 当前窗口本身就是页面数据时（库里这个时段没消息）不比：两边来源不同，比出来没意义。
+        if (accountScope == null || window == null || dbMessages.isEmpty()) {
+            previousTotal = null
+            dev.jev.wechatmood.core.MoodLog.i("STATS_COMPARE skip scope=" + (accountScope != null) +
+                " window=" + (window != null) + " rows=" + dbMessages.size + " label=" + windowLabel())
+            updateCompareLine()
+            return
+        }
+        // 上一周期必须和当前用同一个条数上限：当前被截断到 N 条，上期却拿全窗口，比出来必然「少 90%」。
+        val compareLimit = if (StatsFilter.limit == 0) COMPARE_LIMIT else StatsFilter.limit
+        val rows = runCatching {
+            ReplyDatabaseHistory.statMessages(context.talker, window.start, compareLimit, accountScope,
+                untilMillis = window.end)
+        }.getOrNull()
+        if (rows == null) {
+            previousTotal = null
+            dev.jev.wechatmood.core.MoodLog.w("STATS_COMPARE_FAILED label=" + windowLabel())
+            updateCompareLine()
+            return
+        }
+        // 达到上限说明可能被截断：两边都可能是「前 N 条」，百分比不可信，宁可不给结论。
+        if (rows.size >= compareLimit) {
+            previousTotal = null
+            dev.jev.wechatmood.core.MoodLog.i("STATS_COMPARE capped limit=" + compareLimit + " label=" + windowLabel())
+            updateCompareLine()
+            return
+        }
+        previousTotal = rows.size
+        dev.jev.wechatmood.core.MoodLog.i("STATS_COMPARE current=" + stats.total + " previous=" + rows.size +
+            " limit=" + compareLimit + " label=" + windowLabel())
+        updateCompareLine()
+    }
+
     private fun copy(text: String) {
         (activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             .setPrimaryClip(ClipData.newPlainText("言外统计", text))
@@ -922,6 +1002,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private companion object {
         /** 分析结果的有效期：半小时前的观察别再当现在用。 */
         const val CACHE_TTL_MS = 30 * 60 * 1000L
+        /** 上一周期只数条数：给个够用的上限，别为了对比把整段历史都拉出来。 */
+        const val COMPARE_LIMIT = 5000
         /** 进程内最多留三份不同范围的结果，够来回切筛选就行。 */
         val summaryCache = LinkedHashMap<String, Pair<Long, Analysis>>()
     }

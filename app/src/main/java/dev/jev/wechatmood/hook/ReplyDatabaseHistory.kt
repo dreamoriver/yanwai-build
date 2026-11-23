@@ -158,9 +158,10 @@ object ReplyDatabaseHistory {
         }
     }.getOrNull()
 
-    /** 按时间范围取统计用消息（不限已加载页），用于「今天 / 最近 N 小时」。 */
+    /** 按时间范围取统计用消息（不限已加载页），用于「今天 / 最近 N 小时」。
+     *  [untilMillis] 不为空时只取早于它的消息，用来单独数一遍「上一周期」而不混进当前窗口。 */
     suspend fun statMessages(talker: String, sinceMillis: Long, limit: Int,
-        accountScope: String? = null): List<MessageMetadata> = withContext(Dispatchers.IO) {
+        accountScope: String? = null, untilMillis: Long? = null): List<MessageMetadata> = withContext(Dispatchers.IO) {
         val out = mutableListOf<MessageMetadata>()
         // 账号无法确认时这里为空，调用方改用当前可见页面的数据。
         val databases = databasesForScope(
@@ -176,10 +177,16 @@ object ReplyDatabaseHistory {
                 value
             }.getOrDefault(0L)
             since = if (sample > 1_000_000_000_000L) sinceMillis else sinceMillis / 1000
+            // 上界跟下界一起换算，两个边界必须同一口径，否则会漏掉一半窗口。
+            val until = untilMillis?.let { if (sample > 1_000_000_000_000L) it else it / 1000 }
             runCatching {
-                query(db, "SELECT msgId, type, isSend, content, talker, createTime, imgPath, msgSvrId FROM message " +
-                    "WHERE talker = ? AND createTime >= ? ORDER BY createTime DESC LIMIT ?",
-                    arrayOf(talker, since.toString(), limit.coerceAtLeast(1).toString())).use { cursor ->
+                val sql = "SELECT msgId, type, isSend, content, talker, createTime, imgPath, msgSvrId FROM message " +
+                    "WHERE talker = ? AND createTime >= ?" + (if (until != null) " AND createTime < ?" else "") +
+                    " ORDER BY createTime DESC LIMIT ?"
+                val args = mutableListOf(talker, since.toString())
+                if (until != null) args += until.toString()
+                args += limit.coerceAtLeast(1).toString()
+                query(db, sql, args.toTypedArray()).use { cursor ->
                     while (cursor.moveToNext()) out += metadata(cursor)
                 }
             }

@@ -9,7 +9,8 @@ import java.util.concurrent.ConcurrentHashMap
 object SignalAnalyzer {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = JevHttpClient()
-    private val llmClient = dev.jev.wechatmood.reply.ReplyHttpClient()
+    // 复用回复模型的意图解读，用量记到「分析」。
+    private val llmClient = dev.jev.wechatmood.reply.ReplyHttpClient(kind = UsageKind.ANALYSIS)
     private class Stage(@Volatile var text: String) {
         @Volatile var emotion: Mood? = null
     }

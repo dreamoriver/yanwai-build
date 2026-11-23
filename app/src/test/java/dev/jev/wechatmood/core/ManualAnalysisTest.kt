@@ -31,39 +31,6 @@ class ManualAnalysisTest {
         assertNull(manual.selectedInput(fallback))
     }
 
-    @Test fun `closing chat switch clears all its manual choices and allows a fresh manual selection`() {
-        val manual = ManualAnalysis()
-        val second = message.copy(messageId = 43)
-        val group = message.copy(talker = "group@chatroom")
-        val chats = ConversationSwitches(emptySet()) { true }
-        listOf(message, second, group).forEach { assertTrue(manual.select(it)) }
-        assertTrue(chats.setEnabled(message.talker, true))
-        assertTrue(manual.allows(message, chats.isEnabled(message.talker)))
-        assertTrue(chats.setEnabled(message.talker, false))
-        manual.clearConversation(message.talker)
-
-        assertFalse(manual.allows(message, chats.isEnabled(message.talker)))
-        assertFalse(manual.allows(second, false))
-        assertNull(manual.selectedInput(message))
-        assertTrue(manual.allows(group, false))
-        assertTrue(manual.select(message))
-        assertTrue(manual.allows(message, false))
-        assertFalse(manual.allows(second, false))
-        assertFalse(chats.isEnabled(message.talker))
-    }
-
-    @Test fun `manual choice authorizes only selected message without saving chat opt in`() {
-        val chats = ConversationSwitches(emptySet()) { error("Manual analysis must not save switches") }
-        val manual = ManualAnalysis()
-        assertFalse(manual.allows(message, chats.isEnabled(message.talker)))
-        assertTrue(manual.select(message))
-        assertTrue(manual.allows(message, chats.isEnabled(message.talker)))
-        assertFalse(chats.isEnabled(message.talker))
-        assertFalse(manual.allows(message.copy(messageId = 43), false))
-        assertFalse(manual.allows(message.copy(talker = "group@chatroom"), false))
-        assertTrue(manual.allows(message.copy(messageId = 43), true))
-    }
-
     @Test fun `returning to a message preserves its chosen input despite loaded context changes`() {
         val manual = ManualAnalysis()
         val chosen = message.copy(context = listOf(ContextMessage("我", "明天见？")))

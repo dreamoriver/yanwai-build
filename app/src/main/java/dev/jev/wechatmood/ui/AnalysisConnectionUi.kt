@@ -22,6 +22,7 @@ import dev.jev.wechatmood.core.JevProvider
 import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.core.SettingsProvider
+import dev.jev.wechatmood.core.UsageKind
 import dev.jev.wechatmood.databinding.ConnectionSettingsBinding
 import dev.jev.wechatmood.reply.ReplyHttpClient
 import dev.jev.wechatmood.reply.ReplyModelsClient
@@ -361,7 +362,7 @@ class AnalysisConnectionUi(
     private suspend fun testLlm(settings: ReplySettings): String {
         if (!settings.isConfigured) throw IllegalStateException("这条连接还没有填 Key")
         val input = AnalysisInput("睡吧睡吧", "sample", listOf(ContextMessage("我", "累了一天，终于躺下了。")))
-        val mood = ReplyHttpClient().request(settings, LlmEmotionProtocol.payload(input, settings),
+        val mood = ReplyHttpClient(kind = UsageKind.CHECK).request(settings, LlmEmotionProtocol.payload(input, settings),
             parse = LlmEmotionProtocol::parse)
         return mood.detail
     }

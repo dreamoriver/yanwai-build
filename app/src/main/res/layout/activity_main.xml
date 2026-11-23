@@ -9,7 +9,8 @@
                         <TextView style="@style/Yanwai.Section" android:layout_marginTop="0dp" android:text="微信模块" />
                         <TextView android:id="@+id/textHostBadge" style="@style/Yanwai.Badge" />
                         <TextView android:id="@+id/textFrameworkStatus" style="@style/Yanwai.Caption" android:layout_marginTop="12dp" android:accessibilityLiveRegion="polite" />
-                        <TextView android:id="@+id/usageSummary" style="@style/Yanwai.Badge" android:layout_marginTop="12dp" android:accessibilityLiveRegion="polite" />
+                        <TextView style="@style/Yanwai.Section" android:layout_marginTop="20dp" android:text="模型用量" />
+                        <TextView android:id="@+id/usageSummary" style="@style/Yanwai.Body" android:layout_marginTop="4dp" android:accessibilityLiveRegion="polite" />
                         <LinearLayout android:id="@+id/entryReplyConnection" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:orientation="horizontal" android:gravity="center_vertical">
                             <TextView android:id="@+id/textReplyConnection" style="@style/Yanwai.Caption" android:layout_width="0dp" android:layout_weight="1" android:accessibilityLiveRegion="polite" />
                             <ImageView android:layout_width="20dp" android:layout_height="20dp" android:src="@drawable/ic_chevron" android:importantForAccessibility="no" />

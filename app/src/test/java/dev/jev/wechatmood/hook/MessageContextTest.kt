@@ -41,10 +41,10 @@ class MessageContextTest {
     @Test fun `group participants stay distinguishable and outgoing colon is preserved`() {
         val rows = listOf(message("alice:\n你好", talker = "g@chatroom"),
             message("备注:\n保留", 1, "g@chatroom"))
-        val result = MessageContext.collect(message("bob:\n好的", talker = "g@chatroom"), 2) { rows[it] }!!
+        val result = MessageContext.collect(message("bob1:\n好的", talker = "g@chatroom"), 2) { rows[it] }!!
         assertEquals(listOf("alice", "我"), result.context.map { it.speaker })
         assertEquals(listOf("你好", "备注:\n保留"), result.context.map { it.text })
-        assertEquals("bob", result.speaker)
+        assertEquals("bob1", result.speaker)
         assertEquals("好的", result.text)
     }
 }

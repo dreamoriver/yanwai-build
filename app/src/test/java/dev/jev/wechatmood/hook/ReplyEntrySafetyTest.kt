@@ -22,7 +22,7 @@ class ReplyEntrySafetyTest {
         val reply = source("ReplyHostUi")
         assertTrue(reply.contains("plusEntry.update(footer())"))
         assertTrue(reply.substringAfter("fun hide()").contains("plusEntry.clear()"))
-        assertTrue(reply.contains("ReplyPlusRow(activity, createAnalysisControl) { openPanel(); true }"))
+        assertTrue(reply.contains("ReplyPlusRow(activity) { openPanel(); true }"))
     }
 
     @Test fun `plus row uses the historical inner panel mount and restores native content`() {
@@ -44,12 +44,13 @@ class ReplyEntrySafetyTest {
         }
     }
 
-    @Test fun `analysis control lives in plus row and retains long press actions`() {
+    @Test fun `plus row is the only entry and host menu still offers reply`() {
         val host = source("HostUi")
         assertFalse(host.contains("ActionBarContainer"))
         assertFalse(host.contains("header.addView"))
         assertTrue(source("ReplyPlusRow").contains("theme.action(\"附加\""))
-        assertTrue(host.contains("setOnLongClickListener { showActions(); true }"))
+        // 长按入口在 2.9.204 收进「附加」弹窗，不再挂在页面上。
+        assertFalse(host.contains("setOnLongClickListener"))
         assertTrue(host.contains("帮我回 / 上次建议"))
         assertTrue(host.contains("0 -> replyUi.open()"))
         assertTrue(host.contains("fun suggestReply(focusMessageId: Long? = null, imageDataUri: String? = null) = replyUi.open(focusMessageId, imageDataUri)"))
