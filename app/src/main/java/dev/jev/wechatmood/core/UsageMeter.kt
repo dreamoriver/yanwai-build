@@ -21,8 +21,9 @@ object UsageKind {
     const val IMAGE = "image"
     const val ANALYSIS = "analysis"
     const val CHECK = "check"
+    const val SIMULATE = "simulate"
 
-    private val known = setOf(REPLY, DIGEST, RELATION, IMAGE, ANALYSIS, CHECK)
+    private val known = setOf(REPLY, DIGEST, RELATION, IMAGE, ANALYSIS, CHECK, SIMULATE)
 
     fun normalize(kind: String?): String = if (kind != null && kind in known) kind else REPLY
 
@@ -32,6 +33,7 @@ object UsageKind {
         IMAGE -> "图片描述"
         ANALYSIS -> "分析"
         CHECK -> "检测"
+        SIMULATE -> "预演"
         else -> "回复"
     }
 }

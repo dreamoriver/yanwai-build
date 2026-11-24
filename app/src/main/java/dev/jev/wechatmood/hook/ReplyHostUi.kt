@@ -33,12 +33,40 @@ import kotlinx.coroutines.*
 /** Native widgets only: module resource IDs are not valid inside the host's resource table. */
 class ReplyHostUi(private val activity: Activity,
     private val openPanel: () -> Unit = {}) {
+    /**
+     * 沙盘里一条「他可能这么接」的分支。
+     *
+     * [mine] 是模型建议的我的下一句，也是继续往下推时的起点；
+     * [children] 是拿 [mine] 再问一次得到的下一层，最多推三层，避免越推越玄。
+     */
+    private class SimLine(
+        val stance: String,
+        val theirs: String,
+        val basis: String,
+        /** 我能直接发出去的一句原话；「用这句回复」只填这个字段。 */
+        val mine: String,
+        /** 给我的动作提示，只在界面小字显示，永不进聊天框。 */
+        val move: String = "",
+        var children: List<SimLine> = emptyList(),
+        var loading: Boolean = false,
+        /** 收起后只留一行「档位 + 他说的预览」，收起父节点连带收起它下面整棵子树。 */
+        var collapsed: Boolean = false,
+    )
+    /** 状态行里的短句预览：按码点退一位，别把 emoji 劈成半个字符。 */
+    private fun shortText(text: String, max: Int): String {
+        if (text.length <= max) return text
+        val cut = if (text[max - 1].isHighSurrogate() && text[max].isLowSurrogate()) max - 1 else max
+        return text.substring(0, cut) + "…"
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val session = ReplySession()
+    /** 沙盘与生成各自持有会话号：预演作废不该连带取消正在生成的回复。 */
+    private val simSession = ReplySession()
     private val history = ReplyHistory.process
     // 横条只留「附加」一个入口：分析开关、统计、档案、待办都在同一个面板里。
     private val plusEntry = ReplyPlusRow(activity) { openPanel(); true }
     private var job: Job? = null
+    private var simJob: Job? = null
     private var historyJob: Job? = null
     private var openingJob: Job? = null
     private var ownerEpoch: String? = null
@@ -541,10 +569,25 @@ class ReplyHostUi(private val activity: Activity,
             reason.visibility = if (expanded) View.VISIBLE else View.GONE
             reasonToggle.text = if (expanded) "收起理由 ▴" else if (composition.result?.topics != null) "为什么聊这个 ▾" else "为什么这样回 ▾"
         }
+        // 沙盘：预演时整个抽屉只留这一条线，候选、理由、复制填入全部收起，
+        // 否则两套东西同屏，分不清哪句接哪句。
+        var runSimulationRef: (() -> Unit)? = null
+        var exitSimulationRef: (() -> Unit)? = null
+        var simMode = false
+        var simBusy = false
+        var simRoot = ""
+        var simLines: List<SimLine> = emptyList()
+        var simNote = ""
+        val simulate = action("预演反应", quiet = true) {
+            if (simMode) exitSimulationRef?.invoke() else runSimulationRef?.invoke()
+        }
         val resultActions = LinearLayout(activity)
         resultActions.addView(reasonToggle, LinearLayout.LayoutParams(0, -2, 1f))
         resultActions.addView(shorter, LinearLayout.LayoutParams(0, -2, 1f))
+        resultActions.addView(simulate, LinearLayout.LayoutParams(0, -2, 1f))
         results.addView(resultActions); results.addView(reason)
+        val simPanel = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        results.addView(simPanel)
         scroll.addView(results); body.addView(scroll, LinearLayout.LayoutParams(-1, -2, 1f))
         body.addView(line(), LinearLayout.LayoutParams(-1, dp(1).coerceAtLeast(1)))
         fun fillIntoEditor(text: String) {
@@ -628,6 +671,12 @@ class ReplyHostUi(private val activity: Activity,
             }
             shorter.isEnabled = !generating && !reading && ready != null && composition.canUse && !hasUnsavedIdentityBackground()
             shorter.visibility = if (composition.result == null || composition.result?.topics != null) View.GONE else View.VISIBLE
+            // 有候选或输入框里有字才谈得上预演；正在生成时不给点。
+            val simReady = composition.selectedText?.isNotBlank() == true || editor()?.text?.isNullOrBlank() == false
+            simulate.text = if (simMode) "返回回复" else "预演反应"
+            simulate.isEnabled = if (simMode) true else (!generating && !reading && ready != null && composition.canUse && simReady)
+            simulate.visibility = if (simMode) View.VISIBLE
+                else if (composition.result == null || composition.result?.topics != null) View.GONE else View.VISIBLE
             val batch = composition.result?.topics
             val currentTopicKey = ready?.let { topicKey(it.copy(background = composition.background), editor()?.text?.toString().orEmpty(), java.time.LocalDate.now().toString()) }
             val sameTopicInputs = composition.canUse && batch != null && batch.key == currentTopicKey
@@ -677,6 +726,24 @@ class ReplyHostUi(private val activity: Activity,
             if (window.isShowing) fitWindow()
             // GONE 时剩下的两格按 weight 平分整行；有文字时三格三等分。
             checkDraft.visibility = if (!generatingRequest && editor()?.text?.isNullOrBlank() == false) View.VISIBLE else View.GONE
+            // 预演独占：候选、理由、填入都先让位，屏幕上只有「你说 → 他接」这一条线。
+            if (simMode) {
+                parts.visibility = View.GONE
+                replyTitle.visibility = View.GONE
+                topicTitle.visibility = View.GONE
+                topicHint.visibility = View.GONE
+                resultActions.visibility = View.GONE
+                reason.visibility = View.GONE
+                targetLine.visibility = View.GONE
+                generationActions.visibility = View.GONE
+                footerActions.visibility = View.GONE
+                footerHint.visibility = View.GONE
+            } else {
+                parts.visibility = View.VISIBLE
+                resultActions.visibility = View.VISIBLE
+                targetLine.visibility = View.VISIBLE
+                generationActions.visibility = View.VISIBLE
+            }
         }
         roleToggle.setOnClickListener {
             if (!ownsDrawer() || busy) return@setOnClickListener
@@ -849,6 +916,314 @@ class ReplyHostUi(private val activity: Activity,
         }
         checkDraftAction = { runDraftCheck() }
         refreshFacts = ::doRefreshFacts
+
+        // ── 对话沙盘：预演这句话发出去，他可能怎么接，我还可以怎么接下去 ──
+        // 局部函数之间互相调用，Kotlin 要求先声明后使用，这里统一走 ref，顺序就不影响。
+        val simMaxDepth = 3
+        // 递归收起：父节点收起时它下面整棵子树一起收。
+        fun collapseAllLines(lines: List<SimLine>) {
+            lines.forEach { it.collapsed = true; collapseAllLines(it.children) }
+        }
+        // 请求没真正发出去（未配置、无上下文）时 loading 会留在节点上，
+        // 那张卡就会永远显示「正在往下推…」并且按钮消失；渲染前统一清掉。
+        fun clearLoading(lines: List<SimLine>) {
+            lines.forEach { it.loading = false; clearLoading(it.children) }
+        }
+        /**
+         * 手风琴：展开一条时把其他分支收起，屏幕上永远只有一条线在往下长。
+         * 返回 keep 是否在这棵子树里 —— 是的话这一层（含它的祖先）必须保持展开，
+         * 否则点开 3.2.1 会把它的父层 3.2 一起收掉，整块直接消失。
+         */
+        fun collapseOthers(lines: List<SimLine>, keep: SimLine): Boolean {
+            var found = false
+            lines.forEach { line ->
+                if (line === keep) {
+                    line.collapsed = false
+                    found = true
+                } else {
+                    val inside = if (line.children.isEmpty()) false else collapseOthers(line.children, keep)
+                    line.collapsed = !inside
+                    if (inside) found = true
+                }
+            }
+            return found
+        }
+        var renderSimLinesRef: ((List<SimLine>, Int, String, LinearLayout) -> Unit)? = null
+        var advanceSimulationRef: ((SimLine) -> Unit)? = null
+        var requestSimulationRef: ((String, String, (SimulationResult) -> Unit) -> Unit)? = null
+
+        fun renderSimulation() {
+            simPanel.removeAllViews()
+            if (!simMode) { if (window.isShowing) fitWindow(); return }
+            if (!simBusy) clearLoading(simLines)
+            // 起点：就是你要发的那一句，整条线从这里往下长。
+            val root = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                background = theme.shape(theme.soft, 12, theme.accent)
+            }
+            root.addView(theme.label("你说 · 第 1 句", 11f, theme.accent, bold = true))
+            root.addView(theme.label(simRoot, 16f).apply { setPadding(0, dp(4), 0, 0) })
+            simPanel.addView(root, LinearLayout.LayoutParams(-1, -2))
+
+            simPanel.addView(theme.label("他可能怎么接 · 模型生成的可能，不是事实", 11f, theme.muted)
+                .apply { setPadding(dp(2), dp(10), 0, 0) })
+            if (simLines.isEmpty()) {
+                simPanel.addView(theme.label(if (simBusy) "正在预演…" else "还没有走向", 12f, theme.muted)
+                    .apply { setPadding(dp(2), dp(8), 0, 0) })
+            } else {
+                renderSimLinesRef?.invoke(simLines, 0, "", simPanel)
+            }
+
+            val tools = LinearLayout(activity).apply { setPadding(0, dp(10), 0, 0) }
+            tools.addView(action("换一句重推", quiet = true) {
+                if (simBusy) return@action
+                simLines = emptyList(); simNote = ""
+                runSimulationRef?.invoke()
+            }.apply { textSize = 12f }, LinearLayout.LayoutParams(0, dp(44), 1f))
+            tools.addView(action("收起全部", quiet = true) {
+                if (simBusy) return@action
+                collapseAllLines(simLines)
+                renderSimulation()
+            }.apply { textSize = 12f }, LinearLayout.LayoutParams(0, dp(44), 1f))
+            tools.addView(action("回到候选", quiet = true) { exitSimulationRef?.invoke() }
+                .apply { textSize = 12f }, LinearLayout.LayoutParams(0, dp(44), 1f))
+            simPanel.addView(tools)
+            if (simNote.isNotBlank())
+                simPanel.addView(theme.label(simNote, 11f, theme.muted).apply { setPadding(dp(2), dp(4), 0, 0) })
+            if (window.isShowing) fitWindow()
+        }
+
+        // 一条分支一张卡，头行可以折叠；继续往下推的结果缩进嵌在这张卡内部。
+        // 层次靠「嵌套 + 缩进 + 间隙」表达，序号只是附带，不用盯着数字看。
+        fun renderSimLines(lines: List<SimLine>, depth: Int, prefix: String, container: LinearLayout) {
+            if (depth >= simMaxDepth) return
+            lines.forEachIndexed { index, line ->
+                val tag = prefix + (index + 1)
+                val outer = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+
+                val box = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(11), dp(7), dp(9), dp(if (line.collapsed) 7 else 10))
+                    background = theme.shape(theme.card, 12, theme.border)
+                }
+
+                // 头行：箭头 + 序号 + 档位，整行可点折叠。
+                val head = LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    isClickable = true; isFocusable = true
+                    minimumHeight = dp(36)
+                    contentDescription = "第 " + tag + " 条走向，" + line.stance +
+                        (if (line.collapsed) "，已收起，点击展开" else "，已展开，点击收起")
+                    setOnClickListener {
+                        if (simBusy) return@setOnClickListener
+                        if (line.collapsed) {
+                            // 展开前先收掉其他分支：同级兄弟始终连续，不会被谁的孩子撑开。
+                            collapseOthers(simLines, line)
+                            line.collapsed = false
+                        } else {
+                            line.collapsed = true
+                        }
+                        renderSimulation()
+                    }
+                }
+                // 一级标题字号比子层大一档：层级从字号上就能看出，不用靠读序号。
+                val headSize = if (depth == 0) 12f else 11f
+                head.addView(theme.label(if (line.collapsed) "\u25B8" else "\u25BE", 14f, theme.muted))
+                head.addView(theme.label(" " + tag + " ", headSize, theme.accent, bold = true))
+                head.addView(theme.label("· " + line.stance, headSize, theme.accent))
+                if (line.collapsed)
+                    head.addView(theme.label(line.theirs, 12f, theme.muted).apply {
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        setPadding(dp(8), 0, 0, 0)
+                    }, LinearLayout.LayoutParams(0, -2, 1f))
+                box.addView(head)
+
+                if (!line.collapsed) {
+                    box.addView(theme.label("他：" + line.theirs, 15f).apply { setPadding(0, dp(3), 0, 0) })
+                    if (line.basis.isNotBlank())
+                        box.addView(theme.label("依据：" + line.basis, 11f, theme.muted)
+                            .apply { setPadding(0, dp(3), 0, 0) })
+                    // 一条分隔线隔开「他说的」和「我能发的」，避免两句话看混。
+                    box.addView(View(activity).apply { setBackgroundColor(theme.border) },
+                        LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(8); bottomMargin = dp(8) })
+                    box.addView(theme.label("我：" + line.mine, 15f, theme.accent))
+                    val footNote = buildString {
+                        if (line.move.isNotBlank()) append("提示：").append(line.move)
+                        if (simBusy && line.loading) { if (isNotEmpty()) append("  "); append("正在往下推…") }
+                    }
+                    if (footNote.isNotBlank())
+                        box.addView(theme.label(footNote, 11f, theme.muted).apply { setPadding(0, dp(4), 0, 0) })
+                    if (!simBusy && depth + 1 < simMaxDepth) {
+                        val row = LinearLayout(activity)
+                        row.addView(action("接着这句往下推", quiet = true) {
+                            if (simBusy) return@action
+                            advanceSimulationRef?.invoke(line)
+                        }.apply { textSize = 12f }, LinearLayout.LayoutParams(0, dp(40), 1f))
+                        row.addView(action("用这句回复", primary = true) {
+                            if (simBusy) return@action
+                            fillIntoEditor(line.mine)
+                        }.apply { textSize = 12f }, LinearLayout.LayoutParams(0, dp(40), 1f))
+                        box.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+                    }
+                }
+
+                // 全列表共用一条主线：竖线固定在同一列（中心 x≈9dp），圆点按层级变小变淡；
+                // 子层的卡片缩进，并从主线伸出一小段横线连回自己 —— 2.1 的线就长在 2 的线上，
+                // 父子关系一眼能看出来，而不是三条互不相干的平行线。
+                // 间距加在 box 的 margin 上、axis 用 MATCH_PARENT，主线才会连成一整条而不在卡片之间断开。
+                val indent = when (depth) { 0 -> 18; 1 -> 34; else -> 50 }
+                val row = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+                val axis = FrameLayout(activity)
+                axis.addView(View(activity).apply { setBackgroundColor(theme.border) },
+                    FrameLayout.LayoutParams(dp(2), FrameLayout.LayoutParams.MATCH_PARENT).apply {
+                        gravity = Gravity.TOP or Gravity.LEFT; leftMargin = dp(8)
+                    })
+                if (depth > 0) {
+                    // 分支短横线：从主线（x=9）伸到自己的卡片左边缘。
+                    axis.addView(View(activity).apply { setBackgroundColor(theme.border) },
+                        FrameLayout.LayoutParams(dp(indent - 9), dp(2)).apply {
+                            gravity = Gravity.TOP or Gravity.LEFT
+                            leftMargin = dp(9); topMargin = dp(17)
+                        })
+                }
+                val dotSize = when (depth) { 0 -> 10; 1 -> 8; else -> 6 }
+                axis.addView(View(activity).apply {
+                    background = theme.shape(if (depth == 0) theme.accent else theme.muted, dp(dotSize / 2))
+                }, FrameLayout.LayoutParams(dp(dotSize), dp(dotSize)).apply {
+                    gravity = Gravity.TOP or Gravity.LEFT
+                    leftMargin = dp(9 - dotSize / 2); topMargin = dp(17 - dotSize / 2)
+                })
+                row.addView(axis, LinearLayout.LayoutParams(dp(indent), LinearLayout.LayoutParams.MATCH_PARENT))
+                row.addView(box, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                    // 一级之间留得更开：它上面可能压着一整段子层，挤在一起就分不出是哪一段。
+                    topMargin = dp(if (depth == 0) 20 else 6)
+                    bottomMargin = dp(if (depth == 0) 4 else 2)
+                })
+                outer.addView(row, LinearLayout.LayoutParams(-1, -2))
+
+                // 子层缩进嵌在父卡下面：1.1 物理上就长在 1 里面。
+                // 根层卡片被左侧 dp(18) 轴线向右推过，所以第一层子卡必须缩进得比轴线更深，
+                // 否则二级会比一级更靠左、看着反而比一级还大（2.9.250 就是这个错）。
+                if (line.children.isNotEmpty() && !line.collapsed) {
+                    val kids = LinearLayout(activity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        // 缩进由每行自己的 indent 决定，这里不再叠加 padding，主线才对得上同一列。
+                        setPadding(0, 0, 0, 0)
+                    }
+                    outer.addView(kids, LinearLayout.LayoutParams(-1, -2))
+                    renderSimLines(line.children, depth + 1, tag + ".", kids)
+                }
+                container.addView(outer, LinearLayout.LayoutParams(-1, -2))
+            }
+        }
+
+        // 以某条分支的「我」那句为新起点，再问他可能怎么接。
+        fun advanceSimulation(line: SimLine) {
+            simBusy = true
+            line.loading = true
+            renderSimulation()
+            requestSimulationRef?.invoke(line.mine, "正在推演「" + shortText(line.mine, 12) + "」之后…") { result ->
+                line.loading = false
+                // 子层默认收起：三条一行摘要排在父卡下面，同级兄弟不会被撑到看不见。
+                line.children = result.branches.map {
+                    SimLine(it.stance, it.theirs, it.basis, it.mine, it.move, collapsed = true)
+                }
+                if (result.branches.isEmpty()) simNote = "这一步没推出可用的走向，换个说法再试。"
+            }
+        }
+
+        fun runSimulation() {
+            if (simBusy) return
+            if (!ownsDrawer()) { window.dismiss(); return }
+            val settings = ModulePrefs.replySettings()
+            if (!settings.isConfigured) { toast("请先配置回复模型"); return }
+            val candidate = (composition.selectedText ?: editor()?.text?.toString().orEmpty()).trim()
+            if (candidate.isBlank()) { toast("先选一句候选，或在输入框里写好要说的话"); return }
+            simMode = true
+            simRoot = candidate
+            simLines = emptyList()
+            simNote = ""
+            simBusy = true
+            controls(false)
+            renderSimulation()
+            requestSimulationRef?.invoke(candidate, "正在预演「" + shortText(candidate, 12) + "」之后…") { result ->
+                simLines = result.branches.map { SimLine(it.stance, it.theirs, it.basis, it.mine, it.move) }
+                simNote = if (result.branches.size < 3)
+                    "只给出 " + result.branches.size + " 个走向：其余被判定为雷同或复述原话，没有凑数。" else ""
+            }
+        }
+
+        fun requestSimulation(candidate: String, note: String, onResult: (SimulationResult) -> Unit) {
+            val settings = ModulePrefs.replySettings()
+            if (!settings.isConfigured) { toast("请先配置回复模型"); simBusy = false; renderSimulation(); return }
+            val base = reference.context
+            if (base == null) { toast("先读取聊天记录再预演"); simBusy = false; renderSimulation(); return }
+            val current = base.copy(background = composition.background, facts = facts,
+                focusMessageId = if (base.focusMessageId > 0) base.focusMessageId else targetFocusId,
+                targetImageDataUri = base.targetImageDataUri ?: targetImage)
+            val relationship = composition.relationship
+            val customRelationship = composition.activeCustomRelationship
+            val ticket = simSession.begin(current.talker, current.fingerprint)
+            state.text = note; state.setTextColor(theme.muted)
+            val client = ReplyHttpClient()
+            simJob?.cancel()
+            simJob = scope.launch {
+                try {
+                    val knowledge = withContext(Dispatchers.IO) {
+                        ReplyKnowledge.loadFor(activity, relationship,
+                            current.messages.joinToString("\n") { it.text } + "\n" + candidate)
+                    }
+                    suspend fun ask(correction: String) = withContext(Dispatchers.IO) {
+                        client.request(settings, SimulationProtocol.payload(settings, current, candidate, knowledge,
+                            relationship = relationship, customRelationship = customRelationship, correction = correction),
+                            { body -> SimulationProtocol.parse(body, candidate) },
+                            kind = dev.jev.wechatmood.core.UsageKind.SIMULATE)
+                    }
+                    var result = ask("")
+                    // 不足两条＝模型在写同义改写；把上次的问题直接告诉它再换一次。
+                    if (result.branches.size < 2) {
+                        MoodLog.i("SIMULATION_RETRY kept=" + result.branches.size + " dropped=" + result.dropped)
+                        result = ask("分支雷同或复述了原话，只有 " + result.branches.size + " 条可用")
+                    }
+                    if (!simSession.accepts(ticket, MessageSniffer.currentReplyTalker()) || !ownsDrawer()) return@launch
+                    if (result.isEmpty) {
+                        MoodLog.w("SIMULATION_EMPTY dropped=" + result.dropped)
+                        state.text = "这次没给出可用的走向，换个说法或再试一次"
+                        state.setTextColor(theme.error)
+                        return@launch
+                    }
+                    MoodLog.i("SIMULATION_OK branches=" + result.branches.size + " dropped=" + result.dropped +
+                        " step_len=" + candidate.length)
+                    state.text = ""
+                    onResult(result)
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    MoodLog.w("SIMULATION_FAIL " + e.javaClass.simpleName)
+                    if (simSession.accepts(ticket, MessageSniffer.currentReplyTalker()) && ownsDrawer())
+                        state.text = "预演失败：" + (e.message ?: "请重试")
+                } finally {
+                    simBusy = false
+                    if (ownsDrawer()) { state.setTextColor(theme.muted); renderSimulation(); controls(false) }
+                }
+            }
+        }
+
+        renderSimLinesRef = { lines, depth, prefix, box -> renderSimLines(lines, depth, prefix, box) }
+        advanceSimulationRef = { line -> advanceSimulation(line) }
+        requestSimulationRef = { candidate, note, done -> requestSimulation(candidate, note, done) }
+        exitSimulationRef = {
+            simMode = false; simBusy = false
+            // 退出时取消在途请求：否则它还会跑完一整轮，白烧一次调用。
+            simJob?.cancel(); simSession.cancel()
+            simRoot = ""; simLines = emptyList(); simNote = ""
+            simPanel.removeAllViews()
+            state.text = ""
+            controls(false)
+        }
+        runSimulationRef = { runSimulation() }
         fun revealReply() {
             collapseEditors(); controls(false)
             scroll.post { if (ownsDrawer()) scroll.smoothScrollTo(0, replyTitle.top) }
@@ -1284,7 +1659,7 @@ class ReplyHostUi(private val activity: Activity,
         window.setOnDismissListener {
             limitDialog?.dismiss()
             if (dialog !== window) return@setOnDismissListener
-            remember(); job?.cancel(); historyJob?.cancel(); reference.cancel(); session.cancel()
+            remember(); job?.cancel(); historyJob?.cancel(); simJob?.cancel(); reference.cancel(); session.cancel(); simSession.cancel()
             progress.showLoading(null)
             if (dialog === window) { dialog = null; newMessageNotice = null; snapshot = null; invalidateRequest = null }
         }
