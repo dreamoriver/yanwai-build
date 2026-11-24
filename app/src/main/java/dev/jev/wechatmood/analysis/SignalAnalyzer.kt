@@ -70,12 +70,15 @@ object SignalAnalyzer {
         val stage = Stage("正在分析…")
         stages[input.key] = stage
         try {
-            val total = input.context.count { it.voice != null } + if (input.voice != null) 1 else 0
+            // 分母只用真正要调原生转写的条数：已有微信转写的不占额度，超过上限的也不转。
+            var planned = 0
             var completed = 0
-            val prepared = VoicePreparation.analysis(input) { source ->
+            val prepared = VoicePreparation.analysis(input,
+                existing = { source -> NativeVoiceBridge.existingText(source) },
+                onPlan = { planned = it }) { source ->
                 job.ensureActive()
                 if (!active()) throw CancellationException("分析已关闭或配置已改变")
-                stage.text = "正在转写语音 ${++completed}/$total…"
+                stage.text = if (planned > 0) "正在转写语音 ${++completed}/$planned…" else "正在转写语音…"
                 NativeVoiceBridge.transcribe(source, shouldContinue)
             }
             stage.text = "正在分析…"

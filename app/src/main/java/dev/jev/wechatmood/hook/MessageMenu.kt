@@ -1,11 +1,16 @@
 package dev.jev.wechatmood.hook
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Canvas
 import android.graphics.ColorFilter
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
+import android.os.Handler
+import android.os.Looper
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
@@ -28,10 +33,26 @@ object MessageMenu {
     private const val ITEM_ID = 0x4a455601
     private const val REPLY_ITEM_ID = 0x4a455602
     private const val FORWARD_ITEM_ID = 0x4a455603
+    private const val MEDIA_ITEM_ID = 0x4a455604
     private data class Target(val view: WeakReference<View>, val input: AnalysisInput? = null, val reply: MessageMetadata? = null,
-        val forward: MessageMetadata? = null)
+        val forward: MessageMetadata? = null, val image: MessageMetadata? = null)
     // Bind callbacks to the actual menu item, not a global last-pressed message.
     private val targets = Collections.synchronizedMap(WeakHashMap<MenuItem, Target>())
+    /** 图片取字要在后台压好再回主线程开面板。 */
+    private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * 宿主可能给的是包装过的 Context：逐层解 ContextWrapper 才找得到 Activity。
+     * 解不到就返回 null，由调用方提示「当前界面打不开这个面板」，不要硬转成异常再被吞掉。
+     */
+    private fun findActivity(context: Context?): Activity? {
+        var current = context
+        while (current is ContextWrapper) {
+            if (current is Activity) return current
+            current = current.baseContext
+        }
+        return current as? Activity
+    }
 
     class HookPoints(val create: List<Method>, val select: List<Method>)
 
@@ -64,7 +85,8 @@ object MessageMenu {
             for (method in handlers) hooks += XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val item = param.args[0] as? MenuItem ?: return
-                    if (item.itemId != ITEM_ID && item.itemId != REPLY_ITEM_ID && item.itemId != FORWARD_ITEM_ID) return
+                    if (item.itemId != ITEM_ID && item.itemId != REPLY_ITEM_ID && item.itemId != FORWARD_ITEM_ID &&
+                        item.itemId != MEDIA_ITEM_ID) return
                     val target = targets.remove(item) ?: return
                     param.result = null
                     runCatching {
@@ -73,14 +95,44 @@ object MessageMenu {
                             REPLY_ITEM_ID -> target.reply?.let { MessageSniffer.suggestReply(view, it) } == true
                             FORWARD_ITEM_ID -> target.forward?.let { forward ->
                                 dev.jev.wechatmood.reply.ForwardDigest.parse(forward.content)?.let { digest ->
-                                    // 页面快照在这里就抓：摘要要跑几秒，晚点用户可能已经切走聊天。
-                                    val page = runCatching {
-                                        MessageSniffer.replyContext(requireBottom = false)
-                                    }.getOrNull()
-                                    ForwardDigestUi(view.context as android.app.Activity, digest,
-                                        page?.talker, page).show()
-                                    true
+                                    // 以前这里硬转 Activity：宿主换成包装过的 Context 就抛异常，
+                                    // 再被外层 runCatching 吞成「点了没反应」。解不到就明说。
+                                    val activity = findActivity(view.context)
+                                    if (activity == null) {
+                                        Toast.makeText(view.context, "当前界面打不开这个面板", Toast.LENGTH_SHORT).show()
+                                        true
+                                    } else {
+                                        // 页面快照在这里就抓：摘要要跑几秒，晚点用户可能已经切走聊天。
+                                        val page = runCatching {
+                                            MessageSniffer.replyContext(requireBottom = false)
+                                        }.getOrNull()
+                                        ForwardDigestUi(activity, digest, page?.talker, page).show()
+                                        true
+                                    }
                                 } ?: false
+                            } == true
+                            MEDIA_ITEM_ID -> target.image?.let { media ->
+                                // 取图必须在长按的这个气泡还挂着的时候做；气泡一被回收就再也拿不到这张图。
+                                val activity = findActivity(view.context)
+                                val capture = runCatching { MediaImage.capture(view) }.getOrNull()
+                                if (activity == null) {
+                                    Toast.makeText(view.context, "当前界面打不开这个面板", Toast.LENGTH_SHORT).show()
+                                } else if (capture == null) {
+                                    // 没取到图也照样开面板：它会按 messageId 再找一次。
+                                    ImageTextUi(activity, media.talker, media.messageId, null).show()
+                                } else {
+                                    // 压 JPEG + base64 不进主线程，压完再回主线程开面板。
+                                    Thread({
+                                        val uri = capture.encode()
+                                        main.post {
+                                            // 编码期间用户可能已经退出当前聊天：面板打不开不要炸在微信主线程上。
+                                            runCatching {
+                                                ImageTextUi(activity, media.talker, media.messageId, uri).show()
+                                            }.onFailure { MoodLog.w("IMAGE_TEXT_SHOW_FAILED " + it.javaClass.simpleName) }
+                                        }
+                                    }, "yanwai-image-text").start()
+                                }
+                                true
                             } == true
                             else -> target.input?.let { MessageSniffer.analyzeMessage(view, it) } == true
                         }
@@ -100,13 +152,17 @@ object MessageMenu {
                         val replyTarget = MessageSniffer.replyTargetForView(view)
                         // 合并转发不受接收方向限制，先取再看要不要继续，否则自己转发的内容既没摘要也没回复。
                         val forward = MessageSniffer.forwardForView(view)
-                        if (input == null && replyTarget == null && forward == null) {
+                        // 图片/表情取字：自己发的截图也要能取，所以单独一个不限方向的入口。
+                        val imageTarget = MessageSniffer.imageTargetForView(view)
+                        if (input == null && replyTarget == null && forward == null && imageTarget == null) {
                             MoodLog.i("MESSAGE_MENU_NO_REPLY " + MessageSniffer.describeTarget(view))
                             return@runCatching
                         }
                         val menu = param.args[0] ?: return@runCatching
                         if (menu is Menu && (menu.findItem(ITEM_ID) != null || menu.findItem(REPLY_ITEM_ID) != null ||
-                                menu.findItem(FORWARD_ITEM_ID) != null)) return@runCatching
+                                menu.findItem(FORWARD_ITEM_ID) != null || menu.findItem(MEDIA_ITEM_ID) != null)) {
+                            return@runCatching
+                        }
                         val add = menu.javaClass.methods.singleOrNull {
                             it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType,
                                 CharSequence::class.java, Drawable::class.java)) &&
@@ -128,6 +184,11 @@ object MessageMenu {
                         if (forward != null) {
                             val digest = add.invoke(menu, FORWARD_ITEM_ID, "摘要", icon) as? MenuItem
                             if (digest != null) targets[digest] = Target(WeakReference(view), forward = forward)
+                        }
+                        if (imageTarget != null) {
+                            // 和「帮我回」的图片描述分开：取字要逐行抄写，描述只留一句概括。
+                            val text = add.invoke(menu, MEDIA_ITEM_ID, "提取文字", icon) as? MenuItem
+                            if (text != null) targets[text] = Target(WeakReference(view), image = imageTarget)
                         }
                     }.onFailure { MoodLog.e("MESSAGE_MENU_BUILD_FAILED 无法添加翻译意图菜单", it) }
                 }

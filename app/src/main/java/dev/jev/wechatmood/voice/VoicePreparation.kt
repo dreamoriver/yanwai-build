@@ -12,25 +12,64 @@ object VoicePreparation {
     private const val MAX_CONTEXT_TRANSCRIPTS = 3
     private const val SKIPPED_VOICE = VoiceText.SKIPPED
 
-    suspend fun analysis(input: AnalysisInput, transcribe: suspend (VoiceSource) -> String): AnalysisInput {
+    /**
+     * @param existing 只读查询微信已保存的转写（VoiceTransText），不触发原生转写。
+     *   命中即用，且不占 [MAX_CONTEXT_TRANSCRIPTS] 额度：微信已经转写过的语音再调一次
+     *   原生接口既慢又会把额度吃光，让后面本来有文本的语音变成「未转写」。
+     * @param onPlan 本轮真正要调用原生转写的条数，给界面做进度分母。语音总条数和它无关：
+     *   已有转写的不占额度，超过上限的也不会转。
+     */
+    suspend fun analysis(input: AnalysisInput, existing: suspend (VoiceSource) -> String? = { null },
+        onPlan: (Int) -> Unit = {},
+        transcribe: suspend (VoiceSource) -> String): AnalysisInput {
         currentCoroutineContext().ensureActive()
-        val target = input.voice?.let {
-            requireNotNull(MessagePolicy.textOrNull(transcribe(it))) { "语音转写为空或超过 1000 字符，无法分析" }
+        val targetVoice = input.voice
+        // 目标条和上下文一起先批量问一遍微信已保存的转写：命中的不再调原生接口，也不占额度。
+        val transcripts = HashMap<VoiceSource, String>()
+        for (source in listOfNotNull(targetVoice) + input.context.mapNotNull { it.voice }) {
+            currentCoroutineContext().ensureActive()
+            if (transcripts.containsKey(source)) continue
+            val ready = try { existing(source) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+            if (!ready.isNullOrBlank()) transcripts[source] = ready.trim()
+        }
+        val target = targetVoice?.let { source ->
+            val text = transcripts[source] ?: transcribe(source)
+            requireNotNull(MessagePolicy.textOrNull(text)) { "语音转写为空或超过 1000 字符，无法分析" }
         } ?: input.text
+        // 计划转写条数必须在真正转写之前算：规则与下面的循环一致（已有转写跳过、上限 3 条），
+        // 别拿语音总条数当分母——那是界面进度条分母偏大的原因。
+        val planned = run {
+            var remaining = MAX_CONTEXT_TRANSCRIPTS
+            var count = if (targetVoice != null && transcripts[targetVoice] == null) 1 else 0
+            for (message in input.context.asReversed()) {
+                if (remaining <= 0) break
+                val voice = message.voice ?: continue
+                if (transcripts[voice] != null) continue
+                remaining--; count++
+            }
+            count
+        }
+        onPlan(planned)
         var budget = MessagePolicy.MAX_CONTEXT_CHARACTERS - (input.quoted?.text?.length ?: 0)
         var voiceBudget = MAX_CONTEXT_TRANSCRIPTS
         val context = input.context.asReversed().mapNotNull { message ->
             currentCoroutineContext().ensureActive()
             if (budget <= 0) return@mapNotNull null
-            if (message.voice != null && voiceBudget <= 0)
+            val voice = message.voice
+            val saved = voice?.let { transcripts[it] }
+            if (voice != null && saved == null && voiceBudget <= 0)
                 return@mapNotNull message.copy(text = SKIPPED_VOICE, voiceState = VoiceState.SKIPPED)
-            if (message.voice != null) voiceBudget--
-            val prepared = if (message.voice == null) message else try {
-                val text = requireNotNull(MessagePolicy.textOrNull(transcribe(message.voice)))
-                message.copy(text = text, voiceState = VoiceState.READY)
-            } catch (e: CancellationException) { throw e }
-            catch (_: Exception) {
-                message.copy(text = VoiceText.FAILED, voiceState = VoiceState.FAILED)
+            if (voice != null && saved == null) voiceBudget--
+            val prepared = when {
+                saved != null -> message.copy(text = saved, voiceState = VoiceState.READY)
+                voice == null -> message
+                else -> try {
+                    val text = requireNotNull(MessagePolicy.textOrNull(transcribe(voice)))
+                    message.copy(text = text, voiceState = VoiceState.READY)
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) {
+                    message.copy(text = VoiceText.FAILED, voiceState = VoiceState.FAILED)
+                }
             }
             val size = prepared.text.length + (prepared.quoted?.text?.length ?: 0)
             if (size > budget) { budget = 0; null }

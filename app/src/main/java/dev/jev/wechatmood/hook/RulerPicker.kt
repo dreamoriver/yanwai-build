@@ -32,6 +32,8 @@ internal class RulerPicker(
 ) : View(context) {
     private val count = ((max - min) / step) + 1
     private var position = ((value - min) / step).toFloat().coerceIn(0f, (count - 1).toFloat())
+    /** 上一次真正回调出去的档位：UP 时值没变就不再触发一次刷新。 */
+    private var notified = position.roundToInt()
     private var lastX = 0f
 
     private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -97,9 +99,16 @@ internal class RulerPicker(
                 moveBy(delta)
                 return true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+            MotionEvent.ACTION_UP -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
-                snap()
+                // 松手才算用户确认：值真的变了才回调。
+                snap(notify = true)
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                parent?.requestDisallowInterceptTouchEvent(false)
+                // CANCEL 表示手势被外层抢走（比如换成了列表滚动），只把刻度吸附回去，不当成确认。
+                snap(notify = false)
                 return true
             }
         }
@@ -112,16 +121,22 @@ internal class RulerPicker(
         val before = position.roundToInt()
         position = next
         val after = position.roundToInt()
-        if (after != before) onChanged(min + after * step)
+        if (after != before) {
+            notified = after
+            onChanged(min + after * step)
+        }
         invalidate()
     }
 
-    private fun snap() {
+    /** 吸附到最近的刻度；[notify] 为 false 时只改画面，不回调（手势被取消时用）。 */
+    private fun snap(notify: Boolean) {
         val target = position.roundToInt()
         if (target.toFloat() != position) {
             position = target.toFloat()
             invalidate()
         }
+        if (!notify || target == notified) return
+        notified = target
         onChanged(min + target * step)
     }
 }

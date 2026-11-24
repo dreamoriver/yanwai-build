@@ -3,7 +3,13 @@ package dev.jev.wechatmood.reply
 import java.util.Calendar
 
 /** 一条参与聚合的消息，只保留统计需要的字段。 */
-data class StatRecord(val time: Long, val send: Int, val type: Int, val content: String, val speaker: String = "")
+data class StatRecord(val time: Long, val send: Int, val type: Int, val content: String, val speaker: String = "") {
+    /**
+     * 统一成毫秒再用：来源既有毫秒也有秒级时间戳，
+     * 直接拿秒当毫秒会把活跃时段算到 1970 年（和 GroupTranscript 同一套阈值判断）。
+     */
+    val timeMillis: Long get() = if (time > 1_000_000_000_000L) time else time * 1000
+}
 
 /** 单个成员的发言概况。 */
 data class MemberStat(
@@ -98,12 +104,13 @@ object GroupStatsCalculator {
                 34 -> voice++
             }
             if (record.type == 1 && LINK.containsMatchIn(record.content)) links++
-            calendar.timeInMillis = record.time
+            val stamp = record.timeMillis
+            calendar.timeInMillis = stamp
             val hour = calendar.get(Calendar.HOUR_OF_DAY)
             hours[hour] = (hours[hour] ?: 0) + 1
-            if (record.time > 0) {
-                if (record.time < earliest) earliest = record.time
-                if (record.time > latest) latest = record.time
+            if (stamp > 0) {
+                if (stamp < earliest) earliest = stamp
+                if (stamp > latest) latest = stamp
             }
             // 没有发送者的消息（群里的表情、图片、视频，微信本地不记发件人）计入总数，
             // 但不算某个人：以前它们被并成一个「对方（群成员未知）」，看着像有人没说名字。
@@ -116,9 +123,9 @@ object GroupStatsCalculator {
                 3, 47 -> member.media++
                 34 -> member.voice++
             }
-            if (record.time > 0) {
-                if (member.firstAt == 0L || record.time < member.firstAt) member.firstAt = record.time
-                if (record.time > member.lastAt) member.lastAt = record.time
+            if (stamp > 0) {
+                if (member.firstAt == 0L || stamp < member.firstAt) member.firstAt = stamp
+                if (stamp > member.lastAt) member.lastAt = stamp
             }
             if (hour !in member.hours) member.hours += hour
         }

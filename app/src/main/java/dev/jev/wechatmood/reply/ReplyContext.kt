@@ -134,10 +134,8 @@ data class ReplyContext(val talker: String, val messages: List<ReplyMessage>, va
                         record.content.substringAfter(":\n")
                     else -> record.content
                 }
-                val end = minOf(body.length, budget).let {
-                    if (it < body.length && it > 0 && body[it - 1].isHighSurrogate() && body[it].isLowSurrogate()) it - 1 else it
-                }
-                val cut = body.take(end)
+                // 截断点不能劈开代理对（emoji 会变半截），统一走 takeSafely。
+                val cut = body.takeSafely(minOf(body.length, budget))
                 if (cut.length != body.length) trimmed = true
                 budget -= cut.length
                 ReplyMessage(record.messageId, record.speaker(), record.createdAt, cut, record.voiceSource(),

@@ -5,6 +5,7 @@ import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.reply.ReplyContactKey
 import dev.jev.wechatmood.reply.ReplyContext
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,7 +22,13 @@ import java.security.MessageDigest
  * 转述本身经 RelationFactRefresher 的 extra 通道进提示词，不伪造聊天依据。
  */
 internal object DigestFactQueue {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /**
+     * 协程体里直接读库、调模型，异常必须在这里收住：不挂 handler 会落到线程默认处理器，把微信进程带崩。
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate +
+        CoroutineExceptionHandler { _, error ->
+            MoodLog.w("DIGEST_FACT_CRASH " + error.javaClass.simpleName + " " + error.message)
+        })
     /** 同一联系人正在整理时等一次再试；仍占用就放弃，不排队反复请求模型。 */
     private const val RETRY_DELAY_MS = 5_000L
     private const val MAX_TEXT = 1200
@@ -30,6 +37,11 @@ internal object DigestFactQueue {
     /** 只记最近 32 条指纹，够挡住反复点同一条就行。 */
     private val recent = object : LinkedHashMap<String, Long>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 32
+    }
+
+    /** 放弃这次整理时把指纹撤掉：留着这条 30 分钟内会被当成「刚做过」而静默跳过，用户点了没反应。 */
+    private fun abort(print: String) {
+        synchronized(recent) { recent.remove(print) }
     }
 
     private fun fingerprint(value: String): String =
@@ -76,6 +88,7 @@ internal object DigestFactQueue {
             val settings = ModulePrefs.replySettings()
             if (!settings.isConfigured) {
                 MoodLog.i("DIGEST_FACT_SKIP unconfigured")
+                abort(print)
                 onResult?.invoke(false)
                 return@launch
             }
@@ -85,6 +98,7 @@ internal object DigestFactQueue {
             val key = ReplyContactKey.of(resolvedAccount, resolvedTalker, allowGroup = true)
             if (key == null || resolvedAccount == null) {
                 MoodLog.i("DIGEST_FACT_SKIP key account=" + (resolvedAccount != null))
+                abort(print)
                 onResult?.invoke(false)
                 return@launch
             }
@@ -94,6 +108,9 @@ internal object DigestFactQueue {
             val extra = listOf(line)
             val finish: (RelationFactRefresher.Result?, Throwable?) -> Unit = { result, error ->
                 report(label, result, error)
+                // 启动之后才失败（模型报错、库异常）也要撤指纹：留着会让 30 分钟内的重试被
+                // 去重分支当成「已处理」直接返回成功，用户点了却什么都没发生。
+                if (error != null) abort(print)
                 onResult?.invoke(error == null && result != null)
             }
             val started = RelationFactRefresher.launch(app, key, settings, incremental = false,
@@ -104,6 +121,7 @@ internal object DigestFactQueue {
                     snapshot = snapshot, extra = extra, digestOnly = true, onDone = finish)
                 if (!retried) {
                     MoodLog.i("DIGEST_FACT_SKIP busy")
+                    abort(print)
                     onResult?.invoke(false)
                 }
             }

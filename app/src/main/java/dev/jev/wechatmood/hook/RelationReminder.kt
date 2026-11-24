@@ -37,7 +37,11 @@ internal object RelationReminder {
     private const val KEY_LAST_SCAN = "last_global_scan"
     private const val NOTICE_BASE = 1100
     private const val SUMMARY_ID = 1099
-    private const val LEGACY_NOTICE_ID = 1101
+    /**
+     * 旧版清理用的占位 id：落在槽位区（1101–1612）之前，cancel 它不会碰到任何在用通知。
+     * 历史版本真正发过通知的 id 是 1101（= NOTICE_BASE + 1），怎么安全清见 [cancelLegacy]。
+     */
+    private const val LEGACY_NOTICE_ID = 1098
     private const val MAX_NOTICES = 5
     private const val SLOT_COUNT = 512
     private const val SNOOZE_MINUTES = 60
@@ -105,10 +109,35 @@ internal object RelationReminder {
         }
     }
 
-    /** 2.9.142 之前的通知 id 固定 1101，升级后旧通知留在栏里点不动，启动时清掉。 */
+    /**
+     * 清掉 2.9.142 之前的通知残留。
+     *
+     * 旧版本把 id 写死成 1101，正好等于现在的槽位 1（NOTICE_BASE + 1）。所以不能无条件
+     * cancel(1101)：槽位 1 现在可能正挂着某个联系人的提醒，撤掉就是「提醒凭空消失」。
+     *
+     * 取舍：只有槽位表里 1 号槽没人占（nkey_1 为空）时才去清 1101——这时 1101 不可能是本进程
+     * 写的新通知（新通知一定先占槽位）。一旦 1 号槽分给了别人，新旧同 id，下一次 notify 本身
+     * 就会把旧内容覆盖掉，不清也不会留残留。槽位表已经是一个持久化的「已分配 id 集合」，
+     * 比进程内记一份 Set 更准：进程重启后照样能判断。
+     */
     fun cancelLegacy(context: Context) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         runCatching { manager.cancel(LEGACY_NOTICE_ID) }
+        // 1101 才是旧版本真正发过通知的 id；槽位 1 有人占着时跳过，避免误伤新通知。
+        val owner = slotOwner(context, 1)
+        if (owner == null) {
+            runCatching { manager.cancel(NOTICE_BASE + 1) }
+            MoodLog.i("RELATION_REMIND_LEGACY_CLEARED slot1=free")
+        } else {
+            MoodLog.i("RELATION_REMIND_LEGACY_SKIP slot1=used")
+        }
+    }
+
+    /** 槽位当前的占用者；null 表示没人占。读不出来时给个占位串，当成「有人占」，宁可不清理也不误伤。 */
+    private fun slotOwner(context: Context, slot: Int): String? = try {
+        prefs(context).getString("nkey_" + slot, null)?.takeIf { it.isNotEmpty() }
+    } catch (error: Throwable) {
+        "unknown"
     }
 
     private fun openTimed(facts: List<RelationFact>): Int =
@@ -122,14 +151,37 @@ internal object RelationReminder {
      */
     fun snooze(context: Context, contactKey: String, minutes: Int, noticeId: Int) {
         val span = minutes.coerceIn(1, 24 * 60)
-        val until = System.currentTimeMillis() + span * 60_000L
-        prefs(context).edit().putLong(snoozeKey(contactKey), until).remove(stampKey(contactKey)).apply()
+        snoozeUntil(context, contactKey, System.currentTimeMillis() + span * 60_000L, noticeId)
+        MoodLog.i("RELATION_REMIND_SNOOZE minutes=$span")
+    }
+
+    /**
+     * 延后到一个绝对时刻。
+     *
+     * 「1 小时后」用分钟够用，「明早 9 点」不行：跨过零点后天数会变，按分钟算容易差一小时。
+     * 这里仍只记一个时间点，不挂 AlarmManager——微信进程一死，闹钟和动态接收器都不在了。
+     */
+    fun snoozeUntil(context: Context, contactKey: String, until: Long, noticeId: Int) {
+        val capped = until.coerceAtMost(System.currentTimeMillis() + 24 * 60 * 60_000L)
+        prefs(context).edit().putLong(snoozeKey(contactKey), capped).remove(stampKey(contactKey)).apply()
         if (noticeId > 0) {
             runCatching {
                 (context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(noticeId)
             }
         }
-        MoodLog.i("RELATION_REMIND_SNOOZE minutes=$span")
+    }
+
+    /** 「明早」：还没到 9 点就是今天 9 点，过了就是明天 9 点——凌晨按稍后不该推到后天。 */
+    private fun nextMorning(now: Long = System.currentTimeMillis()): Long {
+        val cal = java.util.Calendar.getInstance().apply {
+            timeInMillis = now
+            set(java.util.Calendar.HOUR_OF_DAY, 9)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        if (cal.timeInMillis <= now) cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+        return cal.timeInMillis
     }
 
     private fun clearNotified(context: Context, contactKey: String) {
@@ -161,19 +213,21 @@ internal object RelationReminder {
         fun label(group: DueContact) = displayName(
             group.name.ifBlank { group.talker?.let { names[it] }.orEmpty() }, group.talker)
         resolved.forEach { RelationBadge.updateDue(context, it.talker, it.facts.size) }
-        // 先把该提醒的挑出来再截断：旧写法到 5 个就直接 break，后面的联系人既没通知也没痕迹。
-        val fresh = resolved.filter { markNotified(context, it.key, it.facts, now) }
+        // 先判重、再截断、最后只给真要弹的那几条落指纹：旧写法对全部到期联系人都写指纹，
+        // 第 6 个起当天再也拿不到通知（等于被静默吞掉）。没弹出去的下次扫描继续排队。
+        val fresh = resolved.filter { !alreadyNotified(context, it.key, it.facts, now) }
         if (fresh.isEmpty()) {
             MoodLog.i("RELATION_REMIND_ALL nothing_new contacts=" + resolved.size)
             return
         }
         val shown = fresh.take(MAX_NOTICES)
-        for (group in shown) {
+        val posted = shown.filter { markNotified(context, it.key, it.facts, now) }
+        for (group in posted) {
             notify(context, group.key, group.talker, label(group), group.facts, now)
         }
-        if (fresh.size > 1) notifySummary(context, fresh.map { label(it) })
-        MoodLog.i("RELATION_REMIND_ALL contacts=" + resolved.size + " posted=" + shown.size +
-            " summary=" + (fresh.size > 1) + " overflow=" + (fresh.size - shown.size))
+        if (posted.size > 1) notifySummary(context, posted.map { label(it) })
+        MoodLog.i("RELATION_REMIND_ALL contacts=" + resolved.size + " posted=" + posted.size +
+            " summary=" + (posted.size > 1) + " overflow=" + (fresh.size - shown.size))
     }
 
     /**
@@ -258,8 +312,15 @@ internal object RelationReminder {
         runCatching {
             builder.addAction(Notification.Action.Builder(
                 Icon.createWithResource("android", android.R.drawable.ic_menu_recent_history),
-                "一小时后",
-                snoozeIntent(context, contactKey, noticeId)).build())
+                "1 小时后",
+                snoozeIntent(context, contactKey, noticeId, 60)).build())
+        }.onFailure { MoodLog.w("RELATION_REMIND_ACTION_FAILED " + it.javaClass.simpleName) }
+        // 跨天的约会在白天看不到，「明早」是第二个延后档；按绝对时刻传，不按分钟换算。
+        runCatching {
+            builder.addAction(Notification.Action.Builder(
+                Icon.createWithResource("android", android.R.drawable.ic_menu_agenda),
+                "明早 9 点",
+                snoozeIntent(context, contactKey, noticeId, 0, nextMorning())).build())
         }.onFailure { MoodLog.w("RELATION_REMIND_ACTION_FAILED " + it.javaClass.simpleName) }
         prefs(context).edit().remove(snoozeKey(contactKey)).apply()
         runCatching { manager.notify(noticeId, builder.build()) }
@@ -339,13 +400,19 @@ internal object RelationReminder {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
-    private fun snoozeIntent(context: Context, contactKey: String, noticeId: Int): PendingIntent {
+    private fun snoozeIntent(context: Context, contactKey: String, noticeId: Int,
+        minutes: Int = SNOOZE_MINUTES, until: Long = 0L): PendingIntent {
         val intent = Intent(RelationTodoActions.ACTION_SNOOZE)
             .setPackage("com.tencent.mm")
             .putExtra(RelationTodoActions.EXTRA_KEY, contactKey)
             .putExtra(RelationTodoActions.EXTRA_NOTICE, noticeId)
-            .putExtra(RelationTodoActions.EXTRA_MINUTES, SNOOZE_MINUTES)
-        return PendingIntent.getBroadcast(context, noticeId + 1, intent,
+            .putExtra(RelationTodoActions.EXTRA_MINUTES, minutes)
+            .putExtra(RelationTodoActions.EXTRA_UNTIL, until)
+        // 两个延后档要不同的 requestCode；requestCode 必须对 (通知, 档位) 唯一。
+        // 原来用 noticeId+1/+2，slot1 的「明早」和 slot2 的「1 小时后」会撞成同一个
+        // PendingIntent（filterEquals 不比较 extras），点 A 会延后 B 并取消 B 的通知。
+        val code = noticeId * 2 + if (until > 0) 1 else 0
+        return PendingIntent.getBroadcast(context, code, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
@@ -424,6 +491,11 @@ internal object RelationReminder {
         }
         return null
     }
+
+    /** 只判重、不落指纹：先把真正弹得出去的几条挑出来，落指纹留给 [markNotified]。 */
+    private fun alreadyNotified(context: Context, contactKey: String, due: List<RelationFact>, now: Long): Boolean =
+        runCatching { prefs(context).getString(stampKey(contactKey), null) == RelationDue.stampKey(due, now) }
+            .getOrDefault(false)
 
     /** 指纹带日期、逾期档位和条目 id：同一批同一档只提醒一次；当天又新增一条会重新提醒。 */
     private fun markNotified(context: Context, contactKey: String, due: List<RelationFact>, now: Long): Boolean =

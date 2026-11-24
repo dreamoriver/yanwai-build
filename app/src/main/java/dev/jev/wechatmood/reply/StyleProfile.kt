@@ -111,10 +111,11 @@ object StyleAnalyzer {
         code in 0x1F300..0x1FAFF || code in 0x2600..0x27BF || code in 0x1F000..0x1F0FF
     }
 
-    /** 开场只看第一个字，超过两字的短语意义不大。 */
+    /** 开场只看第一个字，超过两字的短语意义不大。按码点取：直接 take(1) 会把 emoji 或扩展区汉字切成半个代理对。 */
     private fun openerOf(text: String): String? {
-        val first = text.take(1)
-        return first.takeIf { it[0].isLetter() && it !in "我你他她它" }
+        if (text.isEmpty()) return null
+        val first = text.substring(0, text.offsetByCodePoints(0, 1))
+        return first.takeIf { Character.isLetter(text.codePointAt(0)) && it !in "我你他她它" }
     }
 }
 

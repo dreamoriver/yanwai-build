@@ -1,7 +1,9 @@
 package dev.jev.wechatmood.reply
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
+import java.security.MessageDigest
 
 /**
  * 长按图片/表情时的“一句话描述”缓存（方案 A：只有用户主动用它回复时才生成）。
@@ -64,12 +66,14 @@ object ImageDigest {
             val value = JSONObject().put("text", clean).put("at", System.currentTimeMillis()).toString()
             val editor = prefs.edit().putString(key(talker, messageId), value)
             // 旧版本可能存过「看不清」这类无效描述，写新条目时顺手清掉。
-            prefs.all.forEach { (name, raw) ->
+            // 这个 prefs 文件里还有图片取字的 t: 条目，清理和淘汰都不能跨过去：
+            // 否则取字缓存会被描述这边按「不像描述」误删，白花一次模型调用。
+            prefs.all.filterKeys { it.startsWith("d:") }.forEach { (name, raw) ->
                 val value = runCatching { JSONObject(raw as String).optString("text") }.getOrNull()
                 if (value != null && !usable(value)) editor.remove(name)
             }
             // 超上限时按写入时间丢掉最旧的几条，缓存不能无限长。
-            val all = prefs.all
+            val all = prefs.all.filterKeys { it.startsWith("d:") }
             if (all.size >= MAX_ENTRIES) {
                 all.entries.mapNotNull { (name, raw) ->
                     val at = runCatching { JSONObject(raw as String).optLong("at") }.getOrDefault(0L)
@@ -88,6 +92,9 @@ object ImageDigest {
         onProgress?.invoke()
         val text = try {
             ReplyHttpClient().describeImage(settings, dataUri)
+        } catch (e: CancellationException) {
+            // 协程取消不是模型失败：吞掉会写一条假失败日志，调用方也以为真跑完了。
+            throw e
         } catch (e: Exception) {
             // 只记类型和错误文本，不记图片内容，便于在 mood.log 里定位到底是服务拒绝还是解析失败。
             dev.jev.wechatmood.core.MoodLog.w(
@@ -99,7 +106,17 @@ object ImageDigest {
         return saved
     }
 
-    private fun key(talker: String, messageId: Long) = "d:${talker.hashCode()}:$messageId"
+    /**
+     * 缓存键不能用 talker.hashCode()：32 位哈希撞上就会读到别的聊天的图片描述，
+     * 把 A 的图的内容说给 B 听。改用 talker 的 SHA-256 前 8 字节（64 位）做摘要，
+     * 既不会撞车，键长也固定；messageId 照旧保留在键里。
+     */
+    private fun key(talker: String, messageId: Long): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(talker.toByteArray(Charsets.UTF_8)).take(8)
+            .joinToString("") { "%02x".format(it) }
+        return "d:$digest:$messageId"
+    }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

@@ -27,12 +27,21 @@ internal object RelationTodoActions {
     const val EXTRA_NOTICE = "notice_id"
     const val EXTRA_MINUTES = "minutes"
 
+    /** 延后到某个绝对时刻：通知上的「明早」按天算，换算成分钟容易差一小时（跨零点）。 */
+    const val EXTRA_UNTIL = "until_at"
+
     private val FACT_ID = Regex("[0-9a-f]{16}")
     private val CONTACT_KEY = Regex("[0-9a-f]{64}")
     private val TALKER = Regex("[A-Za-z0-9_@.\\-]{1,256}")
+    /** 注册过的接收器与状态：重复注册等于同一条广播处理多次，见 [register]。 */
+    private var handle: BroadcastReceiver? = null
+    private var registered = false
 
     fun register(context: Context) {
-        val receiver = object : BroadcastReceiver() {
+        // attach 会随宿主界面重建反复调用：已经注册过就直接返回，
+        // 否则重复注册会让同一条广播被处理多次（比如一次点「完成」记两遍日志、取消两次通知）。
+        if (registered) return
+        val receiver = handle ?: object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) {
                 when (intent.action) {
                     ACTION_DONE -> markDone(c, intent)
@@ -40,8 +49,8 @@ internal object RelationTodoActions {
                     ACTION_SNOOZE -> snooze(c, intent)
                 }
             }
-        }
-        runCatching {
+        }.also { handle = it }
+        val outcome = runCatching {
             val filter = IntentFilter().apply {
                 addAction(ACTION_DONE)
                 addAction(ACTION_OPEN)
@@ -52,7 +61,10 @@ internal object RelationTodoActions {
             } else {
                 context.registerReceiver(receiver, filter)
             }
-        }.onFailure { MoodLog.w("RELATION_TODO_RECEIVER_FAIL " + it.javaClass.simpleName) }
+        }
+        // 注册失败要把标志复位，下次还能再试；接收器实例留着复用，不复用也是白建一个。
+        registered = outcome.isSuccess
+        outcome.onFailure { MoodLog.w("RELATION_TODO_RECEIVER_FAIL " + it.javaClass.simpleName) }
     }
 
     private fun markDone(c: Context, intent: Intent) {
@@ -77,8 +89,16 @@ internal object RelationTodoActions {
     /** 稍后提醒：先撤通知，到点后由下一次检查重新弹；不依赖微信进程一直活着。 */
     private fun snooze(c: Context, intent: Intent) {
         val key = intent.getStringExtra(EXTRA_KEY)?.takeIf { it.matches(CONTACT_KEY) } ?: return
+        val notice = intent.getIntExtra(EXTRA_NOTICE, 0)
+        val until = intent.getLongExtra(EXTRA_UNTIL, 0L)
+        if (until > System.currentTimeMillis()) {
+            // 绝对时刻路径：明早这类跨天档位按天算，换算成分钟容易差一小时。
+            RelationReminder.snoozeUntil(c, key, until, notice)
+            MoodLog.i("RELATION_TODO_SNOOZE_UNTIL at=" + until)
+            return
+        }
         val minutes = intent.getIntExtra(EXTRA_MINUTES, 60)
-        RelationReminder.snooze(c, key, minutes, intent.getIntExtra(EXTRA_NOTICE, 0))
+        RelationReminder.snooze(c, key, minutes, notice)
         MoodLog.i("RELATION_TODO_SNOOZE minutes=" + minutes)
     }
 
@@ -97,17 +117,26 @@ internal object RelationTodoActions {
             start(c, Intent().setClassName("com.tencent.mm", "com.tencent.mm.ui.LauncherUI"))
             return
         }
-        val opened = start(c, Intent().apply {
+        openTalker(c, talker)
+    }
+
+    /**
+     * 在微信进程里打开某个会话。
+     *
+     * 待回清单也走这里：那时候没有 PendingIntent，但同样需要「ChattingUI + Chat_User」这条路，
+     * 两处各写一份迟早会有一边漏掉回退分支。
+     */
+    internal fun openTalker(context: Context, talker: String): Boolean {
+        val opened = start(context, Intent().apply {
             setClassName("com.tencent.mm", "com.tencent.mm.ui.chatting.ChattingUI")
             putExtra("Chat_User", talker)
         })
-        if (!opened) {
-            start(c, Intent().apply {
-                setClassName("com.tencent.mm", "com.tencent.mm.ui.LauncherUI")
-                putExtra("Chat_User", talker)
-                putExtra("Chat_Mode", 1)
-            })
-        }
+        if (opened) return true
+        return start(context, Intent().apply {
+            setClassName("com.tencent.mm", "com.tencent.mm.ui.LauncherUI")
+            putExtra("Chat_User", talker)
+            putExtra("Chat_Mode", 1)
+        })
     }
 
     private fun start(context: Context, intent: Intent): Boolean = runCatching {

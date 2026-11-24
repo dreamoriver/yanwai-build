@@ -208,7 +208,10 @@ class DraftCheckCache(private val windowMs: Long = 30L * 60 * 1000) {
     }
 
     @Synchronized fun put(talker: String, draft: String, check: DraftCheck, now: Long = System.currentTimeMillis()) {
-        if (entries.size > 16) entries.clear()
+        // 满了只淘汰最旧的一条：整表清空会让用户来回切几个聊天就把别的会话结果全废。
+        if (entries.size >= 16 && !entries.containsKey(talker)) {
+            entries.entries.minByOrNull { it.value.at }?.let { entries.remove(it.key) }
+        }
         entries[talker] = Entry(now, draft, check)
     }
 

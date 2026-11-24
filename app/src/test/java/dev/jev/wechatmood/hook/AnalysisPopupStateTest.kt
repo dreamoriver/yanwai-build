@@ -18,7 +18,9 @@ class AnalysisPopupStateTest {
         assertFalse(state.offer("b"))
         assertTrue(state.offer("a"))
         state.dismiss()
-        assertFalse(state.offer("b"))
+        // 排队期间没展示的 b 不该被记成已处理：a 关掉后它还能自己出来。
+        assertTrue(state.offer("b"))
+        state.dismiss()
         assertNull(state.activeKey)
     }
 

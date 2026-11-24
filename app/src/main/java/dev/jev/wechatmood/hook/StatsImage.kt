@@ -7,10 +7,14 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import dev.jev.wechatmood.reply.GroupStats
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -26,6 +30,15 @@ object StatsImage {
     private val CARD = Color.parseColor("#1C2A24")
     private val INK = Color.parseColor("#E1EEE6")
     private val MUTED = Color.parseColor("#A6B9AF")
+    /** 长图的行高（px）与高度上下限：单张 bitmap 太大，低端机上会直接 OOM。 */
+    private const val LINE = 40f
+    private const val MIN_HEIGHT = 900
+    private const val MAX_HEIGHT = 12000
+
+    /** 长图的保存结果：成功给相册 uri，失败给一句能直接显示给用户的原因。 */
+    internal data class Saved(val uri: Uri?, val reason: String) {
+        val ok: Boolean get() = uri != null
+    }
 
     fun render(stats: GroupStats, names: Map<String, String>, analysis: String?, title: String): Bitmap {
         val titlePaint = text(48f, INK, Typeface.BOLD)
@@ -105,6 +118,111 @@ object StatsImage {
         uri
     }.getOrNull()
 
+    /**
+     * 纪要汇总长图：标题 + 副标题 + 正文 + 落款。
+     *
+     * [render] 的正文只留 14 行、版面固定，那是给一段 AI 观察用的；周报可能有几百行，
+     * 这里按内容算高度、不裁行，配色、字号与折行方式仍沿用分享图那一套。
+     */
+    fun renderReport(title: String, subtitle: String, body: String): Bitmap {
+        val titlePaint = text(44f, INK, Typeface.BOLD)
+        val subPaint = text(24f, MUTED)
+        val bodyPaint = text(26f, INK)
+        val metaPaint = text(20f, MUTED)
+        val contentWidth = WIDTH - PAD * 2
+        // 标题区与落款各占多少像素，正文能用的高度就靠它倒推。
+        val head = 44f + 48f + 36f + 28f
+        val footer = 70f
+        var lines = body.split('\n').flatMap { raw ->
+            if (raw.isBlank()) listOf("") else wrapAll(raw, bodyPaint, contentWidth)
+        }
+        val capacity = ((MAX_HEIGHT - PAD * 2 - head - footer) / LINE).toInt()
+        if (lines.size > capacity) {
+            // 文字上限本身压得住，这层只是兜底：宁可明说画不下，也别让画布悄悄裁掉半句话。
+            lines = lines.take(capacity) + "…（图片到这儿画不下了，完整内容请用复制全文）"
+        }
+        val height = (PAD * 2 + head + lines.size * LINE + footer).toInt()
+            .coerceIn(MIN_HEIGHT, MAX_HEIGHT)
+
+        val bitmap = Bitmap.createBitmap(WIDTH, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(BG)
+
+        var y = PAD + 44
+        // 44px 标题在 1080 宽里只放得下约 20 个汉字；超出的部分会被画布裁掉且没有省略号。
+        val heading = if (title.codePointCount(0, title.length) > 18) {
+            title.substring(0, title.offsetByCodePoints(0, 18)) + "…"
+        } else title
+        canvas.drawText(heading, PAD, y, titlePaint)
+        y += 48
+        canvas.drawText(subtitle, PAD, y, subPaint)
+        y += 36
+        canvas.drawRect(PAD, y, WIDTH - PAD, y + 2 * DP, fillPaint(CARD))
+        y += 28
+        lines.forEach { line ->
+            if (line.isNotEmpty()) canvas.drawText(line, PAD, y, bodyPaint)
+            y += LINE
+        }
+
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(Date())
+        canvas.drawText("言外 · $stamp", PAD, height - PAD / 2, metaPaint)
+        return bitmap
+    }
+
+    /**
+     * 把长图存进相册，并把失败原因带回来。
+     *
+     * Android 10 起走 MediaStore + RELATIVE_PATH，不用申请存储权限；
+     * Android 9 没有分区存储，只能写进公共图片目录再让媒体扫描登记。
+     * 用调用方给的 Context（宿主 Activity）：写文件要的是微信这个身份的权限。
+     */
+    internal fun saveReport(context: Context, bitmap: Bitmap, prefix: String = "yanwai-report"): Saved {
+        val name = prefix + "-" + System.currentTimeMillis() + ".png"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return runCatching {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/言外")
+                    // 先挂 pending：写失败时相册里不会留一条 0 字节或半张的坏图。
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: return Saved(null, "相册不接受这次写入，可能是存储空间不足")
+                var written = false
+                try {
+                    val out = resolver.openOutputStream(uri)
+                    if (out == null) {
+                        runCatching { resolver.delete(uri, null, null) }
+                        return Saved(null, "打不开刚建好的图片文件")
+                    }
+                    out.use { stream -> written = bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream) }
+                } finally {
+                    if (!written) runCatching { resolver.delete(uri, null, null) }
+                }
+                if (!written) return Saved(null, "图片数据没写成功，可能是存储空间不足")
+                val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                runCatching { resolver.update(uri, done, null, null) }
+                Saved(uri, "")
+            }.getOrElse { Saved(null, "存图片出错：" + it.javaClass.simpleName) }
+        }
+        return runCatching {
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "言外")
+            if (!dir.exists() && !dir.mkdirs()) return Saved(null, "建不了相册目录：" + dir.absolutePath)
+            val file = File(dir, name)
+            FileOutputStream(file).use { stream ->
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+                    return Saved(null, "图片数据没写成功，可能是存储空间不足")
+                }
+            }
+            MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), arrayOf("image/png"), null)
+            Saved(Uri.fromFile(file), "")
+        }.getOrElse {
+            Saved(null, "存图片出错：" + it.javaClass.simpleName + "，可能是系统没给微信存储权限")
+        }
+    }
+
     /** 标题下面只写这次统计的时间范围，条数和人数在四块数字里已经有。 */
     /** 副标题：时间范围 + 条数、人数、人均，和面板上面那一行说同一件事。 */
     private fun spanLabel(stats: GroupStats): String {
@@ -137,8 +255,12 @@ object StatsImage {
         style = Paint.Style.FILL
     }
 
-    /** 按像素宽度折行，中文按字符断，英文按空格优先。 */
-    private fun wrap(text: String, paint: Paint, maxWidth: Float): List<String> {
+    /** 按像素宽度折行，中文按字符断，英文按空格优先；分享图只留前 14 行。 */
+    private fun wrap(text: String, paint: Paint, maxWidth: Float): List<String> =
+        wrapAll(text, paint, maxWidth).take(14)
+
+    /** 同上，但不限行数：长图要把整段正文画完。 */
+    private fun wrapAll(text: String, paint: Paint, maxWidth: Float): List<String> {
         val lines = mutableListOf<String>()
         var current = StringBuilder()
         for (ch in text) {
@@ -154,6 +276,6 @@ object StatsImage {
             current.append(ch)
         }
         if (current.isNotEmpty()) lines += current.toString()
-        return lines.take(14)
+        return lines
     }
 }

@@ -91,8 +91,9 @@ class SqliteAnalysisCache(private val db: AnalysisCacheDatabase,
     private fun pruneExpired() {
         val current = now()
         if (current - lastPrune < 60L * 60 * 1000) return
-        lastPrune = current
         db.execute("DELETE FROM analysis_results WHERE accessed < ?", listOf((current - CACHE_TTL_MS).toString()))
+        // 删成功才记时间：DELETE 抛错时若已经记下，这一小时内的清理就永久跳过了。
+        lastPrune = current
     }
 
     @Synchronized fun find(key: AnalysisCacheKey): CachedAnalysisResult? {

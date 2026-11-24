@@ -3,6 +3,7 @@ package dev.jev.wechatmood.hook
 import android.app.Activity
 import android.app.Dialog
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
@@ -37,6 +38,8 @@ internal class RelationTemperatureUi(private val activity: Activity, private val
     private var currentTalker: String? = null
     private var now: Long = 0
     private var expanded = false
+    /** 当前账号的库哈希：给「别人的会话找话题」筛库用，没核出来时为 null。 */
+    private var accountScope: String? = null
 
     fun show() {
         val dialog = Dialog(activity)
@@ -108,6 +111,7 @@ internal class RelationTemperatureUi(private val activity: Activity, private val
         this.items = mapped
         this.emotionRows = emotion.filter { it.speaker != "我" }
         this.currentTalker = current
+        this.accountScope = accountScope
         this.now = now
         render()
     }
@@ -159,36 +163,73 @@ internal class RelationTemperatureUi(private val activity: Activity, private val
             quiet.size + " 人久未联系 · " + hanging.size + " 人还有约定 · 本周 " +
             week.sumOf { it.weekTodos } + " 条").apply { setPadding(0, theme.dp(8), 0, 0) })
         if (!expanded) {
+            // 高度交回 pill 自己的 minHeight（ReplyMetrics.TAP = 48dp）：在这里写死 36dp
+            // 会把触控目标压到规范以下，和面板里其他胶囊也不一致。
             listContainer.addView(kit.pill("展开看全部会话") { expanded = true; render() },
-                LinearLayout.LayoutParams(-2, theme.dp(36)).apply { topMargin = theme.dp(6) })
+                LinearLayout.LayoutParams(-2, -2).apply { topMargin = theme.dp(6) })
             return
         }
         listContainer.addView(kit.pill("收起") { expanded = false; render() },
-            LinearLayout.LayoutParams(-2, theme.dp(36)).apply { topMargin = theme.dp(6) })
-        section("久未联系 " + quiet.size + " 个", quiet) { RelationTemperature.quietText(it.lastAt, now) }
-        section("悬着的约定 " + hanging.size + " 人", hanging.take(LIMIT)) { item ->
-            val parts = mutableListOf<String>()
-            parts += item.openTodos.toString() + " 条未完成"
-            if (item.overdue > 0) parts += item.overdue.toString() + " 条已过期"
-            if (item.weekTodos > 0) parts += "本周 " + item.weekTodos + " 条"
-            parts.joinToString(" · ")
-        }
-        section("本周要处理 " + week.sumOf { it.weekTodos } + " 条", week) { item ->
-            item.weekTodos.toString() + " 条 · " + RelationTemperature.quietText(item.lastAt, now)
-        }
+            LinearLayout.LayoutParams(-2, -2).apply { topMargin = theme.dp(6) })
+        section("久未联系 " + quiet.size + " 个", quiet,
+            subtitle = { RelationTemperature.quietText(it.lastAt, now) }) { openTopics(it) }
+        section("悬着的约定 " + hanging.size + " 人", hanging.take(LIMIT),
+            subtitle = { item ->
+                val parts = mutableListOf<String>()
+                parts += item.openTodos.toString() + " 条未完成"
+                if (item.overdue > 0) parts += item.overdue.toString() + " 条已过期"
+                if (item.weekTodos > 0) parts += "本周 " + item.weekTodos + " 条"
+                parts.joinToString(" · ")
+            })
+        section("本周要处理 " + week.sumOf { it.weekTodos } + " 条", week,
+            subtitle = { item ->
+                item.weekTodos.toString() + " 条 · " + RelationTemperature.quietText(item.lastAt, now)
+            })
         if (quiet.isEmpty() && hanging.isEmpty() && week.isEmpty()) {
             listContainer.addView(kit.caption("没有久未联系的人，也没有悬着的约定"))
         }
     }
 
     private fun section(title: String, list: List<TemperatureContact>,
-        subtitle: (TemperatureContact) -> String) {
+        subtitle: (TemperatureContact) -> String, action: ((TemperatureContact) -> Unit)? = null) {
         if (list.isEmpty()) return
         listContainer.addView(kit.sectionLabel(title))
-        list.forEach { item ->
-            val row = kit.listRow(item.name, subtitle(item), arrow = false) { }
-            listContainer.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(2) })
+        if (action != null) {
+            listContainer.addView(kit.caption("点「找话题」就用这个会话最近的消息生成 5 个开场，不用先切过去"))
         }
+        list.forEach { item ->
+            // 行本身不绑动作：点一下名字就发一次付费模型请求，误触代价太大；
+            // 想生成话题就点行尾那颗说得清的「找话题」。
+            val row = kit.listRow(item.name, subtitle(item), arrow = false) { }
+            // listRow 返回的是 View，不能往里 addView；有动作时在外面套一层横向容器。
+            val wrap: View = if (action != null) {
+                LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(row, LinearLayout.LayoutParams(0, -2, 1f))
+                    addView(kit.pill("找话题") { action(item) },
+                        LinearLayout.LayoutParams(-2, -2).apply { leftMargin = theme.dp(6) })
+                }
+            } else row
+            listContainer.addView(wrap, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(2) })
+        }
+    }
+
+    /**
+     * 久未联系的人 → 找话题。
+     *
+     * 直接用这个会话的 talker 去读最近消息，所以不必先切进那个聊天；读库与请求都在
+     * [RelationTopicUi] 里，走的是「帮我回」抽屉同一条链路（见该类的注释）。
+     */
+    private fun openTopics(item: TemperatureContact) {
+        if (item.talker.isBlank()) {
+            // 档案目录里没留下 talker 时不猜：只能让用户自己去那个聊天里生成。
+            listContainer.addView(kit.caption("这个会话没有可用的 chat id，打开它再点「找话题」"))
+            return
+        }
+        MoodLog.i("RELATION_TEMP_TOPIC_OPEN key=" + item.key)
+        RelationTopicUi.open(activity, item.talker, item.key, item.name,
+            RelationTemperature.quietText(item.lastAt, now), accountScope)
     }
 
     private companion object {

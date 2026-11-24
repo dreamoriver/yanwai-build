@@ -26,7 +26,7 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient(kind =
         // 每条都带上原始发送时间：周一的「明天见」拖到周四整理，不能按整理当天换算成周五。
         val lines = usable.withIndex().map { (index, message) ->
             val stamp = if (message.time > 0) FactTimes.formatLocal(message.time, "MM-dd E HH:mm") else "时间未知"
-            "[${index + 1}] $stamp ${message.speaker}: ${message.text.take(80)}"
+            "[${index + 1}] $stamp ${message.speaker}: ${message.text.takeSafely(80)}"
         }
         // 从最新往回攒到预算上限：以前正序拼完再 take，超长时砍掉的反而是刚聊完的那几条。
         val chatLines = buildList {
@@ -67,7 +67,7 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient(kind =
                 return facts
             }
             lastEmpty = "tokens=$tokens"
-            MoodLog.w("RELATION_FACT_EMPTY 正文为空，换更大预算重试")
+            MoodLog.w("RELATION_FACT_EMPTY 没拿到可用正文（空或解析失败），换更大预算重试")
         }
         throw IllegalStateException("模型两次都没返回正文（$lastEmpty），这次整理不算数")
     }
@@ -78,8 +78,9 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient(kind =
         parseOrNull(body, messageIdAt, messageTimeAt) ?: emptyList()
 
     /**
-     * 解析响应体；返回 null 表示这次没有正文可用（被思考截断、或者不是数组）。
-     * null 与「模型明确回了 []」是两件事：前者不能推进水位，否则这批消息再也不会重抽。
+     * 解析响应体；返回 null 表示这次没有正文可用（被思考截断、不是数组，或解析抛了异常）。
+     * null 与「模型明确回了 []」是两件事：前者不能推进水位，否则这批消息再也不会重抽，
+     * 所以解析失败也走 null（getOrNull），不能收敛成空列表当成「模型回了 0 条」。
      */
     private fun parseOrNull(body: String, messageIdAt: (Int) -> Long,
         messageTimeAt: (Int) -> Long): List<RelationFact>? = runCatching {
@@ -116,7 +117,7 @@ class FactExtractor(private val client: ReplyHttpClient = ReplyHttpClient(kind =
                 RelationFact.decode(item)?.copy(replaces = replaces)
             }
             .distinctBy { Triple(it.kind, it.text, it.occurredAt) }
-    }.onFailure { MoodLog.w("FACT_PARSE_FAILED ${it.javaClass.simpleName}") }.getOrDefault(emptyList())
+    }.onFailure { MoodLog.w("FACT_PARSE_FAILED ${it.javaClass.simpleName}") }.getOrNull()
 
     companion object {
         // 100 条会让推理模型把 token 全花在思考上（实测 finish=length 且正文为空），50 条足够覆盖近期对话。

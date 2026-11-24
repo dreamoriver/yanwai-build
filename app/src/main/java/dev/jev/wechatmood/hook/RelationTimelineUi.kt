@@ -96,8 +96,9 @@ internal class RelationTimelineUi(private val activity: Activity, private val ta
         MoodLog.i("RELATION_TIMELINE_LOAD facts=" + facts.size + " digests=" + (digests?.size ?: -1) +
             " emotionDays=" + emotion.size + " entries=" + entries.size)
         if (activity.isFinishing || activity.isDestroyed) return
-        // 纪要读失败（null）不能和「一条都没有」混成空态。
-        render(entries, if (entries.isEmpty() && digests == null) "读取纪要失败，稍后重试" else null)
+        // 纪要读失败（null）不能和「一条都没有」混成空态：有档案事实时也要说一句，别静默吞掉。
+        render(entries, if (entries.isEmpty() && digests == null) "读取纪要失败，稍后重试" else null,
+            digestsFailed = digests == null)
     }
 
     private fun merge(facts: List<RelationFact>, digests: List<StoredDigest>?, emotion: List<EmotionDay>): List<Entry> {
@@ -131,7 +132,7 @@ internal class RelationTimelineUi(private val activity: Activity, private val ta
         return entries.sortedByDescending { it.at }.take(MAX_ENTRIES)
     }
 
-    private fun render(entries: List<Entry>, emptyHint: String?) {
+    private fun render(entries: List<Entry>, emptyHint: String?, digestsFailed: Boolean = false) {
         listContainer.removeAllViews()
         if (entries.isEmpty()) {
             listContainer.addView(kit.body(emptyHint ?: "还没有可回看的内容"))
@@ -158,6 +159,12 @@ internal class RelationTimelineUi(private val activity: Activity, private val ta
             val time = if (FactTimes.hasClock(entry.at)) FactTimes.formatLocal(entry.at, "HH:mm") else "全天"
             val row = kit.listRow(entry.text, entry.label + " · " + time, arrow = false) { }
             listContainer.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(2) })
+        }
+        // 纪要是时间线的一路来源，读失败就明说这一段缺了，别让人以为这个人从来没转述过。
+        if (digestsFailed) {
+            listContainer.addView(kit.caption("纪要没读出来，这次只显示档案和情绪记录").apply {
+                setPadding(0, theme.dp(6), 0, 0)
+            })
         }
         listContainer.addView(kit.caption("共 " + entries.size + " 条，最近 " + MAX_ENTRIES + " 条以内；只读本机记录").apply {
             setPadding(0, theme.dp(10), 0, 0)

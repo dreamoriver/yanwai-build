@@ -26,18 +26,33 @@ import kotlinx.coroutines.withContext
 internal object RelationChatBadge {
     /** 标题栏会被微信重建：没挂上时 400ms 再找一次，挂上后只在重建时重找。 */
     private const val LOOKUP_INTERVAL_MS = 400L
+    /** 找不到标题的退避：2 秒起，每失败一次翻倍，最长 10 秒，别每 2 秒扫一遍页面。 */
+    private const val RETRY_MIN_MS = 2_000L
+    private const val RETRY_MAX_MS = 10_000L
+    /** 找聊天页容器只看这么多节点：广度优先、浅层先到，够用即停。 */
+    private const val CONTAINER_SCAN_LIMIT = 800
+    private const val CHAT_LAYOUT = ".ChattingUILayout"
+    /** 消息列表这类大子树不必往里钻：标题栏是它们的兄弟。 */
+    private val HEAVY_SUBTREES = listOf("ListView", "RecyclerView")
+    /** 底部标签的文字永远不是聊天标题。 */
+    private val BOTTOM_TABS = setOf("微信", "通讯录", "发现", "我")
     /** 档案库只在整理或改状态时变，8 秒读一次足够。 */
     private const val REFRESH_INTERVAL_MS = 8_000L
 
     private var dot: View? = null
     private var host: ViewGroup? = null
-    /** 挂圆点时临时压缩标题，摘除时把原始 maxWidth 还回去。 */
+    /** 挂圆点时临时压缩标题，摘除时把原始 maxWidth 和省略方式都还回去。 */
     private var titleView: TextView? = null
     private var originalMaxWidth = 0
+    private var originalEllipsize: android.text.TextUtils.TruncateAt? = null
+    /** 只有真的改过标题才需要还原：maxWidth 原本可能正好是 0（不限宽），不能用它当「改过」的判断。 */
+    private var titleCompressed = false
     private var talker: String? = null
     private var lastLookup = 0L
     private var lastRefresh = 0L
     private var retryAfter = 0L
+    /** 当前退避间隔：成功挂上后回到 2 秒，找不到就翻倍到 10 秒。 */
+    private var retryDelay = RETRY_MIN_MS
     private var lastHiddenTalker: String? = null
     private var lastLoggedBadge: String? = null
     private var lastScanInfo = ""
@@ -63,6 +78,8 @@ internal object RelationChatBadge {
             due = 0
             future = 0
             lastRefresh = 0
+            retryAfter = 0
+            retryDelay = RETRY_MIN_MS
             lastHiddenTalker = null
             lastLoggedBadge = null
             debugScan = true
@@ -77,14 +94,16 @@ internal object RelationChatBadge {
             lastLookup = now
             val title = findTitle(activity)
             if (title == null) {
-                // 找不到就退避 2 秒，并且同一个会话只记一次日志：这里跑在微信主线程上。
-                retryAfter = now + 2_000
+                // 找不到就退避（2s 起翻倍到 10s），并且同一个会话只记一次日志：这里跑在微信主线程上。
+                retryAfter = now + retryDelay
+                retryDelay = (retryDelay * 2).coerceAtMost(RETRY_MAX_MS)
                 if (lastHiddenTalker != currentTalker) {
                     lastHiddenTalker = currentTalker
                     MoodLog.i("RELATION_BADGE_HIDDEN " + lastScanInfo)
                 }
                 return
             }
+            retryDelay = RETRY_MIN_MS
             attach(activity, title)
         }
         if (!checking && now - lastRefresh > REFRESH_INTERVAL_MS) {
@@ -163,8 +182,10 @@ internal object RelationChatBadge {
         if (parent.width > 0) {
             titleView = title
             originalMaxWidth = title.maxWidth
+            originalEllipsize = title.ellipsize
             title.ellipsize = android.text.TextUtils.TruncateAt.END
             title.maxWidth = (parent.width - size - dp(title, 6)).coerceAtLeast(dp(title, 60))
+            titleCompressed = true
         }
         val index = parent.indexOfChild(title)
         parent.addView(view, (index + 1).coerceAtMost(parent.childCount), params)
@@ -189,35 +210,64 @@ internal object RelationChatBadge {
         dot?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
         dot = null
         host = null
-        titleView?.let { if (originalMaxWidth > 0) it.maxWidth = originalMaxWidth }
+        // 用「改过」的标志判断，而不是 maxWidth 是否为 0：0 本身是合法值（不限宽）。
+        if (titleCompressed) {
+            titleView?.let { view ->
+                view.maxWidth = originalMaxWidth
+                // ellipsize 也要还原，否则宿主标题栏会一直停在 END 省略。
+                view.ellipsize = originalEllipsize
+            }
+        }
         titleView = null
         originalMaxWidth = 0
+        originalEllipsize = null
+        titleCompressed = false
     }
 
     /**
      * 聊天页的标题栏通常在 ChattingUILayout 里；通知直接拉起 ChattingUI 时没有这个容器，
-     * 所以找不到容器就退回整个页面顶部找，仍然排除消息列表和输入框。
+     * 所以先按类名找容器，容器里找不到才退回整页顶部找，仍然排除消息列表和输入框。
+     *
+     * 以前每次都在 decorView 上遍历最多 8000 个节点、还对每个 TextView 调 getLocationOnScreen，
+     * 找不到时每 2 秒重来一遍，全跑在微信主线程上。现在容器找得到就只在容器里找，
+     * 位置也只在过了前几道不看位置的筛选之后算一次。
      */
     private fun findTitle(activity: Activity): TextView? {
         val root = activity.window?.decorView as? ViewGroup ?: return null
-        val all = descendants(root)
-        val footer = all.firstOrNull { it.javaClass.name == "com.tencent.mm.pluginsdk.ui.chat.ChatFooter" }
-        // 先沿 ChatFooter 的父链找 ChattingUILayout（和 MessageSniffer 同一套定位），再退回全树。
-        val chat = footer?.let { node ->
-            generateSequence(node.parent as? View) { it.parent as? View }
-                .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") } as? ViewGroup
-        } ?: all.filterIsInstance<ViewGroup>()
-            .firstOrNull { it.javaClass.name.endsWith(".ChattingUILayout") }
-        // 标题也可能在 ChattingUILayout 外层（通知直接拉起时是 RelativeLayout），所以按整页找。
-        val scope: View = root
         val metrics = activity.resources.displayMetrics
-        val footerY = footer?.let { screenY(it) }
-        // 有 ChatFooter 时标题一定在它上方；没有时按屏幕顶部 25% 截断，避免把底部标签当标题。
-        val limitY = footerY?.let { it - (40 * metrics.density).toInt() }
-            ?: (metrics.heightPixels * 0.25f).toInt()
+        // 微信标题默认 13sp；跟着系统字体缩放走，放大字体时才不会把标题漏掉。
         val titleSize = 13 * metrics.scaledDensity
-        val bottomTabs = setOf("微信", "通讯录", "发现", "我")
-        val texts = descendants(scope).filterIsInstance<TextView>()
+        val chat = chatContainer(root)
+        if (chat != null) {
+            val found = pickTitle(chat, null, titleSize)
+            if (found.title != null) {
+                lastScanInfo = "scope=chat" + found.describe()
+                return found.title
+            }
+        }
+        // 容器没了，或者标题不在容器里（通知直接拉起时是 RelativeLayout）：按整页找，只认顶部 25%。
+        val limitY = (metrics.heightPixels * 0.25f).toInt()
+        val found = pickTitle(root, limitY, titleSize)
+        lastScanInfo = "scope=" + (if (chat != null) "chat-miss" else "root") + found.describe()
+        return found.title
+    }
+
+    /** 一次扫描的结果：标题 + 扫了多少节点，用来写诊断日志。 */
+    private class TitlePick(val title: TextView?, val nodes: Int, val texts: Int,
+        val candidates: Int, val limitY: Int?) {
+        fun describe(): String = " nodes=" + nodes + " texts=" + texts + " candidates=" + candidates +
+            (limitY?.let { " limitY=" + it } ?: "")
+    }
+
+    /**
+     * 在 [scope] 里挑标题：最靠上的那个符合条件的 TextView。
+     *
+     * 先做不看位置的筛选，只有剩下的才调 getLocationOnScreen——旧写法在过滤链和 minBy 里
+     * 对同一批节点反复算位置，等于每个 TextView 都多算两三次。
+     */
+    private fun pickTitle(scope: View, limitY: Int?, titleSize: Float): TitlePick {
+        val all = descendants(scope)
+        val texts = all.filterIsInstance<TextView>()
         if (debugScan) {
             debugScan = false
             // 不记正文，只记长度/字号/宽度/可见性和位置，用来确认标题到底长什么样。
@@ -226,19 +276,46 @@ internal object RelationChatBadge {
                     ",vis=" + it.visibility + ",y=" + screenY(it)
             })
         }
-        val candidates = texts
-            .filter { it !is android.widget.EditText }
-            .filter { it.visibility == View.VISIBLE && it.text.isNotBlank() }
-            .filter { tv ->
-                generateSequence(tv.parent as? View) { it.parent as? View }.none { it is android.widget.ListView }
+        var best: TextView? = null
+        var bestY = Int.MAX_VALUE
+        var candidates = 0
+        for (view in texts) {
+            if (view is android.widget.EditText) continue
+            if (view.visibility != View.VISIBLE || view.text.isBlank()) continue
+            if (view.textSize < titleSize) continue
+            if (view.text.toString().trim() in BOTTOM_TABS) continue
+            // 消息列表里的文字都是正文，不可能是标题，连位置都不用算。
+            if (insideList(view)) continue
+            val y = screenY(view)
+            if (limitY != null && y >= limitY) continue
+            candidates++
+            if (y < bestY) {
+                bestY = y
+                best = view
             }
-            .filter { screenY(it) < limitY }
-            .filter { it.text.toString().trim() !in bottomTabs }
-            .filter { it.textSize >= titleSize }
-        lastScanInfo = "scope=" + (if (chat != null) "chat" else "root") + " nodes=" + all.size +
-            " texts=" + texts.size + " candidates=" + candidates.size + " limitY=" + limitY
-        return candidates.minByOrNull { screenY(it) }
+        }
+        return TitlePick(best, all.size, texts.size, candidates, limitY)
     }
+
+    /** 聊天页容器：广度优先找，浅层先到；消息列表这类大子树不往里钻。 */
+    private fun chatContainer(root: ViewGroup): ViewGroup? {
+        val queue = ArrayDeque<View>()
+        queue.addLast(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < CONTAINER_SCAN_LIMIT) {
+            val view = queue.removeFirst()
+            visited++
+            if (view !== root && view is ViewGroup && view.javaClass.name.endsWith(CHAT_LAYOUT)) return view
+            if (view !is ViewGroup) continue
+            // 标题栏是消息列表的兄弟，不会在列表里层，跳过这些子树不影响定位。
+            if (view !== root && HEAVY_SUBTREES.any { view.javaClass.name.contains(it) }) continue
+            for (index in 0 until view.childCount) queue.addLast(view.getChildAt(index))
+        }
+        return null
+    }
+
+    private fun insideList(view: View): Boolean =
+        generateSequence(view.parent as? View) { it.parent as? View }.any { it is android.widget.ListView }
 
     private fun screenY(view: View): Int {
         val point = IntArray(2)

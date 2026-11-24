@@ -335,8 +335,9 @@ class AnalysisConnectionUi(
             } catch (e: Exception) {
                 if (option != tested) return@launch
                 status("连接失败 · 点击重试", R.color.status_error)
-                result(e.message ?: "检测失败，请重试", error = true)
-                MoodLog.e("分析连接检测失败：${e.message}")
+                result(failureText(e), error = true)
+                // 原文可能是 "Failed requirement." 这类英文，界面上换成人话，细节留在日志里。
+                MoodLog.e("分析连接检测失败：${e.javaClass.simpleName} ${e.message}")
             } finally {
                 busy = false
                 setBusy(false)
@@ -354,7 +355,8 @@ class AnalysisConnectionUi(
             ContextMessage("对方", "你是不是忘了周末吃饭的事？"),
             ContextMessage("我", "记得，这次我来安排，明天把餐厅和时间告诉你。")))
         val mood = ChatAnalysis.analyzeSuspending(sample, settings.model, exchange = { payload ->
-            JevHttpClient().exchangeSuspending(payload, settings)
+            // 检测按钮会反复点，复用同一个客户端，别每次都新建连接池与线程池。
+            JevHttpClient.shared.exchangeSuspending(payload, settings)
         })
         return mood.detail
     }
@@ -384,6 +386,13 @@ class AnalysisConnectionUi(
             R.color.status_info -> "正在检测…"
             else -> "保存并检测分析连接"
         }, color)
+    }
+
+    /** 中文提示原样用；纯 ASCII 的技术性异常（require/JSON 解析）统一换成人话，细节只进日志。 */
+    private fun failureText(error: Throwable): String {
+        val message = error.message.orEmpty()
+        if (message.isBlank() || message.none { it.code > 127 }) return "模型返回的数据格式不对，请检查接口地址与模型"
+        return message
     }
 
     private fun result(text: String, error: Boolean = false) {

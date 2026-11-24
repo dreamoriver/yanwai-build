@@ -55,12 +55,20 @@ object BubbleDecorator {
             return true
         }
         // A closed or background result is handled, not an unsupported host layout.
+        // offer() 只是占位：挡住同一结果在别的气泡上重复弹窗。attach() 失败必须归还，
+        // 否则 activeKey 永远非空，之后所有新结果都会被拒。
         if (!presentation.offer(key)) return true
-        if (!row.isAttachedToWindow) return false
+        if (!row.isAttachedToWindow) {
+            presentation.release(key)
+            return false
+        }
         val root = row.rootView
         val state = card?.takeIf { it.key == key && it.root === root } ?: run {
             disposeWindow()
-            attach(root, key)?.also { card = it } ?: return false
+            attach(root, key)?.also { card = it } ?: run {
+                presentation.release(key)
+                return false
+            }
         }
         val value = mood?.let {
             AnalysisCardText.format(it, row.resources.displayMetrics.density,
@@ -162,8 +170,10 @@ object BubbleDecorator {
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    state.x = (oldX + (event.rawX - startX).toInt()).coerceIn(0, (root.width - width).coerceAtLeast(0))
-                    state.y = (oldY + (event.rawY - startY).toInt()).coerceIn(0, (root.height - box.height).coerceAtLeast(0))
+                    val moved = clampToRoot(root, oldX + (event.rawX - startX).toInt(),
+                        oldY + (event.rawY - startY).toInt(), width, box.height)
+                    state.x = moved.first
+                    state.y = moved.second
                     popup.update(state.x, state.y, -1, -1)
                     true
                 }
@@ -188,6 +198,14 @@ object BubbleDecorator {
         }
     }
 
+    /**
+     * 位置边界只有这一套：拖动和 [resize] 共用，免得两处各算一次夹取而算出不同位置。
+     * 宿主比窗口还小时一律落回 0。
+     */
+    private fun clampToRoot(root: View, x: Int, y: Int, boxWidth: Int, boxHeight: Int): Pair<Int, Int> =
+        x.coerceIn(0, (root.width - boxWidth).coerceAtLeast(0)) to
+            y.coerceIn(0, (root.height - boxHeight).coerceAtLeast(0))
+
     private fun resize(state: Card) {
         val maxHeight = (state.root.height / 2).coerceAtLeast(1)
         state.view.measure(View.MeasureSpec.makeMeasureSpec(state.width, View.MeasureSpec.EXACTLY),
@@ -195,7 +213,19 @@ object BubbleDecorator {
         state.scroll.layoutParams = (state.scroll.layoutParams as LinearLayout.LayoutParams).apply {
             height = minOf(state.view.measuredHeight, maxHeight)
         }
-        state.popup.update(state.width, ViewGroup.LayoutParams.WRAP_CONTENT)
+        // 内容高矮变了，窗口实际占的尺寸也变了：横竖屏切换、分屏后 root 会变小，原来夹好的
+        // x/y 可能已经越界（右下角被裁掉一半）。先量出整块内容，再按当前的 root 重新夹一次位置。
+        val box = state.popup.contentView
+        if (box == null) {
+            state.popup.update(state.width, ViewGroup.LayoutParams.WRAP_CONTENT)
+            return
+        }
+        box.measure(View.MeasureSpec.makeMeasureSpec(state.width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+        val position = clampToRoot(state.root, state.x, state.y, state.width, box.measuredHeight)
+        state.x = position.first
+        state.y = position.second
+        state.popup.update(state.x, state.y, state.width, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
     /** Row recycling must not dismiss a window owned by the chat rather than that row. */

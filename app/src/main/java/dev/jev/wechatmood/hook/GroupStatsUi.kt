@@ -4,7 +4,11 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -36,6 +40,8 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /** 分析范围：进程内记住上次选择，重开窗口沿用。 */
@@ -74,7 +80,16 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
     private val kit = PanelKit(activity)
     private val theme = kit.theme
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var stats: GroupStats
+    /** 统计结果；首轮在后台算，算完之前是空对象（面板先出骨架，数字随后填）。 */
+    private var stats: GroupStats = GroupStats()
+    /** 统计代次：切筛选、换数据源就加一，后台旧结果回来对不上直接丢。 */
+    private var statsEpoch = 0
+    /** 首轮统计是否已经算出来过：没算出来前界面写「正在统计…」。 */
+    private var statsApplied = false
+    /** 首轮统计的任务：打开窗口后数昵称、比上一周期都要等它算完。 */
+    private var statsJob: Job? = null
+    /** 数字建好之后挂上来：后台算完在主线程刷数字，窗口没打开时是 null。 */
+    private var refreshNumbers: (() -> Unit)? = null
     /** 筛选变化时原地重算，不重建面板。 */
     private var onFilterChanged: (() -> Unit)? = null
     private val topContainer = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
@@ -112,6 +127,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         0x200B, 0x200C, 0x200D, 0x2028, 0x2029, 0x202F, 0x205F, 0xFEFF, 0xFE0F,
     )
     private var dialog: Dialog? = null
+    /** 正在画长图：几十 MB 的渲染不能连点排队，完成前再来点击直接忽略。 */
+    private var renderingImage = false
 
     /** 按选择的时段与条数裁剪消息。 */
     private fun selectedMessages(): List<dev.jev.wechatmood.reply.ReplyMessage> {
@@ -128,31 +145,89 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         return if (StatsFilter.limit > 0) byTime.takeLast(StatsFilter.limit) else byTime
     }
 
-    init { stats = computeStats() }
-
     /** 上一次记录的「没有发送者」类型分布，只在变化时写日志。 */
     private var blankSignature: String? = null
 
-    /** 按当前筛选重算，只读内存里的消息，不碰数据库。 */
-    private fun computeStats(): GroupStats {
+    /** 统计的输入快照：消息池、媒体与语音计数都在主线程这一刻定住。 */
+    private class StatsInput(
+        val pool: List<dev.jev.wechatmood.reply.ReplyMessage>,
+        val trimmed: Boolean,
+        val fromDb: Boolean,
+        val omittedMedia: Int,
+        val voice: Int,
+    )
+
+    /** 后台算出来的一轮统计：数字 + 顺带要写的诊断信息（日志回主线程写）。 */
+    private class StatsRun(val stats: GroupStats, val noSender: Int, val signature: String)
+
+    /**
+     * 主线程取快照：只读字段，不做聚合。
+     *
+     * 以前统计直接读这些可变字段，还在同一个方法里对同一个池子 filter 了两次；
+     * 现在后台线程只认这一份快照，用户中途切筛选也不会算出半新半旧的数字。
+     */
+    private fun statsInput(): StatsInput {
+        // 池子只筛一次：旧写法连着筛两次，几千条消息白白多跑一轮。
+        val pool = selectedMessages()
+        return StatsInput(pool, context.trimmed, dbMessages.isNotEmpty(), context.omittedMedia,
+            context.messages.count { it.voiceState == dev.jev.wechatmood.voice.VoiceState.READY })
+    }
+
+    /** 纯计算：只读快照，可以在后台线程跑。 */
+    private fun computeStats(input: StatsInput): StatsRun {
         // 群里有些消息 content 不带发送者前缀（系统提示、部分媒体），单独记类型分布，
         // 否则它们会全被并成一个「未获取昵称」，看着像某个人没说名字。
-        val blanks = selectedMessages().filter { it.senderId.isBlank() }
+        val blanks = input.pool.filter { it.senderId.isBlank() }
         val signature = if (blanks.isEmpty()) "" else blanks.groupingBy { it.type }.eachCount().entries
             .sortedByDescending { it.value }.joinToString(",") { it.key.toString() + ":" + it.value }
-        if (blanks.isNotEmpty() && signature != blankSignature) {
-            dev.jev.wechatmood.core.MoodLog.w("STATS_NO_SENDER n=" + blanks.size + " types=" + signature)
-        }
-        blankSignature = signature
-        val records = selectedMessages().map {
+        val records = input.pool.map {
             StatRecord(normalizedMillis(it.time), if (it.speaker == "我") 1 else 0, it.type, it.text, it.speaker)
         }
-        val base = GroupStatsCalculator.compute(records, sampled = context.trimmed)
+        val base = GroupStatsCalculator.compute(records, sampled = input.trimmed)
         // 库里的消息带真实 type，图片语音按自己这一份算。
         // 页面消息拿不到类型，只能按「没进上下文的条数」补，否则永远是 0。
-        if (dbMessages.isNotEmpty()) return base
-        val voices = context.messages.count { it.voiceState == dev.jev.wechatmood.voice.VoiceState.READY }
-        return base.copy(media = context.omittedMedia, voice = voices)
+        val merged = if (input.fromDb) base else base.copy(media = input.omittedMedia, voice = input.voice)
+        return StatsRun(merged, blanks.size, signature)
+    }
+
+    /** 主线程收口：写诊断日志、换数字，必要时刷界面。 */
+    private fun applyStats(run: StatsRun, refresh: Boolean = true) {
+        if (run.noSender > 0 && run.signature != blankSignature) {
+            dev.jev.wechatmood.core.MoodLog.w("STATS_NO_SENDER n=" + run.noSender + " types=" + run.signature)
+        }
+        blankSignature = run.signature
+        stats = run.stats
+        statsApplied = true
+        if (refresh) refreshNumbers?.invoke()
+    }
+
+    /**
+     * 后台重算统计，算完回主线程刷数字。
+     *
+     * 几千条的池子上在主线程 filter + 聚合，切「时段 / 条数」时会掉帧；这里先留着旧数字
+     * （面板不闪空白），算完再换。代次对不上说明筛选又换过了：晚到的旧结果直接丢，
+     * 不让旧范围盖掉新范围。
+     */
+    private fun recomputeStats() {
+        val epoch = ++statsEpoch
+        val input = statsInput()
+        statsJob = scope.launch {
+            val run = withContext(Dispatchers.Default) { runCatching { computeStats(input) }.getOrNull() }
+            if (epoch != statsEpoch || run == null) return@launch
+            applyStats(run)
+        }
+    }
+
+    /**
+     * 换数据源后重算（[reloadDb] 里用）：算完把代次也往前进，正在进行中的旧一轮结果就作废了。
+     * 是否顺带刷界面交给调用方（它后面本来就要整屏刷一遍），默认不重复画。
+     */
+    private suspend fun reloadStats(refresh: Boolean = false) {
+        val epoch = ++statsEpoch
+        val input = statsInput()
+        val run = withContext(Dispatchers.Default) { runCatching { computeStats(input) }.getOrNull() } ?: return
+        if (epoch != statsEpoch) return
+        applyStats(run, refresh)
     }
 
     /** 微信不同版本的时间有秒有毫秒，统计前统一成毫秒，否则活跃时段会算到 1970 年。 */
@@ -199,11 +274,24 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val limit = if (StatsFilter.limit == 0) 5000 else StatsFilter.limit
         val rows = runCatching {
             ReplyDatabaseHistory.statMessages(context.talker, StatsFilter.sinceMillis(), limit, accountScope)
-        }.getOrDefault(emptyList())
-        dev.jev.wechatmood.core.MoodLog.i("STATS_RELOAD rows=" + rows.size + " limit=" + limit + " range=" + StatsFilter.range)
+        }.getOrNull()
+        dev.jev.wechatmood.core.MoodLog.i("STATS_RELOAD rows=" + (rows?.size ?: -1) + " limit=" + limit + " range=" + StatsFilter.range)
+        if (rows == null) {
+            // 读库失败和「这个时段没消息」不是一回事：旧数据必须先清掉，否则上一轮的数字会配这次失败的说明。
+            sourceNote = "读取消息库失败，只统计页面上可见的 " + context.messages.size + " 条"
+            dev.jev.wechatmood.core.MoodLog.w("STATS_RELOAD_FAILED range=" + StatsFilter.range)
+            dbMessages = emptyList()
+            reloadStats()
+            previousTotal = null
+            updateCompareLine()
+            return
+        }
         if (rows.isEmpty()) {
-            sourceNote = "库里没有这个时段的消息，页面上的 " + context.messages.size + " 条也不在范围内"
+            sourceNote = "库里没有这个时段的消息，只统计页面上可见的 " + context.messages.size + " 条"
             dev.jev.wechatmood.core.MoodLog.i("STATS_RELOAD_EMPTY range=" + StatsFilter.range)
+            // 窗口空了，内存里上一轮的行和统计一起清：否则数字还是旧范围的。
+            dbMessages = emptyList()
+            reloadStats()
             // 当前窗口都空了，上一周期的数也不能留：否则对比行会拿旧结论配新空白。
             previousTotal = null
             updateCompareLine()
@@ -223,7 +311,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             "built=${dbMessages.size} voice=${dbMessages.count { it.voice != null }} " +
             "waiting=${dbMessages.count { it.text == dev.jev.wechatmood.voice.VoiceText.WAITING }} " +
             "took=${android.os.SystemClock.elapsedRealtime() - buildStarted}ms")
-        stats = computeStats()
+        // 统计放后台算：库里几千条时这一步在主线程要几十毫秒，够掉几帧。
+        reloadStats()
         logBlankSamples()
         // 对比走同一条按时间查库的路：跟着这次刷新一起数一遍上一周期，不另开请求路径。
         refreshCompare()
@@ -265,7 +354,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         filters.addView(limitPill, LinearLayout.LayoutParams(0, -2, 1f))
         body.addView(filters)
         // 「共 N 条 / M 人发言」已经是大字里的数字，这里只留数据范围和人均，不重复。
-        val spanLine = kit.caption(spanLineText())
+        // 首轮统计在后台算：还没结果时先写「正在统计…」，算完由 refreshNumbers 换成真数字。
+        val spanLine = kit.caption(if (statsApplied) spanLineText() else "正在统计…")
         val sourceLine = kit.caption(sourceNote)
         // 与上一周期对比：一行结论，不画图表；没有可比的上一周期就整行不占位。
         val compare = kit.caption("")
@@ -284,7 +374,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         val cells = (dev.jev.wechatmood.reply.GroupStatsCalculator.KIND_LABELS.map { number(it.second) } +
             number("其它"))
         cells.forEach { numbers.addView(it.first, weight()) }
-        fillNumbers(cells)
+        // 统计没算出来前先留空：显示一排 0 会被当成「这个时段真没消息」。
+        if (statsApplied) fillNumbers(cells)
         body.addView(numbers, LinearLayout.LayoutParams(-1, -2))
         body.addView(LinearLayout(activity), LinearLayout.LayoutParams(-1, theme.dp(6)))
         body.addView(topContainer, LinearLayout.LayoutParams(-1, -2))
@@ -295,7 +386,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             sourceNote = "只有页面上的文字消息；图片语音按本页单独计数"
             captionLine(sourceLine, sourceNote)
         }
-        renderTop(pageNames + manualNames)
+        // 同理，先不画成员表，否则会先闪一句「没有可统计的发言」再换成真表格。
+        currentNames = pageNames + manualNames
+        if (statsApplied) renderTop(currentNames)
 
         val activeBox = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         body.addView(activeBox, LinearLayout.LayoutParams(-1, -2))
@@ -373,7 +466,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             analysisEpoch++
             analysisJob?.cancel()
             analysisJob = null
-            stats = computeStats()
+            // 后台重算：切筛选时先留着旧数字（面板不闪空白），算完由 refreshNumbers 换掉。
+            recomputeStats()
             rangePill.text = "时段 · ${StatsFilter.range.label}"
             limitPill.text = "条数 · ${StatsFilter.limitLabel}"
             spanLine.text = spanLineText()
@@ -410,17 +504,48 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             copy(exportText(analysisText))
         }, LinearLayout.LayoutParams(0, -2, 1f))
         actions.addView(theme.action("生成图片", quiet = true) {
+            if (renderingImage) return@action
+            renderingImage = true
+            Toast.makeText(activity, "正在生成图片…", Toast.LENGTH_SHORT).show()
+            // 和 CSV 一样按点击这一刻拍照：画图要几秒，期间界面怎么变，出来的都是同一份数据。
             val summary = analysisText.takeIf {
                 it.isNotBlank() && !it.startsWith("分析失败")
             }
-            val bitmap = StatsImage.render(stats, displayedNames, summary, "群聊统计")
-            val uri = StatsImage.save(activity, bitmap)
-            Toast.makeText(activity,
-                if (uri != null) "已保存到相册，可在相册里发送" else "保存失败，检查相册权限",
-                Toast.LENGTH_LONG).show()
+            val snapshot = stats
+            val names = displayedNames.toMap()
+            scope.launch {
+                // 1080×上万像素的 ARGB_8888 加 PNG 压缩是几十 MB 的活，放主线程会整屏假死。
+                val uri = withContext(Dispatchers.Default) {
+                    var bitmap: android.graphics.Bitmap? = null
+                    try {
+                        val image = StatsImage.render(snapshot, names, summary, "群聊统计")
+                        bitmap = image
+                        StatsImage.save(activity, image)
+                    } catch (error: Throwable) {
+                        // 取消不是失败：面板关掉后别再弹提示，交给取消机制收尾。
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        dev.jev.wechatmood.core.MoodLog.w("STATS_IMAGE_FAILED " + error.javaClass.simpleName)
+                        null
+                    } finally {
+                        // 一张就几十 MB，存完立刻还给系统，别等 GC。
+                        bitmap?.recycle()
+                    }
+                }
+                Toast.makeText(activity,
+                    if (uri != null) "已保存到相册，可在相册里发送" else "保存失败，检查相册权限",
+                    Toast.LENGTH_LONG).show()
+                renderingImage = false
+            }
         }, LinearLayout.LayoutParams(0, -2, 1f))
         actions.addView(theme.action("关闭", quiet = true) { dialog.dismiss() },
             LinearLayout.LayoutParams(0, -2, 1f))
+        // 导出 CSV：单独一行放在底栏上方，底栏那三个按钮不会被挤窄；状态行紧贴按钮下面。
+        val exportStatus = kit.status("").apply { visibility = View.GONE }
+        val exportRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+        exportRow.addView(theme.action("导出 CSV", quiet = true) {
+            // 和 AI 分析一样按点击这一刻拍照：导出期间界面怎么变，写出来的都是同一份数据。
+            exportCsv(stats, displayedNames.toMap(), exportStatus)
+        }, LinearLayout.LayoutParams(-1, -2))
         actions.setPadding(theme.dp(20), theme.dp(8), theme.dp(20), theme.dp(14))
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -436,6 +561,12 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         root.addView(aiButton, LinearLayout.LayoutParams(-1, -2).apply {
             setMargins(theme.dp(20), theme.dp(6), theme.dp(20), 0)
         })
+        root.addView(exportRow, LinearLayout.LayoutParams(-1, -2).apply {
+            setMargins(theme.dp(20), theme.dp(4), theme.dp(20), 0)
+        })
+        root.addView(exportStatus, LinearLayout.LayoutParams(-1, -2).apply {
+            setMargins(theme.dp(20), 0, theme.dp(20), 0)
+        })
         root.addView(actions, LinearLayout.LayoutParams(-1, -2))
         dialog.setContentView(root)
         val screenHeight = activity.resources.displayMetrics.heightPixels
@@ -447,11 +578,23 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             setDimAmount(ReplyMetrics.DIM)
         }
         dialog.setOnDismissListener { scope.cancel() }
+        // 后台算完回到主线程只换文字，不重建窗口；表格与活跃时段跟着新数字重画一遍。
+        refreshNumbers = {
+            spanLine.text = spanLineText()
+            captionLine(sourceLine, sourceNote)
+            updateCompareLine()
+            fillNumbers(cells)
+            renderTop(currentNames)
+            renderActiveHours(activeBox)
+        }
+        recomputeStats()
         dialog.show()
 
         // 昵称在数据库里，异步查一次再替换 wxid；同范围的分析结果还在的话直接摆出来。
         scope.launch {
             logBlankSamples()
+            // 先等首轮统计算完：昵称和「上一周期」都按这一次的数字算，别拿空统计去比。
+            statsJob?.join()
             renderTop(namesFor(stats.members.map { it.name }))
             // 打开窗口时也算一次对比：不然这一行要等用户切一次筛选才出现。
             refreshCompare()
@@ -1172,6 +1315,259 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         Toast.makeText(activity, "已复制", Toast.LENGTH_SHORT).show()
     }
 
+    /**
+     * 一次导出用的快照：点下去那一刻就把统计、名字和消息池定住。
+     * 导出期间用户切筛选、补昵称都不影响这一份，写出来的就是他按下按钮时看到的数据。
+     */
+    private data class ExportSnapshot(
+        val stats: GroupStats,
+        val names: Map<String, String>,
+        val pool: List<dev.jev.wechatmood.reply.ReplyMessage>,
+        val rangeLabel: String,
+        val limitLabel: String,
+        val windowText: String,
+        val compareText: String,
+        val sourceNote: String,
+    )
+
+    /**
+     * 导出 CSV 到系统「下载」目录。
+     *
+     * 为什么走 MediaStore：模块跑在微信进程里，Android 10 起的分区存储不允许按绝对路径往
+     * 公共下载目录写文件；MediaStore.Downloads 是系统给的合规入口，插一条记录再往里写流就行。
+     * 这样既不用申请 WRITE_EXTERNAL_STORAGE（targetSdk 35 上这个权限本来也不起作用），
+     * 也不用猜各家 ROM 把下载目录挪到了哪里。
+     */
+    private fun exportCsv(stats: GroupStats, names: Map<String, String>, line: TextView) {
+        if (stats.total == 0) {
+            showExportStatus(line, "这个时段没有消息，没有可导出的内容", failed = true)
+            return
+        }
+        val pool = selectedMessages()
+        val previous = previousTotal
+        val snapshot = ExportSnapshot(
+            stats = stats,
+            names = names,
+            pool = pool,
+            rangeLabel = windowLabel(StatsFilter.range),
+            limitLabel = StatsFilter.limitLabel,
+            windowText = spanText(pool),
+            // 环比用界面上那一行同样的算法；没有可比的上一周期就在文件里说清楚，不留空。
+            compareText = previous?.let { GroupStatsCalculator.compare(stats.total, it) }.orEmpty(),
+            sourceNote = sourceNote,
+        )
+        line.visibility = View.VISIBLE
+        line.setTextColor(theme.muted)
+        line.text = "正在导出…"
+        scope.launch {
+            // 群名在 chatroom 表里，查不到（私聊、群名还没同步）就让文件名用会话哈希。
+            val title = runCatching { groupTitle() }.getOrNull()
+            val outcome = withContext(Dispatchers.IO) { runCatching { writeCsv(snapshot, title) } }
+            outcome.fold(
+                onSuccess = { shown ->
+                    dev.jev.wechatmood.core.MoodLog.i("STATS_EXPORT_OK path=" + shown + " rows=" + stats.total)
+                    showExportStatus(line, "已导出到 " + shown, failed = false)
+                },
+                onFailure = { error ->
+                    // 只记异常类名：消息文本里可能带路径甚至聊天内容，不往日志里灌。
+                    dev.jev.wechatmood.core.MoodLog.w("STATS_EXPORT_FAIL " + error.javaClass.simpleName)
+                    showExportStatus(line, "导出失败：" + exportReason(error), failed = true)
+                },
+            )
+        }
+    }
+
+    /** 群名：只有 @chatroom 才查 chatroom 表，私聊直接返回 null。 */
+    private suspend fun groupTitle(): String? {
+        val talker = context.talker
+        if (!talker.endsWith("@chatroom")) return null
+        return ReplyDatabaseHistory.groupNames(listOf(talker))[talker]?.takeIf { it.isNotBlank() }
+    }
+
+    /** 状态行：成功绿、失败红；不弹 Toast，免得把面板盖住。 */
+    private fun showExportStatus(line: TextView, message: String, failed: Boolean) {
+        line.text = message
+        line.setTextColor(if (failed) theme.error else theme.success)
+        line.visibility = if (message.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    /** 失败原因说人话：异常栈、URI、完整路径都不进界面。 */
+    private fun exportReason(error: Throwable): String = when (error) {
+        is SecurityException -> "没有写入下载目录的权限"
+        is IOException -> "写文件出错，可能是存储空间不足"
+        else -> "系统没有给出可写的位置"
+    }
+
+    /**
+     * 拼 CSV 并写进「下载」目录，整个过程在 IO 线程。
+     *
+     * 为什么开头加 UTF-8 BOM：Excel 打开没有 BOM 的 UTF-8 CSV 会按本地 ANSI 猜编码，
+     * 中文群名和成员名直接变乱码；BOM 只有三个字节，文本编辑器、pandas、Numbers 都认。
+     *
+     * 返回给人看的路径：Android 10+ 是「下载/xxx.csv」，Android 9 兜底到私有目录时是绝对路径。
+     */
+    private fun writeCsv(snapshot: ExportSnapshot, title: String?): String {
+        val stats = snapshot.stats
+        val records = snapshot.pool.map {
+            StatRecord(normalizedMillis(it.time), if (it.speaker == "我") 1 else 0, it.type, it.text, it.speaker)
+        }
+        val kinds = GroupStatsCalculator.KIND_LABELS
+        val members = memberRows(stats, snapshot.names, records)
+        val memberPercents = GroupStatsCalculator.percents(members.map { it.second[0] })
+        val hours = hourCounts(records)
+        val kindCounts = kinds.map { stats.types[it.first] ?: 0 }
+        val otherTypes = (stats.types.values.sum() - kindCounts.sum()).coerceAtLeast(0)
+        val typeRows = kinds.mapIndexed { index, pair -> pair.second to kindCounts[index] } + ("其它" to otherTypes)
+        val typePercents = GroupStatsCalculator.percents(typeRows.map { it.second })
+
+        val text = buildString {
+            append('\uFEFF')
+            appendLine(csvRow("言外 · 聊天统计"))
+            appendLine(csvRow("导出时间", stampText("yyyy-MM-dd HH:mm")))
+            appendLine(csvRow("统计时段", snapshot.rangeLabel))
+            appendLine(csvRow("条数范围", snapshot.limitLabel))
+            appendLine(csvRow("时间窗口", snapshot.windowText))
+            appendLine(csvRow("消息条数", stats.total))
+            appendLine(csvRow("发言人数", stats.senders))
+            appendLine(csvRow("人均条数", stats.perCapita))
+            appendLine(csvRow("环比", snapshot.compareText.ifBlank { "无可比的上一周期" }))
+            appendLine(csvRow("采样", if (stats.sampled) "最近 " + GroupStatsCalculator.SAMPLE_LIMIT + " 条采样" else "全量"))
+            if (snapshot.sourceNote.isNotBlank()) appendLine(csvRow("数据来源", snapshot.sourceNote))
+            appendLine()
+            appendLine(csvRow("成员名", "消息数", "文字", "图片", "语音", "视频", "表情", "占比"))
+            members.forEachIndexed { index, (shown, cells) ->
+                appendLine(csvRow(shown, cells[0], cells[1], cells[2], cells[3], cells[4], cells[5],
+                    percentText(memberPercents[index])))
+            }
+            appendLine()
+            appendLine(csvRow("小时", "条数"))
+            hours.forEachIndexed { hour, count -> appendLine(csvRow(hour, count)) }
+            appendLine()
+            appendLine(csvRow("类型", "条数", "占比"))
+            typeRows.forEachIndexed { index, (label, count) ->
+                appendLine(csvRow(label, count, percentText(typePercents[index])))
+            }
+        }
+
+        val fileName = "yanwai-stats-" + fileLabel(title) + "-" + stampText("yyyyMMdd-HHmm") + ".csv"
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        val resolver = activity.contentResolver
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android 10+：Downloads 集合 + RELATIVE_PATH，写自己新建的文件不需要任何存储权限。
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, "text/csv")
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IOException("media store insert failed")
+            try {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: throw IOException("open output stream failed")
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } catch (error: Throwable) {
+                // 没写完就留个 0 字节条目在下载列表里，比没写更烦人，撤掉。
+                runCatching { resolver.delete(uri, null, null) }
+                throw error
+            }
+            return "下载/" + fileName
+        }
+        // Android 9 没有 MediaStore.Downloads，只能回到老路径写公共下载目录：
+        // 微信自己有存储权限时写得进去，没有就抛 SecurityException，按约定兜到应用私有外部目录。
+        @Suppress("DEPRECATION")
+        val publicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val publicOk = runCatching {
+            if (!publicDir.exists()) publicDir.mkdirs()
+            File(publicDir, fileName).writeBytes(bytes)
+        }.isSuccess
+        if (publicOk) return "下载/" + fileName
+        // 私有外部目录不需要权限；卸载微信时文件会一起被清掉，所以路径要明写给用户。
+        val own = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: throw IOException("no external files dir")
+        if (!own.exists()) own.mkdirs()
+        val ownFile = File(own, fileName)
+        ownFile.writeBytes(bytes)
+        return ownFile.absolutePath
+    }
+
+    /**
+     * 成员表数据：按面板同一套显示名合并，再按条数排序。
+     * 返回「显示名 → [总数, 文字, 图片, 语音, 视频, 表情]」。
+     */
+    private fun memberRows(stats: GroupStats, names: Map<String, String>,
+        records: List<StatRecord>): List<Pair<String, IntArray>> {
+        val kindsByRaw = memberKinds(records)
+        val merged = LinkedHashMap<String, IntArray>()
+        for (member in stats.members) {
+            // 名字用面板上那一份（已解析、已编号、已截断），查不到才退回原始名。
+            val shown = names[member.name]?.takeIf { it.isNotBlank() } ?: member.name
+            val cell = merged.getOrPut(shown) { IntArray(6) }
+            cell[0] += member.count
+            kindsByRaw[member.name]?.let { counts -> for (i in 0 until 5) cell[i + 1] += counts[i] }
+        }
+        return merged.entries.sortedByDescending { it.value[0] }.map { it.key to it.value }
+    }
+
+    /**
+     * 每个成员的类型明细。
+     * 逐类型各跑一遍 GroupStatsCalculator，而不是在这儿再抄一套「谁能算成员、wxid 怎么处理」：
+     * 那份规则在面板里改得勤，抄一份迟早和界面对不上。
+     * 返回 原始名 → [文字, 图片, 语音, 视频, 表情, 其它]。
+     */
+    private fun memberKinds(records: List<StatRecord>): Map<String, IntArray> {
+        val columns = mapOf(1 to 0, 3 to 1, 34 to 2, 43 to 3, 47 to 4)
+        val out = LinkedHashMap<String, IntArray>()
+        for ((type, column) in columns) {
+            val part = GroupStatsCalculator.compute(records.filter { it.type == type })
+            for (member in part.members) out.getOrPut(member.name) { IntArray(6) }[column] += member.count
+        }
+        // 剩下的类型（转账、系统提示、合并转发等）合起来算「其它」，成员表里不单独占列。
+        val others = GroupStatsCalculator.compute(records.filter { record -> columns.keys.none { it == record.type } })
+        for (member in others.members) out.getOrPut(member.name) { IntArray(6) }[5] += member.count
+        return out
+    }
+
+    /** 时段分布：按消息本地时间落在几点统计；时间戳缺失（0）的跳过，否则会全堆到 0 点。 */
+    private fun hourCounts(records: List<StatRecord>): IntArray {
+        val counts = IntArray(24)
+        val calendar = java.util.Calendar.getInstance()
+        for (record in records) {
+            if (record.time <= 0) continue
+            calendar.timeInMillis = record.time
+            counts[calendar.get(java.util.Calendar.HOUR_OF_DAY)]++
+        }
+        return counts
+    }
+
+    /** 百分比固定按中文区域格式化：别的系统语言会把小数点写成逗号，CSV 立刻错列。 */
+    private fun percentText(value: Double): String = String.format(java.util.Locale.CHINA, "%.1f%%", value)
+
+    private fun stampText(pattern: String): String =
+        java.text.SimpleDateFormat(pattern, java.util.Locale.CHINA).format(java.util.Date())
+
+    /**
+     * 文件名中间那段：群名查得到就用群名，查不到（私聊、群名没同步）用会话哈希。
+     * 不写 wxid：文件名会出现在下载列表、分享面板里，没必要把账号标识带出去。
+     */
+    private fun fileLabel(title: String?): String {
+        val safe = title?.let { safeFilePart(it) }.orEmpty()
+        if (safe.isNotEmpty()) return safe
+        // hashCode 可能是 Int.MIN_VALUE，abs 会溢出成负数，单独兜一下。
+        val hash = context.talker.hashCode()
+        return (if (hash == Int.MIN_VALUE) 0 else kotlin.math.abs(hash)).toString()
+    }
+
+    /** 文件名里的名字：去掉 / \ : * ? " < > | 和换行等控制符，最多 20 字，避免非法字符和超长文件名。 */
+    private fun safeFilePart(raw: String): String = raw
+        .filterNot { it in "/\\:*?\"<>|" || it.isISOControl() }
+        .trim()
+        .trimStart('.')
+        .take(20)
+        .trimEnd()
+
     private fun filterPill(label: String, action: () -> Unit): TextView = kit.pill(label, action)
 
     private fun pickRange() {
@@ -1287,3 +1683,16 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         }, LinearLayout.LayoutParams(-2, -2))
     }
 }
+
+/** CSV 单元格：逗号、引号、换行按 RFC 4180 包引号，内部引号写两遍。 */
+private fun csvCell(value: Any?): String {
+    val text = value?.toString().orEmpty()
+    return if (text.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {
+        "\"" + text.replace("\"", "\"\"") + "\""
+    } else {
+        text
+    }
+}
+
+/** 一行 CSV：每个单元格都过一遍 [csvCell]。 */
+private fun csvRow(vararg cells: Any?): String = cells.joinToString(",") { csvCell(it) }

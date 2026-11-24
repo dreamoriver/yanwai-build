@@ -69,10 +69,13 @@ class ReplyEntrySafetyTest {
     @Test fun `合并转发的菜单判定在提前返回之前`() {
         val menu = source("MessageMenu")
         val lookup = menu.indexOf("val forward = MessageSniffer.forwardForView(view)")
-        val earlyReturn = menu.indexOf("if (input == null && replyTarget == null && forward == null)")
+        // 2.9.243 起提前返回条件里还多了图片取字目标，这里按前缀匹配同一行，
+        // 顺序断言的意义不变：先取目标，再判早退，最后才挂菜单项。
+        val earlyReturn = menu.indexOf("if (input == null && replyTarget == null && forward == null")
         val addForward = menu.indexOf("val digest = add.invoke(menu, FORWARD_ITEM_ID")
         assertTrue("转发目标必须在提前返回前取得", lookup in 0 until earlyReturn)
         assertTrue("提前返回条件要包含转发目标", earlyReturn in 0 until addForward)
+        assertTrue("早退条件也要覆盖图片取字目标", menu.contains("forward == null && imageTarget == null"))
         assertEquals("转发目标只取一次", 2, menu.split("forwardForView(view)").size)
     }
 }

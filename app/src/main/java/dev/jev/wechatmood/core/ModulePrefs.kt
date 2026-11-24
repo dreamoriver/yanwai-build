@@ -96,8 +96,9 @@ object ModulePrefs {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         val app = context.applicationContext ?: context
         this.context = app
-        // 打开 SQLite 属于磁盘 IO，放到后台，别卡启动。
-        runCatching { java.util.concurrent.Executors.newSingleThreadExecutor().execute { AnalysisResultCache.init(app) } }
+        // init 只记一个 applicationContext，不碰磁盘：以前每次初始化都新开一个非 daemon 线程池
+        // 去调它，线程用完不回收，反而漏了线程。
+        runCatching { AnalysisResultCache.init(app) }
         UsageReporter.init(app)
         // Register before reading so a save racing with initial loading cannot be missed.
         runCatching { SettingsSync.register(app, ::receiveSettings) }

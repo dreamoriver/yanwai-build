@@ -5,6 +5,7 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import dev.jev.wechatmood.core.MoodLog
 import dev.jev.wechatmood.reply.ReplyContactKey
+import dev.jev.wechatmood.reply.PendingReply
 import dev.jev.wechatmood.reply.ReplyContext
 import dev.jev.wechatmood.reply.ReplyHistoryQuery
 import dev.jev.wechatmood.reply.ReplyHistoryReader
@@ -12,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
+import java.util.Collections
 import java.util.WeakHashMap
 import dev.jev.wechatmood.voice.VoiceSource
 import dev.jev.wechatmood.core.AnalysisCacheKey
@@ -21,7 +23,8 @@ import dev.jev.wechatmood.core.AnalysisAccountScopes
 
 /** Reuses WeChat's open WCDB handle. Never opens files, obtains keys, writes, or closes its database. */
 object ReplyDatabaseHistory {
-    private val known = WeakHashMap<Any, Boolean>()
+    /** 每个库是不是主库；弱键，库对象回收后一起消失。命中路径只碰这张表，不占全局监视器。 */
+    private val known: MutableMap<Any, Boolean> = Collections.synchronizedMap(WeakHashMap<Any, Boolean>())
     private val handles = ArrayList<WeakReference<Any>>()
     private val moduleQuery = ThreadLocal<Boolean>()
     private val accountWorker = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "yanwai-account") }
@@ -60,19 +63,29 @@ object ReplyDatabaseHistory {
         MoodLog.i("REPLY_HISTORY_HOOKS count=$hooks")
     }
 
-    @Synchronized private fun observe(db: Any) {
+    /**
+     * 这个 hook 挂在每一次 rawQuery 上，所以命中缓存的热路径不能抢锁：
+     * 旧的 @Synchronized 让微信每个查询都排同一个监视器，锁里还在做反射。
+     * 现在只有增删 handles 时才进 synchronized，反射与重试都在锁外。
+     */
+    private fun observe(db: Any) {
         if (moduleQuery.get() == true) return
-        val main = known.getOrPut(db) {
-            val path = db.javaClass.getMethod("getPath").invoke(db) as? String
-            path?.replace('\\', '/')?.substringAfterLast('/') == "EnMicroMsg.db"
-        }
+        val main = known[db] ?: isMainDatabase(db).also { known[db] = it }
         if (!main) return
-        val firstObservation = handles.none { it.get() === db }
-        handles.removeAll { it.get() == null || it.get() === db }
-        handles.add(0, WeakReference(db))
-        while (handles.size > 4) handles.removeAt(handles.lastIndex)
+        val firstObservation = synchronized(this) {
+            val seen = handles.none { it.get() === db }
+            handles.removeAll { it.get() == null || it.get() === db }
+            handles.add(0, WeakReference(db))
+            while (handles.size > 4) handles.removeAt(handles.lastIndex)
+            seen
+        }
         if (firstObservation) accountScopes.retryUnverified()
     }
+
+    /** 主库文件名判断；拿不到 path 时照旧往外抛，由 install 的 runCatching 记一次。 */
+    private fun isMainDatabase(db: Any): Boolean =
+        (db.javaClass.getMethod("getPath").invoke(db) as? String)
+            ?.replace('\\', '/')?.substringAfterLast('/') == "EnMicroMsg.db"
 
     private fun query(db: Any, sql: String, args: Array<String>): Cursor {
         check(db.javaClass.getMethod("isOpen").invoke(db) == true)
@@ -411,8 +424,13 @@ object ReplyDatabaseHistory {
         }
     }.getOrDefault(emptyList())
 
-    /** 每个库的列名缓存；库对象被回收时一起回收。 */
-    private val columnCache = java.util.WeakHashMap<Any, MutableMap<String, List<String>>>()
+    /**
+     * 每个库的列名缓存；库对象被回收时一起回收。
+     * 统计、昵称、待回各走各的 IO 线程，裸 WeakHashMap 并发写会在扩容时损坏结构；
+     * 外层同步只保护弱表本身，内层用 ConcurrentHashMap，读命中不进锁。
+     */
+    private val columnCache: MutableMap<Any, MutableMap<String, List<String>>> =
+        Collections.synchronizedMap(WeakHashMap<Any, MutableMap<String, List<String>>>())
 
     /** 最近一次昵称解析的分层命中数，给界面和诊断用。 */
     @Volatile var lastLayers: Map<String, Int> = emptyMap()
@@ -619,7 +637,10 @@ object ReplyDatabaseHistory {
                 query(db, "SELECT * FROM $table LIMIT 1", emptyArray()).use { it.columnNames.toList() }
             }.getOrDefault(emptyList())
         }
-        columnCache.getOrPut(db) { HashMap() }[table] = columns
+        // 探测失败时别写空表：写进去之后这个库的列名就永远是空的了。
+        if (columns.isNotEmpty()) {
+            columnCache.getOrPut(db) { java.util.concurrent.ConcurrentHashMap() }[table] = columns
+        }
         return columns
     }
 
@@ -769,9 +790,18 @@ object ReplyDatabaseHistory {
             val result = LinkedHashMap<String, Pair<String, String>>()
             val opened = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
 
-            fun scan(db: Any, account: String, keyColumns: IntArray, nameColumns: IntArray) {
+            fun scan(db: Any, account: String) {
+                val columns = tableColumns(db, "rcontact")
+                // 列名按 PRAGMA 实测结果拼：写死下标时，某个版本少了 nickname 就整条查询失败、
+                // 被外面的 runCatching 吞成空结果；现在缺名字列也还能只靠 username 反解。
+                val selected = listOf("username", "alias", "conRemark", "nickname").filter { it in columns }
+                if ("username" !in selected && "alias" !in selected) return
+                val keyNames = listOf("username", "alias").filter { it in selected }
+                val nameNames = listOf("conRemark", "nickname", "alias").filter { it in selected }
                 runCatching {
-                    query(db, "SELECT username, conRemark, nickname, alias FROM rcontact", arrayOf()).use { cursor ->
+                    query(db, "SELECT " + selected.joinToString(",") + " FROM rcontact", arrayOf()).use { cursor ->
+                        val keyColumns = keyNames.mapNotNull { cursor.getColumnIndex(it).takeIf { i -> i >= 0 } }
+                        val nameColumns = nameNames.mapNotNull { cursor.getColumnIndex(it).takeIf { i -> i >= 0 } }
                         while (result.size < keys.size && cursor.moveToNext()) {
                             // username 和 alias 都可能是消息里的 talker：对方改过微信号时，
                             // 同一个 rcontact 行有两个可用标识，只按 username 算会永远对不上。
@@ -803,7 +833,7 @@ object ReplyDatabaseHistory {
 
             for (db in opened) {
                 val account = runCatching { scope(db) }.getOrNull() ?: continue
-                scan(db, account, intArrayOf(0, 3), intArrayOf(1, 2, 3))
+                scan(db, account)
             }
             // 还认不出来的，用档案里存过的依据消息反推：拿到的 talker 算出的哈希必须一致才认。
             if (result.size < keys.size && evidence.isNotEmpty()) {
@@ -838,6 +868,214 @@ object ReplyDatabaseHistory {
             }
             MoodLog.i("RELATION_CONTACT_RESOLVE wanted=" + keys.size + " found=" + result.size)
             result
+        }
+
+    /**
+     * 给「别人的会话」找话题用：按 talker 从本机聊天库取最近 [limit] 条，返回能直接进提示词的上下文。
+     *
+     * 不复用 [load] 是因为它必须有一个页面锚点来核对「这个库是不是当前会话」；关系温度里
+     * 点开的是久未联系的人，他不在前台，没有锚点可核。这里改成用账号哈希筛库
+     * （[databasesForScope]）：同一个账号的库装着全部会话，筛对了就不会串到别人的聊天。
+     * 账号优先用页面核出来的那个，核不出来时只在「只开着一个库」这种没有歧义的情况下兜底。
+     *
+     * 返回 null 表示读不到（库没打开、账号核不出来、每个库都查询失败），调用方要如实区分；
+     * 消息为空的上下文才是「这个会话本机确实没有可读记录」。
+     */
+    /**
+     * 待回清单：对方最后说的、我还没接的会话。
+     *
+     * 直接写死 rconversation 的列名会在别的微信版本上整条路径失灵：表名大小写、
+     * conversationTime / unReadCount 都变过。所以先用 sqlite_master 找真实表名，
+     * 再用 PRAGMA 拿列名，缺列就退化，不去猜某一版的 schema。
+     *
+     * 返回 null = 一个库都没读通（要跟「真的没有待回」分开）；
+     * 空列表 = 读到了，但确实没有超过阈值的会话。
+     */
+    suspend fun pendingReplies(minHours: Int = 6, limit: Int = 40,
+        accountScope: String? = null): List<PendingReply>? = withContext(Dispatchers.IO) {
+        val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+        if (databases.isEmpty()) return@withContext null
+        // 没有账号哈希时只在「只开着一个库」这种无歧义情况兜底：切过账号后旧库还开着的话，
+        // 把两个号的会话混进一张待回清单，比读不到更糟。
+        val scoped = if (accountScope != null) {
+            databasesForScope(databases, accountScope)
+        } else {
+            val scopes = databases.mapNotNull { db -> runCatching { scope(db) }.getOrNull() }.distinct()
+            if (scopes.size == 1) databases else emptyList()
+        }
+        if (scoped.isEmpty()) return@withContext null
+        val active = coroutineContext
+        val now = System.currentTimeMillis()
+        val threshold = minHours.coerceIn(1, 24 * 30) * 3_600_000L
+        val found = LinkedHashMap<String, PendingReply>()
+        var read = false
+        // 分开记原因：整条路径失灵时，日志里要能看出是表名、列名还是 message 表的问题。
+        var noTable = 0
+        var noUsername = 0
+        var noMessage = 0
+        for (db in scoped) {
+            active.ensureActive()
+            val table = conversationTable(db)
+            if (table == null) { noTable++; continue }
+            val columns = columnsOf(db, table)
+            val usernameCol = columns["username"]
+            if (usernameCol == null) { noUsername++; continue }
+            val timeCol = columns["conversationtime"]
+            val unreadCol = columns["unreadcount"]
+            val sql = "SELECT " + usernameCol +
+                (timeCol?.let { ", " + it } ?: ", 0") +
+                (unreadCol?.let { ", " + it } ?: ", 0") +
+                " FROM " + table + (timeCol?.let { " ORDER BY " + it + " DESC" } ?: "") +
+                // 先取最近 400 个会话：只取 80 个会把「两周前对方问完就没动静」的会话整个漏掉，
+                // 而那恰恰是最该出现在清单里的。
+                " LIMIT 400"
+            val rows = runCatching {
+                query(db, sql, emptyArray()).use { cursor ->
+                    buildList {
+                        while (cursor.moveToNext()) {
+                            add(Triple(cursor.getString(0) ?: "", cursor.getLong(1), cursor.getInt(2)))
+                        }
+                    }
+                }
+            }.getOrNull() ?: continue
+            // message 表读不了时，「最后一条是谁发的」无从判断；继续下去会把整库当成「都回过了」。
+            if (!messageTableReadable(db)) { noMessage++; continue }
+            read = true
+            for ((talker, _, unread) in rows) {
+                active.ensureActive()
+                if (!usableConversation(talker)) continue
+                val last = lastMessage(db, talker) ?: continue
+                // 最后一条是我发的：已经回过，不进清单。
+                if (last.isSend != 0) continue
+                if (last.type in SYSTEM_TYPES) continue
+                val at = millis(last.time)
+                if (at <= 0 || now - at < threshold) continue
+                val previous = found[talker]
+                if (previous != null && previous.lastAt >= at) continue
+                found[talker] = PendingReply(talker, "", at, previewOf(last.type, last.content),
+                    talker.endsWith("@chatroom"), unread.coerceAtLeast(0))
+            }
+        }
+        if (noTable + noUsername + noMessage > 0) {
+            MoodLog.w("REPLY_INBOX_SCHEMA no_table=" + noTable + " no_username=" + noUsername +
+                " no_message=" + noMessage + " dbs=" + scoped.size)
+        }
+        if (!read) return@withContext null
+        val ordered = found.values.sortedBy { it.lastAt }.take(limit.coerceIn(1, 200))
+        MoodLog.i("REPLY_INBOX dbs=" + scoped.size + " pending=" + ordered.size + " minHours=" + minHours)
+        ordered
+    }
+
+    private class LastMessage(val isSend: Int, val time: Long, val type: Int, val content: String)
+
+    /** 每库探一次 message 表；失败说明 schema 不符，不能拿空结果当「没有待回」。 */
+    private fun messageTableReadable(db: Any): Boolean = runCatching {
+        query(db, "SELECT isSend, createTime, type, content FROM message LIMIT 1", emptyArray()).use { true }
+    }.getOrDefault(false)
+
+    /**
+     * 会话最后一条。createTime 有一部分是秒级来源，同一秒里有多行时单按它排序顺序不定，
+     * 会判错「最后一句是谁发的」；msgId 单调递增，补成稳定次级键。
+     */
+    private fun lastMessage(db: Any, talker: String): LastMessage? = runCatching {
+        query(db, "SELECT isSend, createTime, type, content FROM message WHERE talker = ? " +
+            "ORDER BY createTime DESC, msgId DESC LIMIT 1", arrayOf(talker)).use { cursor ->
+            if (!cursor.moveToFirst()) null
+            else LastMessage(cursor.getInt(0), cursor.getLong(1), cursor.getInt(2),
+                cursor.getString(3) ?: "")
+        }
+    }.getOrNull()
+
+    /** 会话表的真实名字：有的版本叫 rconversation，有的 rConversation，不一致就返回 null。 */
+    private fun conversationTable(db: Any): String? = runCatching {
+        query(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(name) = 'rconversation' LIMIT 1",
+            emptyArray()).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    }.getOrNull()
+
+    /** 小写列名到真实列名：不同版本大小写不一致，SQL 里必须用真实写法。 */
+    private fun columnsOf(db: Any, table: String): Map<String, String> = runCatching {
+        val out = LinkedHashMap<String, String>()
+        // table 来自 sqlite_master 查出的真实名字，不是外部输入，才敢拼进 PRAGMA。
+        query(db, "PRAGMA table_info(" + table + ")", emptyArray()).use { cursor ->
+            val index = cursor.getColumnIndex("name")
+            if (index >= 0) {
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(index) ?: continue
+                    out[name.lowercase()] = name
+                }
+            }
+        }
+        out
+    }.getOrDefault(emptyMap())
+
+    /** rconversation 的 conversationTime 有秒也有毫秒；createTime 同理，统一成毫秒再比。 */
+    private fun millis(raw: Long): Long = when {
+        raw <= 0 -> 0
+        raw < 1_000_000_000_000L -> raw * 1000
+        else -> raw
+    }
+
+    private fun usableConversation(talker: String): Boolean =
+        talker.isNotBlank() && !talker.startsWith("@") && !talker.startsWith("gh_") &&
+            talker.lowercase() !in RESERVED_TALKERS
+
+    /** 按码点截断：take(60) 数的是 UTF-16 单元，emoji 会被切成孤立代理字符，通知里显示成方块。 */
+    private fun String.takePoints(max: Int): String =
+        if (codePointCount(0, length) <= max) this else substring(0, offsetByCodePoints(0, max))
+
+    private fun previewOf(type: Int, content: String): String {
+        val text = content.trim().replace('\n', ' ').replace('\r', ' ')
+        return when (type) {
+            1 -> text.takePoints(60).ifBlank { "【空消息】" }
+            3 -> "【图片】"
+            34 -> "【语音】"
+            42 -> "【名片】"
+            43 -> "【视频】"
+            47 -> "【表情】"
+            48 -> "【位置】"
+            49 -> "【链接或卡片】"
+            50 -> "【通话】"
+            else -> text.takePoints(60).ifBlank { "【消息】" }
+        }
+    }
+
+    private val SYSTEM_TYPES = setOf(10000, 10002, 10003, 10004)
+
+    /** 微信自己发的系统会话，不该出现在「你还没回」的清单里。 */
+    private val RESERVED_TALKERS = setOf(
+        "filehelper", "fmessage", "medianote", "newsapp", "weixin", "floatbottle",
+        "notifymessage", "qqmail", "tmessage", "qmessage", "brandsessionholder",
+        "exmail_tool", "weibo", "facebook", "twitter", "linkedin", "qqsync", "qqfriend",
+        "voipapp", "voicevoipapp", "officialaccounts")
+
+    suspend fun recentContext(talker: String, limit: Int = 20, accountScope: String? = null): ReplyContext? =
+        withContext(Dispatchers.IO) {
+            if (talker.isBlank()) return@withContext null
+            val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+            if (databases.isEmpty()) return@withContext null
+            val account = accountScope?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+                ?: databases.mapNotNull { db -> runCatching { scope(db) }.getOrNull() }.distinct().singleOrNull()
+                ?: return@withContext null
+            val scoped = databasesForScope(databases, account)
+            val active = coroutineContext
+            val sources = scoped.map { db -> ReplyHistoryQuery { sql, args ->
+                active.ensureActive()
+                query(db, sql, args).use { cursor ->
+                    buildList {
+                        while (cursor.moveToNext()) {
+                            active.ensureActive()
+                            add(metadata(cursor))
+                        }
+                    }
+                }
+            } }
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            val read = ReplyHistoryReader.readRecent(talker, sources, limit) { active.ensureActive() }
+            // 只记条数与库数量，不记会话和正文；群聊还要把裸 wxid 换成昵称，和抽屉里一致。
+            MoodLog.i("REPLY_RECENT_RESULT requested=$limit dbs=${scoped.size} found=${read != null} " +
+                "count=${read?.messages?.size ?: -1} took=${android.os.SystemClock.elapsedRealtime() - startedAt}ms")
+            if (read == null) return@withContext null
+            nameGroupSpeakers(read, account)
         }
 
     suspend fun load(loaded: ReplyContext, limit: Int = ReplyContext.MAX_MESSAGES,
@@ -876,16 +1114,42 @@ object ReplyDatabaseHistory {
             "renamed=$renamed account=${scope != null}")
         // 口吻画像要用更长的历史，不能只看本次参考的十几条：单独取「我」最近的真实文字。
         val styleScope = scope ?: replyAccount(read)
-        named.copy(styleTexts = readStyleTexts(read.talker, databases, styleScope))
+        named.copy(styleTexts = readStyleTexts(read.talker, databases, styleScope).orEmpty())
     }
+
+    /**
+     * 口吻画像窗口用：只要「我」在这个聊天最近的真实文字，不加载整页上下文、不改任何游标。
+     *
+     * 返回值故意做成三态：null 表示这次读不到（没有已打开的库、账号核不出来、或每个库的
+     * 查询都失败了），空列表才是「真的没发过文字」。窗口要分别说「本机聊天库暂时读不到」
+     * 和「文字还不到 8 条」，把读失败说成 0 条等于给用户一个假结论。
+     *
+     * [anchor] 只用来核对账号（这些消息属于哪个库），不参与取文字：真正查的是 [talker]。
+     * 只开着一个库时它就是当前账号，不必再拿页面去核，所以 [anchor] 允许为空。
+     */
+    suspend fun ownStyleTexts(talker: String, anchor: ReplyContext? = null): List<String>? =
+        withContext(Dispatchers.IO) {
+            if (talker.isBlank()) return@withContext null
+            val databases = synchronized(this@ReplyDatabaseHistory) { handles.mapNotNull { it.get() } }
+            if (databases.isEmpty()) return@withContext null
+            // 页面锚点能核出账号就信它；核不出来时只在「唯一一个库」这种没有歧义的情况下兜底。
+            val resolved = anchor?.let { page -> runCatching { replyAccount(page) }.getOrNull() }
+                ?: databases.mapNotNull { db -> runCatching { scope(db) }.getOrNull() }
+                    .distinct().singleOrNull()
+                ?: return@withContext null
+            readStyleTexts(talker, databases, resolved)
+        }
 
     /**
      * 「我」最近的真实文字消息，只给口吻画像用。图片/表情/语音占位和卡片不算：
      * 拿它们统计会让画像以为我「一条只发四个字」，媒体多的聊天里口吻描述直接失真。
+     *
+     * 返回 null 表示每个库的查询都没跑通（库刚关掉、表结构对不上），空列表才是确实没有文字。
      */
-    private fun readStyleTexts(talker: String, databases: List<Any>, scope: String?): List<String> {
+    private fun readStyleTexts(talker: String, databases: List<Any>, scope: String?): List<String>? {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         val dbs = databasesForScope(databases, scope)
+        var read = false
         for (db in dbs) {
             val texts = runCatching {
                 // 按 createTime 倒序才能直接用 (talker, createTime) 索引；ORDER BY msgId 在
@@ -899,11 +1163,13 @@ object ReplyDatabaseHistory {
                     }
                 }
             }.getOrNull()
+            if (texts != null) read = true
             dev.jev.wechatmood.core.MoodLog.i("REPLY_STYLE_TEXTS rows=${texts?.size ?: -1} dbs=${dbs.size} " +
                 "took=${android.os.SystemClock.elapsedRealtime() - startedAt}ms")
             if (!texts.isNullOrEmpty()) return texts.asReversed()
         }
-        return emptyList()
+        // 一次都没跑通就是读不到，不能返回空列表让界面说「你没发过文字」。
+        return if (read) emptyList() else null
     }
 
     /**

@@ -118,6 +118,8 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
             }.onSuccess { content ->
                 finish(content, copy)
             }.onFailure { error ->
+                // 面板关掉时 scope 取消，runCatching 会把取消也当成失败：原样重抛，别往已关的窗上写状态。
+                if (error is kotlinx.coroutines.CancellationException) throw error
                 dev.jev.wechatmood.core.MoodLog.e("FORWARD_DIGEST_FAILED", error)
                 finish("摘要失败：" + (error.message ?: "未知错误").take(80), copy)
             }

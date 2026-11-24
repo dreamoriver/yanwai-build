@@ -25,7 +25,9 @@ object ForwardDigestProtocol {
         check(!root.has("error")) { root.optJSONObject("error")?.optString("message").orEmpty().ifBlank { "模型返回错误" } }
         val choice = root.getJSONArray("choices").getJSONObject(0)
         val finish = choice.optString("finish_reason")
-        check(finish == "stop") { "摘要被截断（finish_reason=$finish），请重试或换输出上限更高的模型" }
+        // 只有 length / content_filter 说明正文确实不完整：网关不回 finish_reason 时 optString
+        // 得到 ""，回 JSON null 时得到 "null"，按旧写法会被当成截断，让用户白重试一次。
+        check(finish !in ReplyProtocol.TRUNCATED_REASONS) { "摘要被截断（finish_reason=$finish），请重试或换输出上限更高的模型" }
         val content = choice.getJSONObject("message").getString("content").trim()
         check(content.isNotBlank()) { "模型没有返回正文，换一个非推理模型试试" }
         return content

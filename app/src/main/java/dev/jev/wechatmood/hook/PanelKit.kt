@@ -1,7 +1,9 @@
 package dev.jev.wechatmood.hook
 
+import android.app.Activity
 import android.app.Dialog
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Color
 import android.graphics.drawable.RippleDrawable
 import android.content.res.ColorStateList
@@ -12,6 +14,7 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import dev.jev.wechatmood.core.MoodLog
 
 /** 状态文字的语义色，避免把失败混进正文里。 */
 internal enum class PanelTone { NEUTRAL, SUCCESS, WARNING, ERROR }
@@ -24,6 +27,77 @@ internal enum class PanelTone { NEUTRAL, SUCCESS, WARNING, ERROR }
  * 统一从这里取，新加的窗口自然和旧界面一致。
  */
 internal class PanelKit(private val context: Context, val theme: ReplyTheme = ReplyTheme(context)) {
+
+    /** 承载窗口的 Activity：宿主可能给的是包装过的 Context，逐层解 ContextWrapper 才找得到。 */
+    private val activity: Activity? = findActivity(context)
+    /** 本 kit 打开着的弹窗，界面不可用时统一收掉，避免留下没人关的窗口。 */
+    private val dialogs = mutableSetOf<Dialog>()
+    /** 宿主销毁的回调只挂一次：一个 kit 通常只对应一个 Activity。 */
+    private var hooked = false
+
+    private fun findActivity(context: Context?): Activity? {
+        var current = context
+        while (current is ContextWrapper) {
+            if (current is Activity) return current
+            current = current.baseContext
+        }
+        return current as? Activity
+    }
+
+    /**
+     * 只有宿主 Activity 还活着才能 show：界面正在结束或已销毁时弹窗会抛 BadTokenException，
+     * 或者留下一个没人关的窗口。不可用时安全返回 false，不把异常抛给调用方。
+     */
+    private fun open(dialog: Dialog): Boolean {
+        val host = activity
+        if (host == null || host.isFinishing || host.isDestroyed) {
+            MoodLog.w("PANEL_SHOW_SKIPPED no_activity")
+            runCatching { dialog.dismiss() }
+            return false
+        }
+        hookHost()
+        dialogs += dialog
+        dialog.setOnDismissListener { dialogs.remove(dialog) }
+        return runCatching {
+            dialog.show()
+            true
+        }.onFailure {
+            dialogs -= dialog
+            MoodLog.w("PANEL_SHOW_FAILED " + it.javaClass.simpleName)
+        }.getOrDefault(false)
+    }
+
+    /** 界面销毁前统一收掉本 kit 打开的弹窗。 */
+    fun dismissAll() {
+        dialogs.toList().forEach { runCatching { it.dismiss() } }
+        dialogs.clear()
+    }
+
+    /**
+     * 把「Activity 销毁」接到 [dismissAll] 上，避免窗口还在、宿主已经走掉留下的 WindowLeaked。
+     *
+     * 选装饰视图的 attach 状态而不是 Application.ActivityLifecycleCallbacks：后者要在 Application
+     * 上注册，每个面板都得配对注销，漏一次就是全局表里的一份泄漏；这里的监听器挂在随 Activity
+     * 一起销毁的 decorView 上，不占全局注册表。已经在结束的宿主直接收掉现有弹窗。
+     * 各界面自己的 dismiss 只关它自己那一个窗口，不需要为这个改动调整调用方。
+     */
+    private fun hookHost() {
+        if (hooked) return
+        val host = activity ?: return
+        if (host.isFinishing || host.isDestroyed) {
+            dismissAll()
+            return
+        }
+        val decor = host.window?.decorView ?: return
+        hooked = true
+        decor.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = Unit
+            override fun onViewDetachedFromWindow(view: View) {
+                view.removeOnAttachStateChangeListener(this)
+                dismissAll()
+            }
+        })
+    }
 
     /** 面板根：surface 底 + 面板圆角 + 细边框，和附加面板同款。 */
     fun root(): LinearLayout = LinearLayout(context).apply {
@@ -179,7 +253,8 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
         dialog.setContentView(root)
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        dialog.show()
+        // 界面已经结束时不再弹窗：show() 会抛 BadTokenException，这里安全返回。
+        open(dialog)
     }
 
     /** 单行输入，替代宿主 AlertDialog 的 EditText：重命名群成员这类手填一次的操作。 */
@@ -209,7 +284,8 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(8) })
         dialog.setContentView(root)
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        dialog.show()
+        // 界面已经结束时不再弹窗：show() 会抛 BadTokenException，这里安全返回。
+        open(dialog)
     }
 
     /** 只读详情，替代 AlertDialog 的 setMessage。 */
@@ -226,7 +302,8 @@ internal class PanelKit(private val context: Context, val theme: ReplyTheme = Re
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = theme.dp(12) })
         dialog.setContentView(root)
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        dialog.show()
+        // 界面已经结束时不再弹窗：show() 会抛 BadTokenException，这里安全返回。
+        open(dialog)
     }
 }
 

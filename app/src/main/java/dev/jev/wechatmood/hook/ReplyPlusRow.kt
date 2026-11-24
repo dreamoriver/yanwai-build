@@ -52,12 +52,12 @@ internal class ReplyPlusRow(private val activity: Activity, private val open: ()
 
     /**
      * 全局布局监听在面板展开动画期间会连续触发，每次都要遍历最多 1500 个节点。
-     * 合并成最多 8 次/秒，并把最后一次布局留到延后执行，避免漏掉动画结束状态。
+     * 合并成最多 20 次/秒，并把最后一次布局留到延后执行，避免漏掉动画结束状态。
      */
     private fun requestRefresh() {
         val now = android.os.SystemClock.uptimeMillis()
         // 以前 120ms 一档，点开「＋」后第一帧经常被延后；48ms（约 20 次/秒）体感是立刻出现。
-        val wait = 24 - (now - lastRefreshAt)
+        val wait = 48 - (now - lastRefreshAt)
         if (wait <= 0) {
             lastRefreshAt = now
             refresh()
@@ -197,6 +197,14 @@ internal class ReplyPlusRow(private val activity: Activity, private val open: ()
             if (host.parent === target) target.removeView(host)
             target.addView(content, originalParams)
         } else if (target != null && host?.parent === target) {
+            // 宿主 childCount != 1（微信又往面板里加过东西）时不能只摘掉我们的外壳：
+            // content 还挂在 host 里，随 host 一起消失，面板会变成空白。
+            // 先按它原来的 LayoutParams 挂回 target，再从 host 里摘出来；顺序反了 addView 会抛「已有 parent」。
+            content?.takeIf { it.parent === host || it.parent == null }?.let { view ->
+                (view.parent as? ViewGroup)?.removeView(view)
+                runCatching { target.addView(view, originalParams) }
+                    .onFailure { MoodLog.w("REPLY_PLUS_RESTORE_FAILED " + it.javaClass.simpleName) }
+            }
             target.removeView(host)
         }
         panel = null; wrapper = null; original = null; originalParams = null; row = null

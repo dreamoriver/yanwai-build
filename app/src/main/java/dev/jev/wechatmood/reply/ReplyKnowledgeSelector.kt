@@ -29,7 +29,8 @@ object ReplyKnowledgeSelector {
         var budget = MAX_CHARS - head.length
         for ((text, _) in picked) {
             if (budget <= MIN_SECTION_CHARS) break
-            val chunk = text.take(minOf(text.length, budget))
+            // 按 Char 砍会把 emoji 切成孤立代理，所以走 takeSafely。
+            val chunk = text.takeSafely(minOf(text.length, budget))
             builder.append("\n\n").append(chunk)
             budget -= chunk.length
         }

@@ -166,23 +166,40 @@ object ReplyIdentityBridge {
     }
     suspend fun load(context: Context, key: ReplyContactKey): ReplyIdentitySetting = suspendCancellableCoroutine { continuation ->
         val app = context.applicationContext
-        queue(app).load(key) callback@{ result ->
-            if (!continuation.isActive) return@callback
-            result.fold({ value ->
-                ReplySnapshotCache.save(app, key.value, "id", value.encode())
-                continuation.resume(value)
-            }, { error ->
-                val cached = ReplySnapshotCache.load(app, key.value, "id")
-                    ?.let { runCatching { ReplyIdentitySetting.decode(it) }.getOrNull() }
-                // 读不到就按「未指定身份」继续，用户仍可在抽屉里手动选。
-                continuation.resume(cached ?: ReplyIdentitySetting())
-            })
+        fun fallback() {
+            if (!continuation.isActive) return
+            val cached = ReplySnapshotCache.load(app, key.value, "id")
+                ?.let { runCatching { ReplyIdentitySetting.decode(it) }.getOrNull() }
+            // 读不到就按「未指定身份」继续，用户仍可在抽屉里手动选。
+            continuation.resume(cached ?: ReplyIdentitySetting())
+        }
+        // queue() 里的 generation() 在设置还没连上时会抛（requireNotNull）。这是抽屉入口，
+        // 抛出去会一路带回宿主；设置未连上时不能崩宿主，退回缓存或空身份。
+        val queued = runCatching {
+            queue(app).load(key) callback@{ result ->
+                if (!continuation.isActive) return@callback
+                result.fold({ value ->
+                    ReplySnapshotCache.save(app, key.value, "id", value.encode())
+                    continuation.resume(value)
+                }, { fallback() })
+            }
+        }
+        if (queued.isFailure) {
+            MoodLog.w("REPLY_IDENTITY_LOAD_NO_SETTINGS " + queued.exceptionOrNull()?.javaClass?.simpleName)
+            fallback()
         }
     }
     fun save(context: Context, owner: ReplyIdentityOwner, value: ReplyIdentitySetting, verify: () -> String?, complete: (Boolean) -> Unit) {
-        queue(context.applicationContext).save(owner, value, verify) { saved ->
-            if (saved) ModulePrefs.backgroundChanged(owner.talker)
-            complete(saved)
+        // 同上：设置未连上时 queue() 会抛，这里是 UI 回调，必须按回调约定报失败而不是让微信进程崩溃。
+        val queued = runCatching {
+            queue(context.applicationContext).save(owner, value, verify) { saved ->
+                if (saved) ModulePrefs.backgroundChanged(owner.talker)
+                complete(saved)
+            }
+        }
+        if (queued.isFailure) {
+            MoodLog.w("REPLY_IDENTITY_SAVE_NO_SETTINGS " + queued.exceptionOrNull()?.javaClass?.simpleName)
+            complete(false)
         }
     }
 }

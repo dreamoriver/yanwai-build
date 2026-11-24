@@ -13,6 +13,7 @@ import dev.jev.wechatmood.reply.ContactRow
 import dev.jev.wechatmood.reply.DigestArchive
 import dev.jev.wechatmood.reply.EmotionDay
 import dev.jev.wechatmood.reply.ReplyContactKey
+import dev.jev.wechatmood.reply.SearchHit
 import dev.jev.wechatmood.reply.StoredDigest
 import org.json.JSONObject
 
@@ -76,10 +77,19 @@ object RelationFactBridge {
         return true
     }
 
+    /** 清空请求的落地线程：主线程只投递，不在界面上等跨进程调用。 */
+    private val clearWorker = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+        Thread(task, "yanwai-fact-clear").apply { isDaemon = true }
+    }
+
     /** 读档案前顺带看一眼有没有待执行的清空请求，节流避免每轮都走跨进程调用。 */
     fun runPendingClearThrottled(context: Context) {
-        // 跨进程调用会阻塞，主线程上不做。
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return
+        // 跨进程调用会阻塞：主线程投递到后台，别直接跳过——跳过就等于清空后还继续显示旧档案。
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            val app = context.applicationContext
+            runCatching { clearWorker.execute { runPendingClearThrottled(app) } }
+            return
+        }
         val now = System.currentTimeMillis()
         synchronized(this) {
             if (now - lastClearCheck < 60_000L) return
@@ -123,6 +133,21 @@ object RelationFactBridge {
         runCatching { store(context).contacts(limit) }
             .onFailure { MoodLog.w("RELATION_CONTACTS_FAILED " + it.javaClass.simpleName) }
             .getOrDefault(emptyList())
+
+    /**
+     * 跨会话搜档案事实与历史纪要。
+     *
+     * 返回 null 表示读失败：和「真的一条都没有」分开，界面不能把库异常说成空态。
+     * 读之前补一次待执行的清空请求，否则清空后仍会搜出已经删掉的条目。
+     */
+    fun searchOrNull(context: Context, query: String, limit: Int = 60): List<SearchHit>? = runCatching {
+        runPendingClearThrottled(context)
+        store(context).searchAll(query, limit)
+    }.onFailure { MoodLog.w("RELATION_SEARCH_FAILED " + it.javaClass.simpleName) }.getOrNull()
+
+    /** 搜索的便捷版本：读不到就返回空列表；需要区分「失败」时用 [searchOrNull]。 */
+    fun search(context: Context, query: String, limit: Int = 60): List<SearchHit> =
+        searchOrNull(context, query, limit).orEmpty()
 
     /** 记一次情绪判定：只存标签和次数，不存原文。 */
     fun recordEmotion(context: Context, session: String, label: String, speaker: String) = runCatching {
@@ -168,9 +193,14 @@ object RelationFactBridge {
         store(context).setStatusAll(key, factIds, RelationFact.STATUS_DONE)
     }.onFailure { MoodLog.w("RELATION_TODO_DONE_FAILED " + it.javaClass.simpleName) }.getOrDefault(0)
 
-    fun meta(context: Context, key: ReplyContactKey): RelationMeta {
-        return store(context).meta(key)
-    }
+    /**
+     * 档案水位；读失败返回全 0 的默认值而不是抛出去。
+     * 调用方在协程里裸调（自动整理那处），SQLite 异常漏出去会打崩微信进程；
+     * 全 0 的语义是「当作从没整理过」，下一轮会重试，比崩掉安全。
+     */
+    fun meta(context: Context, key: ReplyContactKey): RelationMeta = runCatching {
+        store(context).meta(key)
+    }.onFailure { MoodLog.w("RELATION_META_FAILED " + it.javaClass.simpleName) }.getOrDefault(RelationMeta())
 
     /**
      * 合并并写回；返回的是库里实际留下的有效条目，界面据此刷新。

@@ -60,5 +60,9 @@ object TopicProtocol {
         }
         check(topics.map { it.title }.distinct().size == topics.size && topics.map { it.opener }.distinct().size == topics.size)
         topics
-    } catch (_: Exception) { throw IllegalStateException("模型未返回完整的 5 个不同话题，请重试或换一个模型") }
+    } catch (error: Exception) {
+        // 「截断」要原样放行：ReplyHttpClient 靠它决定放宽 max_tokens 重试，吞掉就永远不重试。
+        if (error.message.orEmpty().contains("截断")) throw error
+        throw IllegalStateException("模型未返回完整的 5 个不同话题，请重试或换一个模型")
+    }
 }

@@ -8,7 +8,8 @@ class ReplyIdentityQueue(private val dispatch: (() -> Unit) -> Unit,
         complete(runCatching { read(key) })
     }
     fun save(owner: ReplyIdentityOwner, value: ReplyIdentitySetting, verify: () -> String?, complete: (Boolean) -> Unit) {
-        val key = owner.key ?: run { complete(false); return }
+        // 没有可写的键也要按其它分支的线程语义回调：统一走 dispatch，不在这里同步回调。
+        val key = owner.key ?: run { dispatch { complete(false) }; return }
         dispatch {
             val saved = runCatching {
                 check(owner.acceptsAccount(verify()))

@@ -27,6 +27,44 @@ object ReplyHistoryReader {
     private fun historySql(limit: Int) = "SELECT $FIELDS FROM message WHERE talker = ? AND msgId <= CAST(? AS INTEGER) AND $TYPE_LIST " +
         "AND isSend IN (0, 1) ORDER BY msgId DESC LIMIT ${limit + 1}"
 
+    /**
+     * 按 talker 取最近一段，不核对页面锚点。
+     *
+     * 「帮我回」抽屉每次都从一个看得见的聊天打开，能用锚点确认这个库、这个会话对得上；
+     * 关系温度里点的是别的会话，人根本不在前台，没有页面可比。调用方已经用当前账号
+     * 筛过库（同一个账号的库装着全部会话），这里只按 (talker, createTime) 索引取最近几条，
+     * 类型白名单和 [ReplyContext.collect] 仍然是同一套，所以媒体占位、引用解析、
+     * 上下文预算跟抽屉里完全一致。
+     *
+     * 多取一倍再交给 collect：空白内容和超额媒体占位会被它过滤，取多少条才不至于变少。
+     * 返回 null 表示每个库都没读通；返回空消息的上下文才是「这个会话确实没有记录」。
+     */
+    private fun recentSql(limit: Int) = "SELECT $FIELDS FROM message WHERE talker = ? AND $TYPE_LIST " +
+        "AND isSend IN (0, 1) ORDER BY createTime DESC LIMIT ${limit * 2}"
+
+    fun readRecent(talker: String, sources: List<ReplyHistoryQuery>, limit: Int = 20,
+        checkActive: () -> Unit = {}): ReplyContext? {
+        require(limit in 1..ReplyContext.MAX_MESSAGES)
+        if (sources.isEmpty()) return null
+        var read = false
+        for (source in sources) {
+            checkActive()
+            val records = try {
+                source.query(recentSql(limit), arrayOf(talker))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            read = true
+            val usable = records.filter { it.talker == talker && it.type in HISTORY_TYPES && it.isSend in 0..1 }
+            if (usable.isEmpty()) continue
+            checkActive()
+            return ReplyContext.collect(talker, usable.sortedWith(compareBy({ it.createdAt }, { it.messageId })), limit)
+        }
+        return if (read) ReplyContext(talker, emptyList()) else null
+    }
+
     fun read(loaded: ReplyContext, sources: List<ReplyHistoryQuery>, limit: Int = ReplyContext.MAX_MESSAGES,
         checkActive: () -> Unit = {}): ReplyContext {
         require(limit in 1..ReplyContext.MAX_MESSAGES)

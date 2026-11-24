@@ -43,6 +43,10 @@ class AnalysisQueue(
     }
 
     private suspend fun run(entry: Entry) {
+        // 回调（落盘、跨进程通知）在 permit 之外执行：它们可能等数据库或主线程，
+        // 占着 2 个并发额度会让后面本该并行的消息白等。
+        var completed: Mood? = null
+        var accepted = false
         try {
             slots.withPermit {
                 currentCoroutineContext().ensureActive()
@@ -53,16 +57,17 @@ class AnalysisQueue(
                 }
                 val mood = analyze(entry.input)
                 currentCoroutineContext().ensureActive()
-                val accepted = synchronized(lock) {
+                completed = mood
+                accepted = synchronized(lock) {
                     if (entries[entry.claim.key] !== entry || !canAnalyze(entry.input)) false
                     else MoodStore.complete(entry.claim, mood).also { if (it) failures.remove(entry.claim.key) }
                 }
-                if (accepted) runCatching { onComplete(mood) }
             }
+            if (accepted) completed?.let { mood -> runCatching { onComplete(mood) } }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val accepted = synchronized(lock) {
+            val recorded = synchronized(lock) {
                 if (entries[entry.claim.key] !== entry || !entry.job.isActive ||
                     !canAnalyze(entry.input)) false
                 else {
@@ -70,7 +75,7 @@ class AnalysisQueue(
                     true
                 }
             }
-            if (accepted) runCatching { onFailure(e) }
+            if (recorded) runCatching { onFailure(e) }
         } finally {
             cleanup(entry)
         }

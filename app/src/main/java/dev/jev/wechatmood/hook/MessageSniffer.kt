@@ -40,7 +40,8 @@ object MessageSniffer {
     private var ui: HostUi? = null
     private var displayedTalker: String? = null
     private data class PendingCard(val observer: ViewTreeObserver, val listener: ViewTreeObserver.OnPreDrawListener)
-    private val pendingCards = mutableMapOf<View, PendingCard>()
+    /** 这张表会被 hook 回调和主线程同时改，和 bindings 一样同步起来，遍历时不会再撞 ConcurrentModificationException。 */
+    private val pendingCards = Collections.synchronizedMap(mutableMapOf<View, PendingCard>())
     private var idleTicks = 0
     private data class RecordsSnapshot(val signature: Long, val rows: List<Pair<View, BoundMessage>>)
     /** 静止画面下 records() 的产物完全一致，签名相同就直接复用，省掉每 tick 的反射与上下文重建。 */
@@ -152,15 +153,16 @@ object MessageSniffer {
     private val fieldCache = java.util.concurrent.ConcurrentHashMap<Class<*>, List<Field>>()
 
     private fun cancelPendingCard(row: View) {
-        pendingCards.remove(row)?.let {
-            if (it.observer.isAlive) it.observer.removeOnPreDrawListener(it.listener)
-            // Attachment can merge a detached row's observer into its window's observer.
-            if (row.viewTreeObserver.isAlive) row.viewTreeObserver.removeOnPreDrawListener(it.listener)
-        }
+        // 取和删放在同一个锁里：两步做的话，另一个线程可能在中间又把同一个监听器塞回来。
+        val pending = synchronized(pendingCards) { pendingCards.remove(row) } ?: return
+        if (pending.observer.isAlive) pending.observer.removeOnPreDrawListener(pending.listener)
+        // Attachment can merge a detached row's observer into its window's observer.
+        if (row.viewTreeObserver.isAlive) row.viewTreeObserver.removeOnPreDrawListener(pending.listener)
     }
 
     private fun clearPendingCards() {
-        pendingCards.keys.toList().forEach(::cancelPendingCard)
+        val rows = synchronized(pendingCards) { pendingCards.keys.toList() }
+        rows.forEach(::cancelPendingCard)
         displayedTalker = null
     }
 
@@ -193,10 +195,12 @@ object MessageSniffer {
                 return !runCatching { BubbleDecorator.show(row, current) }.getOrDefault(false)
             }
         }
-        pendingCards[row] = PendingCard(observer, listener)
+        synchronized(pendingCards) { pendingCards[row] = PendingCard(observer, listener) }
         observer.addOnPreDrawListener(listener)
         // Detached prefetched rows may never draw. Retain at most a small recycler-sized set.
-        pendingCards.keys.filter { !it.isAttachedToWindow }.drop(32).toList().forEach(::cancelPendingCard)
+        synchronized(pendingCards) {
+            pendingCards.keys.filter { !it.isAttachedToWindow }.drop(32).toList()
+        }.forEach(::cancelPendingCard)
     }
     private fun fields(type: Class<*>): List<Field> = fieldCache.getOrPut(type) {
         generateSequence(type) { it.superclass }.takeWhile { it != Any::class.java }
@@ -277,6 +281,21 @@ object MessageSniffer {
             .filter { it.talker == talker && it.isReplyTarget(allowMedia = true) }.distinct().singleOrNull()
     }
 
+    /**
+     * 长按的图片/表情：取字要用，自己发出去的截图也一样要能取，所以不按接收方向过滤，
+     * 也不套 [MessageMetadata.isReplyTarget]（那个只认对方发来的消息）。
+     */
+    fun imageTargetForView(view: View): MessageMetadata? {
+        val activity = active.get() ?: return null
+        val scope = chatNodes(activity.window.decorView)
+        val current = records(scope, useCache = false)
+        val talker = conversation(activity, scope, current) ?: return null
+        val ancestors = generateSequence(view) { it.parent as? View }.toSet()
+        return current.filter { it.first in ancestors }.mapNotNull { it.second.metadata }
+            .filter { it.talker == talker && it.messageId > 0 && (it.type == 3 || it.type == 47) }
+            .distinct().singleOrNull()
+    }
+
     /** 长按的合并转发消息：自己发出去的也要能取，所以不按接收方向过滤。 */
     fun forwardForView(view: View): MessageMetadata? {
         val activity = active.get() ?: return null
@@ -309,8 +328,24 @@ object MessageSniffer {
         val target = replyTargetForView(view) ?: return false
         if (target != expected) return false
         // 图片/表情从已经渲染的气泡取图，绕开微信的 .dat 加密文件。
-        val image = if (target.type == 3 || target.type == 47) MediaImage.capture(view) else null
+        // 取图只能在主线程、气泡还挂着时做；缩放和 JPEG 压缩放后台，压完再回主线程开面板。
+        val capture = if (target.type == 3 || target.type == 47) MediaImage.capture(view) else null
+        if (capture != null) {
+            // 长按菜单要求同步返回「有没有接手」，所以先返回 true，图片在后台压好后再打开面板。
+            deliverReplyWithImage(target.messageId, capture)
+            return true
+        }
+        // 文字/语音没有附图，直接在主线程打开回复面板。
+        val image: String? = null
         return ui?.suggestReply(target.messageId, image) == true
+    }
+
+    /** 主线程已经把图取到手：编码挪到后台，编码完再回主线程把图片交给回复面板。 */
+    private fun deliverReplyWithImage(messageId: Long, capture: MediaImage.Capture) {
+        Thread({
+            val image = capture.encode()
+            main.post { ui?.suggestReply(messageId, image) }
+        }, "yanwai-reply-image").start()
     }
 
     fun currentReplyTalker(): String? {
@@ -424,9 +459,10 @@ object MessageSniffer {
     suspend fun captureMediaImage(messageId: Long): String? = withContext(Dispatchers.Main.immediate) {
         val activity = active.get() ?: return@withContext null
         val scope = chatNodes(activity.window.decorView)
+        // 取图必须在主线程（要碰 View）；编码放到后台，Capture 里自己新建的位图编码完就回收。
         records(scope).firstOrNull { it.second.metadata?.messageId == messageId }?.first
-            ?.let(MediaImage::captureBitmap)
-    }?.let { bitmap -> withContext(Dispatchers.Default) { MediaImage.encode(bitmap) } }
+            ?.let(MediaImage::capture)
+    }?.let { taken -> withContext(Dispatchers.Default) { taken.encode() } }
 
     /** Cheap live boundary check, without re-reading 100 messages on every scan. */
     fun replyBoundary(): Long? {

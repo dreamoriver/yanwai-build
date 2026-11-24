@@ -98,6 +98,11 @@ internal class FeaturePanel(
             row(if (talker.endsWith("@chatroom")) "群聊统计" else "聊天统计",
                 "消息量、活跃成员与时段", onStats)
         }
+        // 跨会话的两件事放在第一层：它们不属于「当前这个人」，混进关系二级会让人以为只搜这个聊天。
+        row("待回消息", "对方最后一条还没接的会话，按最久没回排", {
+            ConversationInboxUi(activity, null).show()
+        })
+        row("话术片段", "常用表态存本机，点一下就复制", { SnippetUi(activity).show() })
         if (factsAvailable) {
             val badge = badgeView()
             relationBadge = badge
@@ -147,6 +152,7 @@ internal class FeaturePanel(
         row("关系温度", "久未联系、悬着的约定与本周要处理", onTemperature)
         row("历史纪要", "存下来的 AI 转述，可回看或转成待办", onDigests)
         row("关系时间线", "这个聊天的档案、纪要与情绪按时间排", { RelationTimelineUi(activity, current).show() })
+        row("说话习惯", "模型参考的口吻画像，可看统计和原话示例", { StyleProfileUi(activity, current).show() })
         body.addView(card, LinearLayout.LayoutParams(-1, -2))
 
         body.addView(kit.sectionLabel("全部会话"))
@@ -161,6 +167,7 @@ internal class FeaturePanel(
             firstGlobal = false
         }
         globalRow("关系总览", "所有会话的待办按到期时间排", { RelationOverviewUi(activity).show() })
+        globalRow("搜档案与纪要", "跨所有会话找一句话，点一下复制", { GlobalSearchUi(activity).show() })
         body.addView(global, LinearLayout.LayoutParams(-1, -2))
 
         body.addView(theme.action("关闭", primary = true) { dialog.dismiss() },

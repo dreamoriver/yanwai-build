@@ -8,6 +8,8 @@ import dev.jev.wechatmood.core.Mood
 object AnalysisCardContent {
     data class Line(val text: String, val header: Boolean = false, val emotion: Boolean = false,
         val label: String? = null, val readingDecoration: Boolean = false)
+    /** 桥注入的 "yanwai xxx" 头行；绘制路径每行都要判一次，正则只编译这一份。 */
+    private val BRIDGE_LINE = Regex("yanwai \\S+")
     fun lines(mood: Mood, display: CardDisplaySettings): List<Line> {
         val sections = listOf("意图解析：" to display.intent, "可能在意：" to display.concern, "情绪倾向：" to display.tone)
         val original = mood.detail.lines().map(String::trim).filter(String::isNotEmpty)
@@ -21,7 +23,7 @@ object AnalysisCardContent {
             if (transcript) return@mapNotNull Line(line)
             val section = sections.firstOrNull { line.startsWith(it.first) }
             if (section?.second == false || line.startsWith("情绪：") && noVisibleEmotions) return@mapNotNull null
-            Line(line, line.matches(Regex("yanwai \\S+")), line.startsWith("情绪："),
+            Line(line, line.matches(BRIDGE_LINE), line.startsWith("情绪："),
                 section?.first ?: listOf("智能分析", "意图：", "事件：", "建议：").firstOrNull(line::startsWith),
                 hasReading && (line == "智能分析" || line == "仅供参考"))
         }

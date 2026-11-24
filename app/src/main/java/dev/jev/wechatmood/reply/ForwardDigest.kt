@@ -33,6 +33,8 @@ object ForwardDigest {
     private const val FILLER_MIN_LENGTH = 120
     private const val FILLER_MAX_PERIOD = 8
     private const val FILLER_PREFIX_MIN = 32
+    /** 重复填充检测最多看这么多个字符：正常消息远小于它，超长转发也不必全量扫。 */
+    private const val FILLER_SCAN_CHARS = 4096
     /** 任意 2 到 8 字符的片段连续重复 6 次以上，当作填充。 */
     private val REPEAT = Regex("(.{2,8}?)\\1{5,}", setOf(RegexOption.DOT_MATCHES_ALL))
     private val PLACEHOLDER = Regex("^\\[[^]]{1,6}]$")
@@ -345,11 +347,17 @@ object ForwardDigest {
      */
     internal fun String.stripFiller(): String {
         if (length < FILLER_PREFIX_MIN) return this
-        return REPEAT.replace(this) { match ->
-            val unit = match.groupValues[1]
-            // 单字重复是语气（哈哈哈），不当填充。
-            if (unit.toSet().size <= 1) match.value else ""
-        }
+        // 带反向引用的正则在长文本上是平方级的，一条 512KB 的转发能卡住界面。
+        // 填充总在开头一小段出现，所以只拿前 FILLER_SCAN_CHARS 个字符去匹配，后面的原文原样接回去。
+        if (length <= FILLER_SCAN_CHARS) return replaceFiller()
+        val cut = if (Character.isHighSurrogate(this[FILLER_SCAN_CHARS - 1])) FILLER_SCAN_CHARS - 1 else FILLER_SCAN_CHARS
+        return substring(0, cut).replaceFiller() + substring(cut)
+    }
+
+    private fun String.replaceFiller(): String = REPEAT.replace(this) { match ->
+        val unit = match.groupValues[1]
+        // 单字重复是语气（哈哈哈），不当填充。
+        if (unit.toSet().size <= 1) match.value else ""
     }
 
     /** 行首整段是固定周期重复（如 nullnull…）时剥掉，保留后面的正文。 */

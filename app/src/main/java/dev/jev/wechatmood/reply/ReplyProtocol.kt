@@ -142,6 +142,9 @@ object ReplyProtocol {
     /** 低于这个自评分的档案只在界面里提示，不参与生成。 */
     private const val LOW_CONFIDENCE = 0.4
 
+    /** 只有这两种 finish_reason 说明正文确实不完整；缺省或其它值都按正常结束处理。 */
+    internal val TRUNCATED_REASONS = setOf("length", "content_filter")
+
     fun formatTime(time: Long): String = if (time <= 0) "未知" else
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss XXX").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(time))
 
@@ -152,7 +155,9 @@ object ReplyProtocol {
         val finish = choice.optString("finish_reason")
         // 被截断的响应永远不是完整的答案，必须先拒绝，再做宽松的 JSON 提取：
         // 模型报 length 时正文片段也可能恰好能解析，那种“看起来完整”的结果不能采信。
-        check(finish == "stop") { "回复被截断（finish_reason=$finish），请重试或换输出上限更高的模型" }
+        // 但只有 length / content_filter 才算截断：不少网关根本不回 finish_reason（optString 得到 ""），
+        // 或者回一个 JSON null（得到 "null"），按旧写法会把它们当截断，白翻倍重试一次。
+        check(finish !in TRUNCATED_REASONS) { "回复被截断（finish_reason=$finish），请重试或换输出上限更高的模型" }
         val message = choice.getJSONObject("message")
         check(message.isNull("refusal") || message.optString("refusal").isBlank())
         val raw = message.getString("content").trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()

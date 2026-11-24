@@ -12,13 +12,12 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Response
+import okhttp3.ResponseBody
 import java.io.IOException
 import kotlin.coroutines.resumeWithException
 
 /** Shared by the Android app and opt-in live verification. Never reports raw service bodies. */
-class JevHttpClient(private val client: Call.Factory = HttpClients.shared.newBuilder()
-    .connectTimeout(10, TimeUnit.SECONDS).writeTimeout(20, TimeUnit.SECONDS)
-    .readTimeout(25, TimeUnit.SECONDS).callTimeout(30, TimeUnit.SECONDS).build()) {
+class JevHttpClient(private val client: Call.Factory = sharedClient) {
 
     suspend fun exchangeSuspending(payload: JSONObject, settings: ApiSettings): String = suspendCancellableCoroutine { continuation ->
         val call = client.newCall(request(payload, settings))
@@ -52,7 +51,8 @@ class JevHttpClient(private val client: Call.Factory = HttpClients.shared.newBui
     }
 
     private fun readResponse(response: Response): String {
-        val body = response.body?.string().orEmpty()
+        // 网关的错误页可能几 MB：按上限读，超限直接当错误，别让 OOM 落在微信进程里。
+        val body = response.body?.let { readWhole(it) }.orEmpty()
         val json = runCatching { JSONObject(body) }.getOrNull()
         if (!response.isSuccessful || json?.has("error") == true) {
             val error = json?.optJSONObject("error")
@@ -70,7 +70,9 @@ class JevHttpClient(private val client: Call.Factory = HttpClients.shared.newBui
             }
             throw IllegalStateException("$reason（HTTP ${response.code}）")
         }
-        val usage = json?.optJSONObject("usage")
+        // 200 但不是 JSON：多半地址填成了网页或网关的错误页，不能当成功交给解析。
+        if (json == null) throw IllegalStateException("接口返回的不是 Jev JSON，请检查地址")
+        val usage = json.optJSONObject("usage")
         // JEV 只做情绪与意图分析，用量统一记到「分析」。
         dev.jev.wechatmood.core.UsageReporter.report(
             usage?.optLong("prompt_tokens", 0L) ?: 0L,
@@ -79,5 +81,26 @@ class JevHttpClient(private val client: Call.Factory = HttpClients.shared.newBui
         return body
     }
 
+    /** 多读 1 字节探边界：超了说明是异常响应（错误页、超大 JSON），不去猜里面是什么。 */
+    private fun readWhole(body: ResponseBody): String {
+        val source = body.source()
+        source.request(MAX_BODY_BYTES + 1)
+        check(source.buffer.size <= MAX_BODY_BYTES) { "接口返回内容过长（超过 1 MB），请检查接口地址与模型" }
+        return source.readUtf8()
+    }
+
     private fun networkFailure() = IllegalStateException("连接超时或网络不可用，请稍后重试")
+
+    companion object {
+        /** 单次响应上限，与回复链路的读法保持一致。 */
+        private const val MAX_BODY_BYTES = 1024 * 1024L
+
+        /** 共用一份客户端：检测按钮反复点，不应该每次再建一套连接池和线程池。 */
+        private val sharedClient: OkHttpClient = HttpClients.shared.newBuilder()
+            .connectTimeout(10, TimeUnit.SECONDS).writeTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS).callTimeout(30, TimeUnit.SECONDS).build()
+
+        /** 进程内复用实例；构造函数仍可注入别的 Call.Factory 供测试使用。 */
+        val shared = JevHttpClient(sharedClient)
+    }
 }

@@ -98,6 +98,30 @@ data class RelationFact(
                 occurredAt = occurredAt,
                 sourceChatMessageId = json.optLong("source_chat_message_id", 0).coerceAtLeast(0))
         }
+
+        /**
+         * 类型的中文名。
+         *
+         * 库里（[KINDS]）存的就是中文，但旧数据、剪贴板导入和模型返回都出现过英文键或空值；
+         * 与其让每个界面各自兜底、把空白当类型显示，不如在这里一次收口。
+         * 认不出的中文类型原样返回：以后新加类型不必改这里也能显示。
+         */
+        fun kindLabel(kind: String): String {
+            val raw = kind.trim()
+            return when (raw.lowercase()) {
+                "event", "other" -> "事件"
+                "timed", "appointment", "plan", "promise" -> "约定"
+                "preference", "like", "hobby" -> "喜好"
+                "date", "important_date", "birthday", "anniversary" -> "重要日期"
+                "work", "job" -> "工作"
+                "city", "location" -> "城市"
+                "family", "relation" -> "家人"
+                "diet", "avoid", "taboo" -> "忌口"
+                "pet" -> "宠物"
+                "nickname", "address" -> "称呼"
+                else -> raw.ifEmpty { "事件" }
+            }
+        }
     }
 }
 
@@ -243,6 +267,30 @@ data class ChatBadge(val due: Int, val future: Int, val open: Int = due + future
     val timed: Int = due + future)
 
 /**
+ * 全局搜索的一条命中。
+ *
+ * 故意不带 contactKey：搜索结果只需要「这是谁的什么事」，点一下复制正文，不涉及写回，
+ * 也就不该把内部哈希键带到界面上。
+ * [kind] 对事实是中文类型名（见 [RelationFact.kindLabel]），对纪要固定是 [DIGEST_KIND]。
+ */
+data class SearchHit(
+    val contactName: String,
+    val talker: String,
+    val text: String,
+    val kind: String,
+    /** 事实是 updated_at，纪要是 created_at：两边时间口径不同，界面上都只当「什么时候的事」。 */
+    val at: Long,
+) {
+    companion object {
+        /** 一次最多回这么多条：再多也没人往下翻，还会把面板拖慢。 */
+        const val MAX = 200
+
+        /** 纪要表没有 kind 列，用这个标记和事实区分，界面据此显示「纪要」。 */
+        const val DIGEST_KIND = "纪要"
+    }
+}
+
+/**
  * 事实存储：一条事实一行，[payload] 存完整对象，其余列只用于查询与排序。
  *
  * 不存原始聊天，只存提炼后的短句；同一件事合并成一条，时间型条目时间变了就把旧的标成 superseded。
@@ -289,19 +337,41 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
         val existing = runCatching {
             db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'relation_fact_items'")
         }.getOrNull()
+        // 上次迁移在 RENAME 之后被打断时，数据只剩在这张孤儿表里：下面重建出空表就等于档案静默丢失。
+        val orphan = legacyExists()
         if (existing == null) {
-            db.execute(CREATE_ITEMS)
+            transaction {
+                db.execute(CREATE_ITEMS)
+                if (orphan) moveLegacyItems(replace = true)
+            }
             return
         }
         val normalized = existing.replace(" ", "").lowercase()
-        if ("primarykey(contact_key,fact_id)" in normalized) return
+        if ("primarykey(contact_key,fact_id)" in normalized) {
+            // 新表已经建好、但数据还留在 legacy 里：补搬一次，已有的行优先，只补缺的。
+            if (orphan) transaction { moveLegacyItems(replace = false) }
+            return
+        }
         MoodLog.i("RELATION_FACT_ITEMS_MIGRATE legacy_primary=fact_id")
-        db.execute("ALTER TABLE relation_fact_items RENAME TO relation_fact_items_legacy")
-        db.execute(CREATE_ITEMS)
-        db.execute("INSERT OR REPLACE INTO relation_fact_items(fact_id, contact_key, status, kind, occurred_at, updated_at, payload) " +
+        // 四句必须同事务：中途失败会留下孤儿 legacy 表，或重建完的空表把旧条目盖掉。
+        transaction {
+            db.execute("ALTER TABLE relation_fact_items RENAME TO relation_fact_items_legacy")
+            db.execute(CREATE_ITEMS)
+            moveLegacyItems(replace = true)
+        }
+        MoodLog.i("RELATION_FACT_ITEMS_MIGRATED")
+    }
+
+    private fun legacyExists(): Boolean = runCatching {
+        db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'relation_fact_items_legacy'") != null
+    }.getOrDefault(false)
+
+    /** 把 legacy 表搬进新结构再删表；调用方负责套事务。[replace] 为 false 时已写进新表的行优先。 */
+    private fun moveLegacyItems(replace: Boolean) {
+        db.execute("INSERT OR " + (if (replace) "REPLACE" else "IGNORE") + " INTO relation_fact_items(fact_id, contact_key, status, kind, occurred_at, updated_at, payload) " +
             "SELECT fact_id, contact_key, status, kind, occurred_at, updated_at, payload FROM relation_fact_items_legacy")
         db.execute("DROP TABLE relation_fact_items_legacy")
-        MoodLog.i("RELATION_FACT_ITEMS_MIGRATED")
+        MoodLog.i("RELATION_FACT_ITEMS_LEGACY_RECOVERED replace=$replace")
     }
 
     /** 写回整批条目：删旧、插新、更新进度在同一个事务里，进程中途被杀不会留下空档案。 */
@@ -442,6 +512,67 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
             }
 
     /**
+     * 跨会话搜档案事实与历史纪要（全局搜索的唯一入口）。
+     *
+     * 两个表结构不一样：事实有 status，纪要没有；排序键也不一样（updated_at / created_at）。
+     * 所以分两条查询各取前 limit 条，再在内存里按时间合并——比拼 UNION 好读，
+     * 也不会因为两边列数、列义对不齐而写错。
+     *
+     * payload 是 JSON 文本，整段 LIKE 就能命中里面的事实句子和纪要正文，
+     * 不必为了搜索再拆一张全文表；名字和 talker 只有目录表有，
+     * 用 LEFT JOIN 兜住「有档案但从没记过名字」的旧数据，那种行的名字是空串，由界面显示「未知会话」。
+     */
+    fun searchAll(query: String, limit: Int = 60): List<SearchHit> {
+        val keyword = query.trim()
+        // 空串一次库都不查：LIKE '%%' 会把整库拉出来，空输入框也没有搜索语义。
+        if (keyword.isEmpty()) return emptyList()
+        val capped = limit.coerceIn(1, SearchHit.MAX)
+        // % 和 _ 是 LIKE 的通配符，用户搜「100%」时不该命中全部条目：先转义成普通字符。
+        // 关键字一律走 ? 绑定，不拼进 SQL 文本，避免引号把语句截断。
+        val escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val pattern = "%" + escaped + "%"
+        val params = listOf(pattern, capped.toString())
+        val facts = db.queryRows(
+            "SELECT IFNULL(d.name, '') || char(31) || IFNULL(d.talker, '') || char(31) || i.payload " +
+                "FROM relation_fact_items i LEFT JOIN relation_contact_dir d ON d.contact_key = i.contact_key " +
+                "WHERE i.status = 'active' AND i.payload LIKE ? ESCAPE '\\' " +
+                "ORDER BY i.updated_at DESC LIMIT ?",
+            params).mapNotNull { decodeHit(it, keyword, digest = false) }
+        val digests = db.queryRows(
+            "SELECT IFNULL(d.name, '') || char(31) || IFNULL(d.talker, '') || char(31) || g.payload " +
+                "FROM group_digests g LEFT JOIN relation_contact_dir d ON d.contact_key = g.contact_key " +
+                "WHERE g.payload LIKE ? ESCAPE '\\' " +
+                "ORDER BY g.created_at DESC, g.rowid DESC LIMIT ?",
+            params).mapNotNull { decodeHit(it, keyword, digest = true) }
+        // 两边各自有序，合并后再整体排一次，保证「最近整理过的」永远在最上面。
+        return (facts + digests).sortedByDescending { it.at }.take(capped)
+    }
+
+    /**
+     * 一行查询结果拆成 [SearchHit]。
+     *
+     * 分隔符用 char(31)（单元分隔符）：人名里基本不可能出现，而 payload 放在最后一列、
+     * 只按前两个分隔符切，于是即使 JSON 正文里真带了分隔符也不会把名字切坏。
+     * 解析不出正文的行直接跳过，脏数据不该让整次搜索失败。
+     *
+     * 这里还要再筛一次正文：LIKE 打的是整段 JSON，"kind"、"text"、"auto" 这些字段名和取值
+     * 同样会命中，不筛就会出现「搜了词却看不到词」的行；纪要的时段标签（range）也算正文的一部分。
+     * 代价是某个词只出现在字段名上时结果可能少于 limit，这比给出驴唇不对马嘴的条目好。
+     */
+    private fun decodeHit(row: String, keyword: String, digest: Boolean): SearchHit? {
+        val parts = row.split(SEPARATOR, limit = 3)
+        if (parts.size < 3) return null
+        val payload = runCatching { JSONObject(parts[2]) }.getOrNull() ?: return null
+        val text = payload.optString("text").trim()
+        if (text.isEmpty()) return null
+        if (!text.contains(keyword, ignoreCase = true) &&
+            !payload.optString("range").contains(keyword, ignoreCase = true)) return null
+        val at = if (digest) payload.optLong("created_at", 0) else payload.optLong("updated_at", 0)
+        val kind = if (digest) SearchHit.DIGEST_KIND else payload.optString("kind").trim()
+        return SearchHit(parts[0], parts[1], text, kind, at)
+    }
+
+    /**
      * 记一次情绪判定。
      *
      * Android 9 的 SQLite 不支持 upsert，所以先 INSERT OR IGNORE 再 UPDATE。
@@ -529,13 +660,19 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
 
     fun delete(key: ReplyContactKey, factId: String): Boolean {
         if (!factId.matches(RelationFact.ID_PATTERN)) return false
-        val exists = db.query("SELECT 1 FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?",
-            listOf(factId, key.value)) != null
-        if (!exists) return false
-        db.execute("DELETE FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?", listOf(factId, key.value))
-        db.execute("INSERT OR REPLACE INTO relation_fact_tombstones(contact_key, fact_id, deleted_at) VALUES(?, ?, ?)",
-            listOf(key.value, factId, now().toString()))
-        return true
+        // 和后台整理共用一把锁：它在 replace 里先查后写，本函数没有锁时会把已删的行按旧 payload 写回来。
+        return synchronized(writeLock) {
+            val exists = db.query("SELECT 1 FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?",
+                listOf(factId, key.value)) != null
+            if (!exists) return@synchronized false
+            // 删行和记墓碑同一个事务：只成一半会让这条下次抽取又冒出来。
+            transaction {
+                db.execute("DELETE FROM relation_fact_items WHERE fact_id = ? AND contact_key = ?", listOf(factId, key.value))
+                db.execute("INSERT OR REPLACE INTO relation_fact_tombstones(contact_key, fact_id, deleted_at) VALUES(?, ?, ?)",
+                    listOf(key.value, factId, now().toString()))
+            }
+            true
+        }
     }
 
     /** 手动重新加回一条时解除忽略：手动是明确意图，不该被上次的删除拦住。 */
@@ -694,32 +831,46 @@ class RelationFactStore(private val db: AnalysisCacheDatabase,
     fun clear(key: ReplyContactKey) {
         // 先按目录把会话哈希算出来：下面删掉 contact_dir 之后就查不到 talker 了。
         val emotionSession = contactTalker(key.value)?.let { EmotionTrend.sessionOf(it) }
-        db.execute("DELETE FROM relation_fact_items WHERE contact_key = ?", listOf(key.value))
-        db.execute("DELETE FROM relation_facts WHERE contact_key = ?", listOf(key.value))
-        db.execute("DELETE FROM relation_fact_migrations WHERE contact_key = ?", listOf(key.value))
-        db.execute("DELETE FROM relation_fact_tombstones WHERE contact_key = ?", listOf(key.value))
-        // 水位一起清掉，下次才会重新抽，否则清空后再也不更新。
-        db.execute("DELETE FROM relation_meta WHERE contact_key = ?", listOf(key.value))
-        db.execute("DELETE FROM relation_contact_dir WHERE contact_key = ?", listOf(key.value))
-        // 历史纪要也是这个会话的档案，清空时不能留下 AI 结论。
-        db.execute("DELETE FROM group_digests WHERE contact_key = ?", listOf(key.value))
-        if (emotionSession != null) db.execute("DELETE FROM emotion_day WHERE session = ?", listOf(emotionSession))
+        // 八条 DELETE 要一起生效：中途失败会留下「条目清了、纪要还在」这种半清空的档案。
+        // 事务必须和整理线程同一把锁：同一个连接上两个线程同时 BEGIN IMMEDIATE 会直接抛错。
+        synchronized(writeLock) {
+            transaction {
+                db.execute("DELETE FROM relation_fact_items WHERE contact_key = ?", listOf(key.value))
+                db.execute("DELETE FROM relation_facts WHERE contact_key = ?", listOf(key.value))
+                db.execute("DELETE FROM relation_fact_migrations WHERE contact_key = ?", listOf(key.value))
+                db.execute("DELETE FROM relation_fact_tombstones WHERE contact_key = ?", listOf(key.value))
+                // 水位一起清掉，下次才会重新抽，否则清空后再也不更新。
+                db.execute("DELETE FROM relation_meta WHERE contact_key = ?", listOf(key.value))
+                db.execute("DELETE FROM relation_contact_dir WHERE contact_key = ?", listOf(key.value))
+                // 历史纪要也是这个会话的档案，清空时不能留下 AI 结论。
+                db.execute("DELETE FROM group_digests WHERE contact_key = ?", listOf(key.value))
+                if (emotionSession != null) db.execute("DELETE FROM emotion_day WHERE session = ?", listOf(emotionSession))
+            }
+        }
     }
 
     fun clearAll() {
-        db.execute("DELETE FROM relation_fact_items")
-        db.execute("DELETE FROM relation_facts")
-        db.execute("DELETE FROM relation_fact_migrations")
-        db.execute("DELETE FROM relation_fact_tombstones")
-        db.execute("DELETE FROM relation_meta")
-        db.execute("DELETE FROM relation_contact_dir")
-        db.execute("DELETE FROM group_digests")
-        db.execute("DELETE FROM emotion_day")
+        // 和 clear 同理：清空全部跑在独立线程上，不拿锁就会和后台整理的 BEGIN IMMEDIATE 撞车。
+        synchronized(writeLock) {
+            transaction {
+                db.execute("DELETE FROM relation_fact_items")
+                db.execute("DELETE FROM relation_facts")
+                db.execute("DELETE FROM relation_fact_migrations")
+                db.execute("DELETE FROM relation_fact_tombstones")
+                db.execute("DELETE FROM relation_meta")
+                db.execute("DELETE FROM relation_contact_dir")
+                db.execute("DELETE FROM group_digests")
+                db.execute("DELETE FROM emotion_day")
+            }
+        }
     }
 
     override fun close() = db.close()
 
     private companion object {
+        /** 拼行用的分隔符，和 SQL 里的 char(31) 必须是同一个字符。 */
+        const val SEPARATOR = '\u001f'
+
         const val CREATE_ITEMS = "CREATE TABLE IF NOT EXISTS relation_fact_items (fact_id TEXT NOT NULL, " +
             "contact_key TEXT NOT NULL, status TEXT NOT NULL, kind TEXT NOT NULL, occurred_at INTEGER NOT NULL, " +
             "updated_at INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(contact_key, fact_id))"

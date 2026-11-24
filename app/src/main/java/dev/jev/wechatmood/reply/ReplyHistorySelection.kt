@@ -16,9 +16,13 @@ class ReplyHistorySelection(private val talker: String, initial: ReplyContext? =
     }
 
     fun complete(ticket: Ticket, loaded: ReplyContext, currentTalker: String?): Boolean {
-        if (active != ticket || currentTalker != talker || loaded.talker != talker ||
+        // 被新请求顶掉的旧票直接忽略，别去动当前这张票的 loading 状态。
+        if (active != ticket) return false
+        // 结果一到就先销号：内容不合格时也要退出加载，否则抽屉会一直转圈。
+        active = null
+        if (currentTalker != talker || loaded.talker != talker ||
             loaded.requestedMessages != ticket.limit || loaded.messages.isEmpty()) return false
-        context = loaded; active = null
+        context = loaded
         return true
     }
 

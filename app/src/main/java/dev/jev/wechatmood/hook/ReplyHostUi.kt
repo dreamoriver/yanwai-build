@@ -43,13 +43,12 @@ class ReplyHostUi(private val activity: Activity,
     private var openingJob: Job? = null
     private var ownerEpoch: String? = null
     private var drawerRolesRevision: Long? = null
-    private var savingRoleWindow: Dialog? = null
     private var talker: String? = null
     private var dialog: Dialog? = null
     private var styleDialog: Dialog? = null
     private var snapshot: ReplyContext? = null
-    /** 依据弹窗改为异步读缓存后再显示，同一个面板只留一个。 */
-    private var evidenceDialog: AlertDialog? = null
+    /** 依据弹窗改成异步读缓存后再显示：交给 PanelKit 的公共面板，同一面板不会叠两个。 */
+    private val kit = PanelKit(activity)
     private var newMessageNotice: TextView? = null
     private var invalidateRequest: (() -> Unit)? = null
     /** 长按图片/表情时记住目标消息与已取的图，重新读取历史后也要留住。 */
@@ -71,7 +70,8 @@ class ReplyHostUi(private val activity: Activity,
     }
 
     fun update(currentTalker: String?) {
-        if (dialog?.isShowing == true && savingRoleWindow !== dialog && drawerRolesRevision != ModulePrefs.analysisSettings()?.rolesRevision) hide()
+        // 口吻画像改过就重开抽屉：按钮文字和选项都按新配置画。以前这里还判一个从没赋过值的窗口字段，恒真，等于没判。
+        if (dialog?.isShowing == true && drawerRolesRevision != ModulePrefs.analysisSettings()?.rolesRevision) hide()
         if (talker != currentTalker || ownerEpoch?.let { it != ReplyDatabaseHistory.pendingAccountScope() } == true) {
             hide(); talker = currentTalker
         }
@@ -1232,8 +1232,10 @@ class ReplyHostUi(private val activity: Activity,
                         state.text = "配置已改变，请重试"; return@launch
                     }
                     val client = ReplyHttpClient()
-                    val topics = if (findTopics) client.findTopics(config, current, baselineDraft, notes, knowledge, relationship,
-                        requireNotNull(time), previousTopics, customRelationship) else null
+                    // 走 TopicRequest 与关系温度共用同一条请求准备：参数原样传，行为不变。
+                    val topics = if (findTopics) TopicRequest.find(activity, config, current, baselineDraft, notes,
+                        relationship, customRelationship, knowledge, requireNotNull(time), previousTopics, client)
+                        else null
                     // 一次性返回：用户不需要逐条蹦出的过程，关掉流式以后也少一次参数兼容重试。
                     state.text = if (findTopics) "正在找话题…" else "正在生成回复…"
                     state.setTextColor(theme.muted)
@@ -1320,6 +1322,14 @@ class ReplyHostUi(private val activity: Activity,
         return true
     }
     private fun canGenerate() = ModulePrefs.canGenerateReply
+    /**
+     * 「还没连模型」的引导。
+     *
+     * 这里保留系统弹窗：PanelKit.info() 只给一个「关闭」按钮、picker() 只给选项行，
+     * 而这段要「一句说明 + 去配置 / 稍后两个按钮」，自绘要为此重做一套双按钮外壳，
+     * 收益不抵风险。正文很短，深浅色差异只影响这一处的一次性引导。
+     * 长正文的依据弹窗（[showEvidence]）已经换成自绘的了。
+     */
     private fun configure() {
         AlertDialog.Builder(activity).setTitle("先连接回复模型")
             .setMessage("打开言外「回复」，进入模型配置，保存回复模型后即可手动生成。")
@@ -1350,12 +1360,10 @@ class ReplyHostUi(private val activity: Activity,
             }
             // 读缓存期间抽屉已关或换了页面就不再弹，避免旧聊天的依据挡住当前聊天。
             if (activity.isFinishing || activity.isDestroyed || dialog?.isShowing != true) return@launch
-            evidenceDialog?.dismiss()
-            val shown = AlertDialog.Builder(activity).setTitle("本次参考的聊天").setMessage(header + body)
-                .setPositiveButton("关闭", null).create()
-            evidenceDialog = shown
-            shown.setOnDismissListener { if (evidenceDialog === shown) evidenceDialog = null }
-            shown.show()
+            // 依据正文可能上万字：交给 PanelKit 的自绘面板，能滚动、深浅色跟微信一致，
+            // 只有一个「关闭」按钮，不丢交互；旧的那一个先收掉，同时避免留两个窗口。
+            kit.dismissAll()
+            kit.info("本次参考的聊天", header + body)
         }
     }
 
@@ -1380,6 +1388,8 @@ class ReplyHostUi(private val activity: Activity,
         openingJob?.cancel(); ownerEpoch = null
         // 口吻画像、依据弹窗都是独立窗口，抽屉关掉后不能留在屏幕上。
         styleDialog?.dismiss(); styleDialog = null
+        // 依据弹窗交给 PanelKit 管：抽屉收起时一起收掉，不留一个脱离抽屉的窗口。
+        kit.dismissAll()
         factsActionRef = null
         dialog?.dismiss(); job?.cancel(); historyJob?.cancel(); session.cancel()
         talker = null
