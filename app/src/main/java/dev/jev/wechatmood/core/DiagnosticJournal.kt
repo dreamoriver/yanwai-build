@@ -23,41 +23,32 @@ class DiagnosticJournal(private val file: File, private val limit: Int = 128 * 1
             }
     }
 
-    /** 磁盘上大概有几个字符；用来判断还能不能继续追加。 */
+    /** 磁盘上大概有几个字符；用来判断什么时候该把文件截回上限。 */
     private var persisted = memory.length
-    /** 写满之后攒下来、还没落盘的字符数。 */
-    private var pending = 0
-    /**
-     * 写满之后再攒这么多才整体重写一次。
-     *
-     * 以前写满之后每次 append 都重写整个 128KB，而 MoodLog 是在调用线程同步写；
-     * 攒够一批只重写一次，代价是进程被杀时最新的一小段只在内存里。
-     */
-    private val rewriteStep = limit / 4
+    /** 文件最多长到上限的 1.5 倍，再整体重写一次截回 limit。 */
+    private val rewriteAt = limit + limit / 2
 
     @Synchronized fun append(text: String) {
         memory = (memory + text).takeLast(limit)
         runCatching {
             if (unreadOnDisk) {
                 // 读失败那次留下的历史还在磁盘上，先只追加，不拿空 memory 去 writeText。
-                // 追加之后磁盘从这一段起与 memory 一致，按「已写满」记；之后的第一批批量重写
-                // 才会整体替换文件——代价是读不到的那段旧历史仍可能那时被覆盖，但不会再在
-                // 第一次落盘就被抹掉，且中间这批新日志一定先落盘了。
                 file.appendText(text)
                 unreadOnDisk = false
                 persisted = limit
-                pending = 0
-            } else if (diskFailure == null && persisted + text.length <= limit) {
-                // 还没写满：追加最省，磁盘和内存始终一致。
+            } else if (diskFailure == null) {
+                // 每行只追加自己这一条：既及时落盘（进程被杀不丢最近日志），
+                // 又不会像以前那样写满之后每行都重写整个 128KB。
                 file.appendText(text)
                 persisted += text.length
-            } else {
-                pending += text.length
-                if (diskFailure != null || pending >= rewriteStep) {
+                if (persisted > rewriteAt) {
                     file.writeText(memory)
                     persisted = memory.length
-                    pending = 0
                 }
+            } else {
+                // 上次写失败（磁盘满、权限变化）：用内存里的全文重试一次。
+                file.writeText(memory)
+                persisted = memory.length
             }
             diskFailure = null
         }.onFailure { diskFailure = it.javaClass.simpleName }
