@@ -301,4 +301,36 @@ class ForwardDigestTest {
         assertEquals("张三", message.items.first { it.text.contains("周六下午三点集合") }.sender)
         assertEquals("李四", message.items.first { it.text.contains("收到，我带伞") }.sender)
     }
+
+    /**
+     * 本机微信（4.x）的转发没有 dataitem，外层是 desc 平铺，
+     * 被转进来的那条记录整段塞在 <recordxml> 里。原来只拆 desc，
+     * 十几条内层内容会被压成一行「[聊天记录]」，摘要里什么都看不到。
+     */
+    @Test fun `desc 平铺下仍展开内层嵌套记录`() {
+        val inner = "<recordinfo><title>sw的聊天记录</title>" +
+            "<desc>sw: 换新的就行了\nsw: [图片]</desc></recordinfo>"
+        val raw = wrap("<recordinfo><title>群聊的聊天记录</title>" +
+            "<desc>甲: 先说一句\n[聊天记录]\n乙: 后面接一句</desc>" +
+            "<recordxml>" + inner + "</recordxml></recordinfo>")
+        val message = requireNotNull(ForwardDigest.parse(raw))
+        val text = message.transcript()
+        assertTrue("内层内容应当展开", text.contains("换新的就行了"))
+        assertFalse("占位行被就地展开替代", text.contains("[聊天记录]"))
+        assertTrue(text.contains("先说一句"))
+        assertTrue(text.contains("后面接一句"))
+        assertEquals(1, message.nested)
+    }
+
+    /** 微信 XML 缺字段会写出 nullnull…，模型会把它抄到摘要开头。 */
+    @Test fun `null 填充不会进转录`() {
+        val fill = "null".repeat(13)
+        val raw = wrap("<recordinfo><title>" + fill + "群聊</title>" +
+            "<desc>甲: " + fill + "好的\n乙: 收到</desc></recordinfo>")
+        val message = requireNotNull(ForwardDigest.parse(raw))
+        val text = message.transcript()
+        assertFalse("null 填充应当被删掉", text.contains("null"))
+        assertTrue(text.contains("好的"))
+        assertTrue(text.contains("收到"))
+    }
 }

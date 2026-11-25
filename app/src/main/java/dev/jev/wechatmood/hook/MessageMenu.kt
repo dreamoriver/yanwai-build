@@ -106,7 +106,7 @@ object MessageMenu {
                                         val page = runCatching {
                                             MessageSniffer.replyContext(requireBottom = false)
                                         }.getOrNull()
-                                        ForwardDigestUi(activity, digest, page?.talker, page).show()
+                                        ForwardDigestUi(activity, digest, page?.talker, page, forward.messageId).show()
                                         true
                                     }
                                 } ?: false

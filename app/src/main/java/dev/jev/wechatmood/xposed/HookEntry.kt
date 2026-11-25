@@ -62,6 +62,9 @@ class HookEntry : IXposedHookLoadPackage {
                 }
                 runCatching { MessageSniffer.resume(activity) }
                     .onFailure { MoodLog.e("HOST_RESUME_FAILED", it) }
+                // 合并转发记录页：抓图片/视频封面交给视觉模型，结果按 msgId 缓存。
+                runCatching { dev.jev.wechatmood.hook.RecordPageMedia.onResume(activity) }
+                    .onFailure { MoodLog.w("RECORD_MEDIA_RESUME_FAILED " + it.javaClass.simpleName) }
                 // 回到微信首页时顺手看一遍全部联系人的到期约定：不用先点进那个聊天。
                 if (activity.javaClass.name == "com.tencent.mm.ui.LauncherUI") {
                     runCatching { RelationReminder.scheduleGlobalCheck(activity) }
@@ -117,6 +120,7 @@ class HookEntry : IXposedHookLoadPackage {
             MoodLog.init(context)
             ModulePrefs.init(context)
             MessageSniffer.install(context)
+            dev.jev.wechatmood.reply.RecordMedia.install(context)
             registerClearReceiver(context)
             // 通知上的「标完成」按钮：动态注册才收得到（模块代码跑在微信进程里）。
             RelationTodoActions.register(context)

@@ -38,6 +38,12 @@ object ForwardDigest {
     /** 任意 2 到 8 字符的片段连续重复 6 次以上，当作填充。 */
     private val REPEAT = Regex("(.{2,8}?)\\1{5,}", setOf(RegexOption.DOT_MATCHES_ALL))
     private val PLACEHOLDER = Regex("^\\[[^]]{1,6}]$")
+    /**
+     * 微信 XML 缺字段时会写成 nullnull…（或 undefined…）。
+     * 这些串会跟着转录进提示词，模型照抄到摘要开头。零宽字符夹在中间时周期正则认不出来，
+     * 所以单独按「连续 3 个以上」删掉。
+     */
+    private val NULL_RUN = Regex("(?i)(?:null|undefined){3,}")
     private val DESC = Regex("<datadesc(?:\\s[^>]*)?>(.*?)</datadesc>", RegexOption.DOT_MATCHES_ALL)
     private val NOISE = Regex("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u2028\\u2029\\uFEFF]")
 
@@ -48,11 +54,11 @@ object ForwardDigest {
         val count: Int get() = if (rawCount > 0) rawCount else items.size
         /** 给模型的纯文本：不带 XML、不带未展开的条数。 */
         fun transcript(): String = buildString {
-            if (title.isNotBlank()) append("聊天记录：").append(title).append('\n')
+            if (title.isNotBlank()) append("聊天记录：").append(title.cleanNoise().stripFiller().stripNullRuns()).append('\n')
             items.forEachIndexed { index, item ->
                 append(index + 1).append(". ")
-                if (item.sender.isNotBlank()) append(item.sender).append(": ")
-                append(item.text.cleanNoise().stripFiller()).append('\n')
+                if (item.sender.isNotBlank()) append(item.sender.cleanNoise().stripNullRuns()).append(": ")
+                append(item.text.cleanNoise().stripFiller().stripNullRuns()).append('\n')
             }
             if (omitted > 0) append("（另有 ").append(omitted).append(" 条未展开）\n")
         }.trim()
@@ -101,7 +107,7 @@ object ForwardDigest {
                 "desc=${descs.size} nameLike=$named " +
                 "recordinfo=${Regex("<recordinfo").findAll(body).count()} " +
                 "recordxml=${Regex("<recordxml").findAll(body).count()} body=${body.length}")
-        return Message(tag(body, "title").decode().cleanNoise().stripFiller(), tag(body, "isChatRoom") == "1",
+        return Message(tag(body, "title").decode().cleanNoise().stripFiller().stripNullRuns(), tag(body, "isChatRoom") == "1",
             merged, omitted, nested, truncatedRaw, rawCount = supplemented.size)
     }
 
@@ -117,16 +123,34 @@ object ForwardDigest {
         // 不能先截 <datalist>：嵌套记录里的 <datalist> 会让非贪婪匹配提前闭合。
         val pairs = dataItems(body)
         if (pairs.isEmpty()) {
-            // 老版本可能没有 datalist，只能退回 desc 的「昵称: 内容」行。
+            // 外层没有 dataitem：本机微信的转发是 desc 平铺，被转进来的那条记录整段塞在
+            // <recordxml> 里（实测 recordinfo=2 recordxml=1）。原来只拆 <desc>，
+            // 内层十几条内容就被压成一行「[聊天记录]」——摘要里自然看不到「谁说了什么」。
+            val inner = block(body, "recordxml").takeIf { it.contains("<recordinfo") }
+            var expanded = false
+            fun expandNested() {
+                if (inner == null || expanded) return
+                expanded = true
+                nested()
+                if (depth < MAX_DEPTH) collect(inner, depth + 1, out, budget, spend, omitted, nested)
+            }
             tag(body, "desc").decode().split('\n').filter { it.isNotBlank() }.forEach { line ->
                 if (out.size >= MAX_ITEMS || budget() <= 0) { omitted(); return@forEach }
                 val sender = line.substringBefore(':', "").trim()
                 val text = line.substringAfter(':', line).trim()
                     .cleanNoise().trimFillerPrefix().stripFiller().take(MAX_ITEM_CHARS)
+                // 占位行所在的位置就是内层记录的位置：就地展开，顺序才不会跑到最前面。
+                if (inner != null && !expanded &&
+                    (text == "[聊天记录]" || text.contains("<recordinfo") || text.isBlank())) {
+                    expandNested()
+                    return@forEach
+                }
                 if (text.isBlank() || text.isFiller()) { omitted(); return@forEach }
                 spend(text.length + sender.length)
                 out += Item(1, sender, text, "")
             }
+            // desc 里连占位行都没有时也要把内层补上，否则整段记录凭空消失。
+            expandNested()
             return
         }
         pairs.forEach { (attributes, itemBody) ->
@@ -340,6 +364,9 @@ object ForwardDigest {
 
     /** 去掉不可打印字符与零宽填充，避免整屏噪声进摘要。 */
     internal fun String.cleanNoise(): String = NOISE.replace(this, "").trim()
+
+    /** 删掉「nullnullnull…」这类缺字段填充，避免模型把它抄进摘要开头。 */
+    internal fun String.stripNullRuns(): String = NULL_RUN.replace(this, "")
 
     /**
      * 去掉文本里任意位置的固定周期重复段（nullnull…、uinull…）。

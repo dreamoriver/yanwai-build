@@ -43,7 +43,9 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
         // 合并转发：摊平成「谁说了什么」，能看到具体是哪几句支撑了这条事实。
         if (dev.jev.wechatmood.reply.ForwardDigest.isForward(raw)) {
             val digest = dev.jev.wechatmood.reply.ForwardDigest.parse(raw) ?: return null
-            return digest.transcript().take(1500).ifBlank { null }
+            // 记录页里描述过图片/视频时，依据弹窗也显示内容，而不是一串 [图片]。
+            return dev.jev.wechatmood.reply.RecordMedia.applyToTranscript(talker, messageId,
+                digest.transcript().take(1500)).ifBlank { null }
         }
         // 红包、转账只显示类型，不带金额和备注；必须排在合并转发之后，
         // 否则转发内容里的 <wcpayinfo> 会把整段转发正文吞掉。

@@ -122,9 +122,10 @@ data class ReplyContext(val talker: String, val messages: List<ReplyMessage>, va
                                 val shown = forwarded.items.take(FORWARD_ITEMS)
                                 val more = if (forwarded.items.size > shown.size)
                                     "（共 ${forwarded.items.size} 条，只取前 ${shown.size} 条）" else ""
-                                "【合并转发：${forwarded.title.take(40)}】$more\n" + shown.joinToString("\n") { item ->
-                                    (if (item.sender.isBlank()) "" else item.sender + ": ") + item.text.take(FORWARD_ITEM_CHARS)
-                                }.take(FORWARD_BUDGET_CHARS)
+                                RecordMedia.applyToTranscript(talker, record.messageId,
+                                    "【合并转发：${forwarded.title.take(40)}】$more\n" + shown.joinToString("\n") { item ->
+                                        (if (item.sender.isBlank()) "" else item.sender + ": ") + item.text.take(FORWARD_ITEM_CHARS)
+                                    }.take(FORWARD_BUDGET_CHARS))
                             }
                             quotedText != null -> "【引用${quoted.displayName?.take(32).orEmpty()}：$quotedText】$own"
                             own.isNotBlank() -> own

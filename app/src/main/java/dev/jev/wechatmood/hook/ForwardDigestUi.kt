@@ -14,6 +14,7 @@ import dev.jev.wechatmood.core.ModulePrefs
 import dev.jev.wechatmood.core.UsageKind
 import dev.jev.wechatmood.reply.ForwardDigest
 import dev.jev.wechatmood.reply.ForwardDigestProtocol
+import dev.jev.wechatmood.reply.RecordMedia
 import dev.jev.wechatmood.reply.ReplyContext
 import dev.jev.wechatmood.reply.ReplyHttpClient
 import kotlinx.coroutines.CoroutineScope
@@ -29,7 +30,9 @@ import kotlinx.coroutines.launch
  * 之后再也抓不到这条转发属于哪个会话，档案也就记不进去。
  */
 internal class ForwardDigestUi(private val activity: Activity, private val message: ForwardDigest.Message,
-    private val talker: String? = null, private val page: ReplyContext? = null) {
+    private val talker: String? = null, private val page: ReplyContext? = null,
+    /** 这条转发的本地 msgId：用它把记录页里已经描述过的图片/视频内容补进转录。 */
+    private val messageId: Long = 0) {
     private val kit = PanelKit(activity)
     private val theme = kit.theme
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -40,11 +43,16 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
     private var result = ""
 
     /** 读取范围的说明，和统计窗口一样用一条辅助文字说清楚。 */
-    private fun notice(): String = when {
-        message.truncatedRaw -> "内容超过 512K，只读取了前面的部分"
-        message.omitted > 0 -> "已省略 ${message.omitted} 条过长或过多的内容"
-        message.nested > 0 -> "含 ${message.nested} 条嵌套聊天记录，已展开到第 3 层"
-        else -> ""
+    private fun notice(): String {
+        // 有媒体占位但没描述：说清原因，别让用户以为图片内容丢了。
+        val missing = RecordMedia.missing(message, talker ?: page?.talker.orEmpty(), messageId)
+        if (missing > 0) return "还有 $missing 张图/视频未读取，点开这条记录一次即可补上"
+        return when {
+            message.truncatedRaw -> "内容超过 512K，只读取了前面的部分"
+            message.omitted > 0 -> "已省略 ${message.omitted} 条过长或过多的内容"
+            message.nested > 0 -> "含 ${message.nested} 条嵌套聊天记录，已展开到第 3 层"
+            else -> ""
+        }
     }
 
     fun show() {
@@ -105,12 +113,15 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
                 return@launch
             }
             runCatching {
+                val resolvedTalker = talker ?: page?.talker.orEmpty()
+                // 记录页打开过就有描述：把 [图片]/[视频] 占位补成带内容的一行，模型才有的讲。
+                val enriched = RecordMedia.applyToMessage(message, resolvedTalker, messageId)
                 ReplyHttpClient(kind = UsageKind.DIGEST).request(settings,
-                    ForwardDigestProtocol.payload(settings, message),
+                    ForwardDigestProtocol.payload(settings, enriched),
                     ForwardDigestProtocol::parse, onPartial = { partial ->
                     if (partial.isNotBlank()) {
                         // 显示前再清洗一次：模型会把输入里的填充原样复述出来。
-                        val clean = with(ForwardDigest) { partial.stripFiller() }
+                        val clean = with(ForwardDigest) { partial.cleanNoise().stripFiller().stripNullRuns() }
                         result = clean
                         text?.post { text?.text = clean }
                     }
@@ -127,7 +138,7 @@ internal class ForwardDigestUi(private val activity: Activity, private val messa
     }
 
     private fun finish(content: String, copy: TextView) {
-        val shown = with(ForwardDigest) { content.stripFiller() }
+        val shown = with(ForwardDigest) { content.cleanNoise().stripFiller().stripNullRuns() }
         val failed = shown.startsWith("摘要失败")
         result = shown
         text?.text = shown
