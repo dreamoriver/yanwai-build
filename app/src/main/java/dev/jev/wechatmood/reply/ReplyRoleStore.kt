@@ -63,6 +63,17 @@ class ReplyRoleStore(private val db: AnalysisCacheDatabase, private val identiti
                 db.execute("INSERT INTO reply_role_migrations(migration) VALUES(?)", listOf("defaults-background-v1"))
             }
         }
+        // 老库已经跑过 defaults-v1：新增的身份不会自动出现在角色库，这里补建缺失的默认角色。
+        if (db.query("SELECT migration FROM reply_role_migrations WHERE migration = ?", listOf("defaults-v2")) == null) {
+            transaction {
+                ReplyRelationship.entries.filter { it != ReplyRelationship.UNSPECIFIED && it != ReplyRelationship.OTHER }.forEach {
+                    val id = "role:${UUID.nameUUIDFromBytes("default-role-v1:${it.id}".toByteArray(Charsets.UTF_8))}"
+                    val role = ReplyRole(id, it.label, it.guidance, UUID.randomUUID().toString(), it)
+                    db.execute("INSERT OR IGNORE INTO reply_roles(role_id, payload) VALUES(?, ?)", listOf(id, role.encode()))
+                }
+                db.execute("INSERT INTO reply_role_migrations(migration) VALUES(?)", listOf("defaults-v2"))
+            }
+        }
     }
     fun revision(): Long = synchronized(identities) {
         db.query("SELECT revision FROM reply_role_revision WHERE id = 1", emptyList())!!.toLong()

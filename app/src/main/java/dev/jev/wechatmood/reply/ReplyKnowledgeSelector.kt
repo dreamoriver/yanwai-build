@@ -8,26 +8,30 @@ package dev.jev.wechatmood.reply
  * 目标 4.6K 字符以内，不联网、不引第三方依赖。
  */
 object ReplyKnowledgeSelector {
-    private const val MAX_CHARS = 3_500
-    private const val HEAD_CHARS = 1_000
+    private const val MAX_CHARS = 4_200
+    private const val HEAD_CHARS = 1_500
     private const val MAX_SECTIONS = 4
     private const val MIN_SECTION_CHARS = 120
 
-    fun select(knowledge: String, sample: String): String {
+    fun select(knowledge: String, sample: String, mustKeep: List<String> = emptyList()): String {
         if (knowledge.length <= MAX_CHARS) return knowledge
         val head = knowledge.take(HEAD_CHARS)
+        val all = sections(knowledge)
+        // 必读段先占预算：关系类目标的方法在长库里按二元组几乎命中不了，只靠分数永远进不来。
+        val forced = mustKeep.mapNotNull { anchor -> all.firstOrNull { it.startsWith(anchor) } }
         val keywords = keywords(sample)
-        if (keywords.isEmpty()) return head + "\n\n（知识库较长，本次对话没有可用于检索的关键词）"
-        val picked = sections(knowledge)
+        val scored = if (keywords.isEmpty()) emptyList() else all.filter { section -> forced.none { it == section } }
             .map { it to score(it, keywords) }
             .filter { it.second > 0 }
             .sortedByDescending { it.second }
             .take(MAX_SECTIONS)
+            .map { it.first }
+        val picked = forced + scored
         if (picked.isEmpty()) return head + "\n\n（知识库较长，本次对话未命中相关片段，只保留通用原则）"
         val builder = StringBuilder(head)
         builder.append("\n\n（以下片段按本次对话检索得出，未必覆盖全部方法）")
         var budget = MAX_CHARS - head.length
-        for ((text, _) in picked) {
+        for (text in picked) {
             if (budget <= MIN_SECTION_CHARS) break
             // 按 Char 砍会把 emoji 切成孤立代理，所以走 takeSafely。
             val chunk = text.takeSafely(minOf(text.length, budget))

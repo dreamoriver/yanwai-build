@@ -19,6 +19,9 @@ object ReplyKnowledgeCatalog {
             ReplyRelationship.FAMILY -> listOf("knowledge/12-金钱家务育儿与双方家庭.md", "knowledge/07-沟通冲突与修复.md")
             ReplyRelationship.FRIEND -> listOf("practical/为他人提供情绪价值：温暖且有效的回应指南.md")
             ReplyRelationship.COLLEAGUE -> listOf("practical/提升表达逻辑性：从混乱到清晰的实用指南.md")
+            ReplyRelationship.TAKEN -> listOf("practical/关系推进的节奏与分寸：分级、可退性与风险判断.md",
+                "practical/场景感、松弛感与社交校准：从接话到关系推进.md",
+                "practical/聊天化被动为主动：引导互动的实用指南.md")
             ReplyRelationship.UNSPECIFIED, ReplyRelationship.OTHER -> emptyList()
         }
         return common + specific.map { "goutoujunshi/references/$it" }
