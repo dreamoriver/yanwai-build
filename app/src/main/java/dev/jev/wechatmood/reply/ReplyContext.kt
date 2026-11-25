@@ -13,7 +13,9 @@ data class ReplyMessage(val id: Long, val speaker: String, val time: Long, val t
     /** 微信消息类型；统计要按它分图片/语音，页面消息拿不到时按普通文本算。 */
     val type: Int = 1,
     /** 只有类型、没有正文的占位（图片、表情等）。历史锚点核对时要跳过它，否则会误判成「结果比页面旧」。 */
-    val placeholder: Boolean = false)
+    val placeholder: Boolean = false,
+    /** 媒体消息的库字段 imgPath。视频靠它定位同名的 mp4 本体，图片走气泡截图不用它。 */
+    val imagePath: String = "")
 /** Identity check only. Media payloads stay out of the reply context and model input. */
 data class ReplyHistoryAnchor(val id: Long, val type: Int, val sent: Int, val time: Long, val digest: String) {
     fun matches(record: MessageMetadata): Boolean = this == from(record)
@@ -31,7 +33,9 @@ data class ReplyContext(val talker: String, val messages: List<ReplyMessage>, va
     val background: ContactBackground = ContactBackground(), val focusMessageId: Long = 0,
     val targetMedia: String? = null, val targetImageDataUri: String? = null,
     /** 长按图片时由视觉模型生成的一句话描述，按消息缓存，只在这轮提示词里用。 */
-    val targetImageDigest: String? = null, val focusText: String? = null,
+    val targetImageDigest: String? = null,
+    /** 长按视频时抽关键帧得到的一句话描述；视频不上传整段内容，提示词里只有这句。 */
+    val targetVideoDigest: String? = null, val focusText: String? = null,
     val facts: List<RelationFact> = emptyList(),
     /** 「我」最近的真实文字消息（从旧到新），只给口吻画像用；不含图片/表情/语音占位。 */
     val styleTexts: List<String> = emptyList()) {
@@ -139,7 +143,8 @@ data class ReplyContext(val talker: String, val messages: List<ReplyMessage>, va
                 if (cut.length != body.length) trimmed = true
                 budget -= cut.length
                 ReplyMessage(record.messageId, record.speaker(), record.createdAt, cut, record.voiceSource(),
-                    senderId = record.senderId(), type = record.type, placeholder = record.type in MEDIA_TYPES)
+                    senderId = record.senderId(), type = record.type, placeholder = record.type in MEDIA_TYPES,
+                    imagePath = record.imagePath)
             }.asReversed()
             // 只统计真正没进上下文的媒体：占位已经进去了，不该重复报成省略。
             val omitted = mediaKeys.count { it !in includedMedia }

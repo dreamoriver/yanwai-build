@@ -123,7 +123,7 @@ class HostUi(private val activity: Activity) {
                     dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
                         // 合并转发先摊平成「谁说了什么」，卡片取标题/描述，实在没有才留占位。
                         it.materialText(), voice = it.voiceSource(),
-                        senderId = it.senderId(), type = it.type)
+                        senderId = it.senderId(), type = it.type, imagePath = it.imagePath)
                 }
             }
             // 取数这段时间用户可能已经退出这个聊天页：对已销毁的 Activity 建弹层会崩。

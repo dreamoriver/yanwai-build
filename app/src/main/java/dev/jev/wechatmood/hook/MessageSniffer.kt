@@ -419,6 +419,9 @@ object MessageSniffer {
         var targetMedia = when {
             target == null -> null
             target.type == 3 -> "图片"
+            // 视频和小视频也算媒体目标：内容靠抽关键帧读，类型名要和 ReplyContext.mediaLabel 对齐。
+            target.type == 43 -> "视频"
+            target.type == 62 -> "小视频"
             target.type == 47 -> "表情"
             target.isAppMessage() -> when (target.quotedMessage()?.type) {
                 3 -> "图片"
@@ -463,6 +466,26 @@ object MessageSniffer {
         records(scope).firstOrNull { it.second.metadata?.messageId == messageId }?.first
             ?.let(MediaImage::capture)
     }?.let { taken -> withContext(Dispatchers.Default) { taken.encode() } }
+
+    /**
+     * 视频消息的本地本体：先在主线程读 imgPath，再到 IO 里按同名找 mp4。
+     *
+     * 对方发来但没点开过的视频只有封面，video/ 下没有 mp4，这时返回 null，
+     * 由调用方退回气泡封面（封面就是第一帧，能给出粗一点的描述）。
+     */
+    suspend fun videoFileOf(messageId: Long): java.io.File? {
+        if (messageId <= 0) return null
+        val activity = active.get() ?: return null
+        val imgPath = withContext(Dispatchers.Main.immediate) {
+            val scope = chatNodes(activity.window.decorView)
+            records(scope).firstOrNull { it.second.metadata?.messageId == messageId }
+                ?.second?.metadata?.imagePath.orEmpty()
+        }
+        if (imgPath.isBlank()) return null
+        return withContext(Dispatchers.IO) {
+            dev.jev.wechatmood.reply.VideoDigest.locate(activity.applicationContext, imgPath)
+        }
+    }
 
     /** Cheap live boundary check, without re-reading 100 messages on every scan. */
     fun replyBoundary(): Long? {

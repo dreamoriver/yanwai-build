@@ -303,7 +303,7 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             dev.jev.wechatmood.reply.ReplyMessage(it.messageId, it.speaker(), it.createdAt,
                 // 合并转发先摊平成「谁说了什么」，卡片取标题/描述，实在没有才留占位。
                 it.materialText(), voice = it.voiceSource(),
-                senderId = it.senderId(), type = it.type)
+                senderId = it.senderId(), type = it.type, imagePath = it.imagePath)
         }
         // 诊断：库里查出来的语音引用，到 ReplyMessage 里还剩多少。
         dev.jev.wechatmood.core.MoodLog.i("STATS_DB_VOICE rows=${rows.size} " +
@@ -824,7 +824,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
           也不要补标题、文件名里没有的数字、时间或结论。
         - 语音已转写的按普通发言读；「【语音，未转写】」「【语音未能转写，内容未知】」读不到内容，
           不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
-        - 【视频】【表情】【小视频】【系统消息】也只有类型没有内容：可以提「有人发了个视频」，
+        - 【视频：…】【小视频：…】是抽关键帧认出来的画面内容，可以当内容用：说画面里真有的场景、
+          人物和动作。但只看到几个瞬间，看不到完整过程，不要替它补前后的动作、结局或台词。
+          【视频】【小视频】【表情】【系统消息】只写着类型，说明这次没读到内容：可以提「有人发了个视频」，
           不要猜拍了什么、说了什么，也不要把「媒体」「占位」这些词写进正文。
         - 转账的金额和备注是消息里真有的，可以写；红包只有祝福语、没有金额，不要猜金额，
           也不要写「金额未知」这种话。
@@ -982,7 +984,11 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             val forwards = pool.withIndex()
                 .filter { (it.value.type and 0xFFFF) == 49 && it.value.text.startsWith("聊天记录：") }
                 .map { it.index }.takeLast(MAX_STATS_FORWARDS)
-            addAll(images); addAll(forwards)
+            // 视频的信息量也集中在少数几条：抽完样再补回来，否则一整段可能一条都没抽到。
+            val videos = pool.withIndex()
+                .filter { it.value.type == 43 || it.value.type == 62 }
+                .map { it.index }.takeLast(MAX_STATS_VIDEOS)
+            addAll(images); addAll(forwards); addAll(videos)
         }.distinct()
         if (keep.isNotEmpty()) {
             val merged = (picked + keep).distinct().sorted()
@@ -1049,6 +1055,66 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             dev.jev.wechatmood.core.MoodLog.i("STATS_IMAGE_DIGEST images=${imageRows.size} " +
                 "budget=$imageBudget ok=${images.size}")
         }
+        // 视频同样最近优先：本体是明文 mp4（MicroMsg/<账号 hash>/video 下与封面同名），
+        // 抽几帧就能得到一句画面描述。没点开过、本地没有 mp4 的直接跳过，不写成「读到了」。
+        val videoRows = pickedRows.filter { it.type == 43 || it.type == 62 }.asReversed()
+        val videos = HashMap<Long, String>()
+        // cached / locate 是同步磁盘读，抽帧是同步解码：这个函数跑在 Main.immediate 的协程里，
+        // 压在微信主线程上一段几分钟的视频就能把界面冻住，所以每一步都显式切到 IO。
+        val tasks = withContext(Dispatchers.IO) {
+            videoRows.take(MAX_STATS_VIDEOS * 4).mapNotNull { row ->
+                // 关键帧缓存（v:）是最完整的，有就直接用，不再解码。
+                val frames = dev.jev.wechatmood.reply.VideoDigest.cached(activity, context.talker, row.id)
+                if (frames != null) { videos[row.id] = frames; return@mapNotNull null }
+                // 一次遍历同时拿本体和封面。
+                val media = dev.jev.wechatmood.reply.VideoDigest.locateMedia(activity, row.imagePath)
+                val file = media.first
+                val cover = media.second
+                // 本地已经有本体就抽关键帧：封面只是第一帧。否则点开过的视频还停在封面级描述，
+                // 用户点了半天「打开视频」，总结里看到的还是那张海报。
+                if (file != null) return@mapNotNull Triple(row, file, cover)
+                val digest = dev.jev.wechatmood.reply.ImageDigest.cached(activity, context.talker, row.id)
+                if (digest != null) { videos[row.id] = digest; return@mapNotNull null }
+                // 没有本体也没有缓存：还有封面就读封面，两样都没有就跳过。
+                cover?.let { Triple(row, null, it) }
+            }
+        }
+        // 分母用「真正要读的条数」：缓存命中的不算，进度才不会停在 1/3 不动。
+        val videoBudget = minOf(tasks.size, MAX_STATS_VIDEOS)
+        var videoIndex = 0
+        var byKeyframe = 0
+        var byCover = 0
+        for (task in tasks) {
+            if (videoIndex >= videoBudget) break
+            val row = task.first
+            val file = task.second
+            val cover = task.third
+            videoIndex++
+            onStage("正在看视频 " + videoIndex + "/" + videoBudget + "…")
+            val text = try {
+                withContext(Dispatchers.IO) {
+                    if (file != null) {
+                        dev.jev.wechatmood.reply.VideoDigest.describe(activity, current, context.talker, row.id, file)
+                    } else {
+                        dev.jev.wechatmood.reply.VideoDigest.describeCover(activity, current, context.talker, row.id,
+                            requireNotNull(cover))
+                    }
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+            catch (_: Exception) { null }
+            if (!text.isNullOrBlank()) {
+                videos[row.id] = text
+                if (file != null) byKeyframe++ else byCover++
+            }
+        }
+        if (videoBudget > 0) onStage("正在分析最近聊天…")
+        // 无条件打：budget=0 时必须能区分「窗口里根本没有视频」和「全部命中缓存」，
+        // 否则从日志上看起来就像视频功能没生效。types 是这批素材的真实类型分布。
+        dev.jev.wechatmood.core.MoodLog.i("STATS_VIDEO_DIGEST videos=" + videoRows.size +
+            " budget=" + videoBudget + " keyframe=" + byKeyframe + " cover=" + byCover +
+            " ok=" + videos.size + " picked=" + pickedRows.size +
+            " types=" + pickedRows.groupingBy { it.type }.eachCount() +
+            " paths=" + videoRows.take(3).map { it.imagePath.take(20) })
         // 只有类型、没有内容的行（【红包】【通话记录】【位置】这类）也不是可读素材：
         // 整段都是它们时，别让模型对着一屏方括号硬编内容。
         val bareTypes = setOf(
@@ -1072,8 +1138,10 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             }
         }.map { row ->
             val digest = images[row.id]
+            val videoDigest = videos[row.id]
             when {
                 digest != null -> row.copy(text = "【图片：$digest】")
+                videoDigest != null -> row.copy(text = "【视频：$videoDigest】")
                 row.type == 3 && row.text == "[媒体]" -> row.copy(text = "[图片，未识别]")
                 else -> row
             }
@@ -1126,6 +1194,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             if (waitingVoices > 0) append("；其中 $waitingVoices 条是语音，${transcripts.size} 条已转写成正文，其余未转写")
             val imageCount = pool.count { it.type == 3 && it.text == "[媒体]" }
             if (imageCount > 0) append("；$imageCount 张图片，${images.size} 张已识别成文字")
+            val videoCount = pool.count { it.type == 43 || it.type == 62 }
+            if (videoCount > 0) append("；$videoCount 条视频，${videos.size} 条已抽关键帧识别成文字")
         }
         // 长回答走非流式更稳：非流式只受读超时约束，这里单独放宽到 3 分钟。
         val client = ReplyHttpClient(HttpClients.shared.newBuilder()
@@ -1646,6 +1716,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         const val MAX_STATS_TRANSCRIPTS = 10
         /** 一次分析最多识别这么多张图片：每张一次视觉模型调用，最近优先。 */
         const val MAX_STATS_IMAGES = 5
+        /** 一次分析最多看这么多条视频：每条抽 4–6 帧，同样是一次视觉调用，最近优先。 */
+        const val MAX_STATS_VIDEOS = 3
         /** 抽样后至少保留这几条合并转发：一条能带出好几段对话，被抽掉最可惜。 */
         const val MAX_STATS_FORWARDS = 3
         /** 进程内转写缓存：同一条语音（msgId 全局唯一）不带重复跑原生转写。 */

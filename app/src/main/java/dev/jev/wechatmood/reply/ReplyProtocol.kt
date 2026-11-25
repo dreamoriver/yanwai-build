@@ -68,15 +68,32 @@ object ReplyProtocol {
         // 目标是一张图片/表情时，告诉模型怎么用这张图，而不是当成普通文字。
         // 有图和没图要分开说。取图失败时仍写「内容已附上」，模型会照着编图里的内容。
         val mediaHint = context.targetMedia?.let { media ->
-            val name = if (media == "表情") "一个表情" else "一张${media}"
+            val video = media == "视频" || media == "小视频"
+            val name = if (video) "一段" + media else if (media == "表情") "一个表情" else "一张" + media
             val seen = (imageDigest ?: context.targetImageDigest)?.takeIf { it.isNotBlank() }
-                ?.let { "；另外单独看图得到的一句描述是：$it" }.orEmpty()
-            if (context.targetImageDataUri != null)
-                "\n对方本轮发来${name}，内容已随消息附上${seen}；先判断它表达的情绪（玩笑、撒娇、阴阳、认真、安慰等），" +
+                ?.let { "；另外单独看图得到的一句描述是：" + it }.orEmpty()
+            // 视频不上传整段内容，只有抽帧后的一句话：措辞必须和图片分开，
+            // 否则模型会把「没有附图」当成没看过，或者反过来编画面。
+            val videoSeen = context.targetVideoDigest?.takeIf { it.isNotBlank() }
+            if (video && videoSeen != null)
+                "\n对方本轮发来" + name + "，这里看过几个关键帧，得到的一句描述是：" + videoSeen +
+                    "；按这段画面能确定的内容回应，看不出来的细节不要编，" +
+                    "也不要提关键帧、抽帧、识别这类系统措辞。" +
+                    "回复的语气、句长和标点仍按 my_style 与 my_style_samples。"
+            else if (video && context.targetImageDataUri != null)
+                // 对方发来但没点开过的视频没有 mp4，手上只有封面：明说只有封面，别让模型编后续画面。
+                "\n对方本轮发来" + name + "，这次只取到它的封面图（随消息附上）；按封面能确定的内容回应，" +
+                    "看不到后面的画面，不要编后续发生了什么，也不要提封面、抽帧、识别这类系统措辞。" +
+                    "回复的语气、句长和标点仍按 my_style 与 my_style_samples。"
+            else if (video)
+                "\n对方本轮发来" + name + "，但这次没取到画面内容，只能按上下文判断；不要编造视频里是什么，" +
+                    "需要时可以顺着文字内容自然回应，或简短确认；语气、句长和标点仍按 my_style 与 my_style_samples。"
+            else if (context.targetImageDataUri != null)
+                "\n对方本轮发来" + name + "，内容已随消息附上" + seen + "；先判断它表达的情绪（玩笑、撒娇、阴阳、认真、安慰等），" +
                     "再按对应情绪取用上面的通用原则。不要复述识别过程，也不要提已附图、测试这类系统措辞。" +
-                    "回复的语气、句长和标点仍按 my_style 与 my_style_samples，不要因为对方发的是${name}就换成书面语。"
+                    "回复的语气、句长和标点仍按 my_style 与 my_style_samples，不要因为对方发的是" + name + "就换成书面语。"
             else
-                "\n对方本轮发来${name}，但这次没取到内容，只能按上下文判断；不要编造${media}里是什么，" +
+                "\n对方本轮发来" + name + "，但这次没取到内容，只能按上下文判断；不要编造" + media + "里是什么，" +
                     "需要时可以顺着文字内容自然回应，或简短确认；语气、句长和标点仍按 my_style 与 my_style_samples。"
         }.orEmpty()
         val image = context.targetImageDataUri
@@ -118,7 +135,11 @@ object ReplyProtocol {
                 ?: mineStyle.map { it.trim() }.filter { it.isNotEmpty() }.takeLast(6).map { it.take(60) }))
             .put("reply_target", if (context.targetMedia != null) JSONObject().put("id", context.focusMessageId)
                 .put("speaker", "对方").put("type", "media").put("media", context.targetMedia)
-                .put("note", "对方发来" + if (context.targetMedia == "表情") "一个表情" else "一张${context.targetMedia}")
+                .put("note", "对方发来" + when (context.targetMedia) {
+                "表情" -> "一个表情"
+                "视频", "小视频" -> "一段" + context.targetMedia
+                else -> "一张" + context.targetMedia
+            })
             else focusMessageId?.let { id -> context.messages.firstOrNull { it.id == id } }?.let { target ->
                 val obj = JSONObject().put("id", target.id).put("speaker", target.speaker).put("text", target.text)
                 // 长按的是合并转发：这段文本是本地摊平出来的，得明确告诉模型回的是什么。
@@ -175,6 +196,25 @@ object ReplyProtocol {
     }
 
     /** 单独一次调用：让视觉模型用一句话说清这张图，供长按回复时复用。 */
+    /** 视频抽帧的描述请求：按时间顺序给几张关键帧，只要一句话。 */
+    fun videoDigestPayload(settings: ReplySettings, frames: List<String>, seconds: Int): JSONObject {
+        val instructions = "你在帮用户理解聊天里对方发来的一段视频，共 " + seconds + " 秒。" +
+            "下面按时间先后给出它的几个关键帧。用一句不超过 60 字的中文，说清这段画面里能确定的内容" +
+            "（场景、人物在做什么、画面里的关键文字或物体）。看不出动作变化就只描述看得到的静态内容，" +
+            "拿不准的不要猜。只输出这一句描述，不要解释。"
+        val content = JSONArray()
+            .put(JSONObject().put("type", "text").put("text", "聊天里对方发来了这段视频，请用一句话描述它。"))
+        frames.forEach { frame ->
+            content.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", frame)))
+        }
+        // 参数与图片描述一致：短 max_tokens 或低温会被部分服务直接拒绝，表现为「模型不接受图片」。
+        return JSONObject().put("model", settings.model).put("stream", false).put("max_tokens", 1500)
+            .put("temperature", 0.9)
+            .put("messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content", instructions))
+                .put(JSONObject().put("role", "user").put("content", content)))
+    }
+
     fun digestPayload(settings: ReplySettings, imageDataUri: String): JSONObject {
         val instructions = "你在帮用户理解聊天里对方发来的一张图片。用一句不超过 40 字的中文，" +
             "说清这张图里能确定看到的内容（人物动作、物品、场景、截图里的关键文字）。" +

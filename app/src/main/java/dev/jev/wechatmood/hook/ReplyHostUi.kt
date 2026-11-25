@@ -79,9 +79,13 @@ class ReplyHostUi(private val activity: Activity,
     private val kit = PanelKit(activity)
     private var newMessageNotice: TextView? = null
     private var invalidateRequest: (() -> Unit)? = null
-    /** 长按图片/表情时记住目标消息与已取的图，重新读取历史后也要留住。 */
+    /** 长按图片/表情/视频时记住目标消息与已取到的内容，重新读取历史后也要留住。 */
     private var targetFocusId: Long = 0
     private var targetImage: String? = null
+    /** 长按视频时定位到的 mp4：本体没下载过就为空，退回封面那张图。 */
+    private var targetVideo: java.io.File? = null
+    /** 本轮视频抽关键帧得到的一句话描述，生成时随提示词带上，并写进 VideoDigest 缓存。 */
+    private var targetVideoDigest: String? = null
     /** 从「＋」面板进来、没有长按目标：目标跟随对方最后一条消息，重新读取时要重算。 */
     private var autoTarget = false
     /** 当前会话的关系档案，生成回复时随上下文一起给模型。 */
@@ -212,6 +216,9 @@ class ReplyHostUi(private val activity: Activity,
             "opening=${openingJob?.isActive == true}")
         targetFocusId = focusMessageId ?: 0
         targetImage = imageDataUri
+        // 换了目标就丢掉上一段视频的内容：否则 A 的视频描述会被当成 B 的画面用。
+        targetVideo = null
+        targetVideoDigest = null
         autoTarget = focusMessageId == null
         val selectedTalker = talker ?: return false
         // 附加面板关闭的瞬间 ChatFooter 可能读不到聊天：读到不同聊天才拒绝，读不到就继续，
@@ -320,6 +327,7 @@ class ReplyHostUi(private val activity: Activity,
         // Reopening saved content must not depend on scrolling to the latest message or text input mode.
         val captured = (remembered?.context ?: live).let { ctx ->
             val image = imageDataUri ?: targetImage
+            // 视频描述要等点生成、抽完帧才有，打开面板这一刻不可能有，这里只补图片。
             if (image != null && ctx.targetImageDataUri == null) ctx.copy(targetImageDataUri = image) else ctx
         }
         if (captured.talker != selectedTalker) return false
@@ -340,10 +348,15 @@ class ReplyHostUi(private val activity: Activity,
             // 本轮刚生成的描述在 ctx 里；重开面板时 ctx 没有，去缓存里找同一张图的描述。
             val digest = ctx.targetImageDigest?.takeIf { it.isNotBlank() && ctx.focusMessageId == target.id }
                 ?: if (target.placeholder) ImageDigest.cached(activity, ctx.talker, target.id) else null
+            // 视频只有抽帧得到的一句话，没有整段内容；重开面板时同一条也去缓存里找。
+            val videoDigest = ctx.targetVideoDigest?.takeIf { it.isNotBlank() && ctx.focusMessageId == target.id }
+                ?: if (target.placeholder) VideoDigest.cached(activity, ctx.talker, target.id) else null
             val text = when {
                 target.placeholder -> when {
+                    videoDigest != null -> "「${videoDigest.take(30)}」"
                     digest != null -> "「${digest.take(30)}」"
                     target.text.contains("表情") -> "一个表情（生成时会先看它）"
+                    target.text.contains("视频") -> target.text.trim('【', '】') + "（生成时会先看画面）"
                     target.text.contains("图片") -> "一张图片（生成时会先看它）"
                     else -> target.text.trim('【', '】')
                 }
@@ -1417,7 +1430,17 @@ class ReplyHostUi(private val activity: Activity,
                     val withImage = if (loaded.targetImageDataUri != null || loaded.targetMedia == null || loaded.focusMessageId <= 0) loaded
                         else runCatching { MessageSniffer.captureMediaImage(loaded.focusMessageId) }.getOrNull()
                             ?.let { loaded.copy(targetImageDataUri = it) } ?: loaded
-                    val pending = ReplyDatabaseHistory.load(withImage, limit, owner.account)
+                    // 视频先找本地 mp4：有本体就不需要气泡封面那张图（封面只是第一帧）。
+                    // 对方发来但没点开过的视频没有 mp4，这时保留封面，提示词里说明那是封面。
+                    val isVideo = loaded.targetMedia == "视频" || loaded.targetMedia == "小视频"
+                    val withVideo = if (!isVideo || loaded.focusMessageId <= 0) withImage else {
+                        val file = targetVideo?.takeIf { it.isFile }
+                            ?: runCatching { MessageSniffer.videoFileOf(loaded.focusMessageId) }.getOrNull()
+                        // 先留着封面：万一点生成时抽帧失败，还能退回「只取到封面」那条措辞，
+                        // 而不是从「有封面可看」直接掉到「没取到画面」。抽帧成功才丢。
+                        if (file == null) withImage else { targetVideo = file; withImage }
+                    }
+                    val pending = ReplyDatabaseHistory.load(withVideo, limit, owner.account)
                     mark("load")
                     // 分母只用真正要调原生转写的条数：已有微信转写的不占额度，超过上限的也不转。
                     var voiceCount = 0
@@ -1454,7 +1477,8 @@ class ReplyHostUi(private val activity: Activity,
                             "${current.messages.count { it.voiceState == VoiceState.FAILED }} 条语音未能转写，将明确标注缺失；可在条数菜单中重试。"
                         current.messages.any { it.voiceState == VoiceState.SKIPPED } ->
                             "${current.messages.count { it.voiceState == VoiceState.SKIPPED }} 条语音本轮未转写（已到上限），切到更大条数可再读一次。"
-                        current.targetMedia != null && current.targetImageDataUri == null ->
+                        current.targetMedia != null && current.targetImageDataUri == null &&
+                            current.targetVideoDigest == null ->
                             "对方这条${current.targetMedia}没有取到内容，回复会只按上下文判断。"
                         current.historyFailure != null -> "仅读取到页面 ${current.messages.size} 条。历史暂不可用，可切换条数重试。"
                         current.messages.size < limit -> "本次读取到 ${current.messages.size} 条消息（含语音转写），将按实际内容回复。"
@@ -1584,15 +1608,44 @@ class ReplyHostUi(private val activity: Activity,
             job = scope.launch {
                 try {
                     if (!verifyAccount()) { window.dismiss(); return@launch }
+                    // 长按视频：先抽关键帧看一眼，拿到一句描述随提示词带上。
+                    // 只发几张缩到 640 宽的 JPEG，不上传整段视频；失败不影响生成。
+                    val videoReady = run {
+                        // 抽帧要几百毫秒到一秒多，期间用户可能长按了另一条视频：写回前拿这个比对。
+                        val requestedFocus = current.focusMessageId.takeIf { it > 0 } ?: targetFocusId
+                        val isVideo = current.targetMedia == "视频" || current.targetMedia == "小视频"
+                        if (!isVideo || current.targetVideoDigest != null || current.focusMessageId <= 0) current
+                        else {
+                            val file = targetVideo?.takeIf { it.isFile }
+                                ?: withContext(Dispatchers.IO) {
+                                    runCatching { MessageSniffer.videoFileOf(current.focusMessageId) }.getOrNull()
+                                }
+                            if (file == null) current else {
+                                state.text = "正在看这段视频…"
+                                state.setTextColor(theme.muted)
+                                withContext(Dispatchers.IO) {
+                                    VideoDigest.describe(activity, config, current.talker,
+                                        current.focusMessageId, file)
+                                }?.let { digest ->
+                                    if (targetFocusId == requestedFocus) {
+                                        targetVideo = file
+                                        targetVideoDigest = digest
+                                    }
+                                    // 抽帧成功就不再附封面：封面只是第一帧，附上会和「关键帧」的措辞打架。
+                                    current.copy(targetVideoDigest = digest, targetImageDataUri = null)
+                                } ?: current
+                            }
+                        }
+                    }
                     // 长按图片时先让视觉模型看一句描述（同图只调用一次），
                     // 拿到就随提示词带上；失败不影响生成，退回「没取到内容」的措辞。
-                    val digested = if (current.targetImageDataUri == null || current.targetImageDigest != null) current
+                    val digested = if (videoReady.targetImageDataUri == null || videoReady.targetImageDigest != null) videoReady
                     else {
-                        state.text = "正在看这张${current.targetMedia ?: "图片"}…"
+                        state.text = "正在看这张${videoReady.targetMedia ?: "图片"}…"
                         state.setTextColor(theme.muted)
-                        ImageDigest.describe(activity, config, current.talker, current.focusMessageId,
-                            current.targetImageDataUri!!)
-                            ?.let { current.copy(targetImageDigest = it) } ?: current
+                        ImageDigest.describe(activity, config, videoReady.talker, videoReady.focusMessageId,
+                            videoReady.targetImageDataUri!!)
+                            ?.let { videoReady.copy(targetImageDigest = it) } ?: videoReady
                     }
                     // 这张图的描述顺手进档案：截图里写的时间地点，不该只在这一次生成里用一次就丢。
                     digested.targetImageDigest
@@ -1754,10 +1807,14 @@ class ReplyHostUi(private val activity: Activity,
      */
     private fun evidenceText(context: ReplyContext, message: ReplyMessage): String {
         if (!message.placeholder) return message.text
-        // 只有图片和表情会去取图和生成描述；名片、视频、位置本来就不取，别写成「没取到」。
-        if (message.type != 3 && message.type != 47) return message.text
+        // 图片、表情、视频会去取内容；名片、位置本来就不取，别写成「没取到」。
+        if (message.type != 3 && message.type != 47 && message.type != 43 && message.type != 62) return message.text
         val label = ReplyContext.mediaLabel(message.type)
-        val digest = runCatching { ImageDigest.cached(activity, context.talker, message.id) }.getOrNull()
+        val video = message.type == 43 || message.type == 62
+        val digest = runCatching {
+            if (video) VideoDigest.cached(activity, context.talker, message.id)
+            else ImageDigest.cached(activity, context.talker, message.id)
+        }.getOrNull()
         return if (!digest.isNullOrBlank()) "【$label：$digest】" else "【$label（本次没取到内容）】"
     }
     private fun openSettings() = runCatching {
@@ -1777,6 +1834,8 @@ class ReplyHostUi(private val activity: Activity,
         // 目标（尤其是长按的那张图）只属于打开它的聊天，切走后不能留给下一个群。
         targetFocusId = 0
         targetImage = null
+        targetVideo = null
+        targetVideoDigest = null
         draftTargetMedia = null
         draftText = ""
         draftLastIncoming = null

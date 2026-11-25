@@ -15,7 +15,8 @@ data class MessageMetadata(val type: Int, val isSend: Int, val content: String, 
     fun incomingText(): String? = if (isSend == 0) plainText() else null
     fun isReplyTarget(allowMedia: Boolean = false): Boolean = isSend == 0 && talker.isNotBlank() && messageId > 0 &&
         ((type == 1 && content.isNotBlank()) || type == 34 || quoteReply?.text?.isNotBlank() == true ||
-            (allowMedia && (type == 3 || type == 47 || isAppMessage())))
+            // 视频（43）与小视频（62）也算可回复目标：内容靠抽关键帧读，不是只看类型。
+            (allowMedia && (type == 3 || type == 43 || type == 47 || type == 62 || isAppMessage())))
 
     fun voiceSource(): VoiceSource? = if (type == 34 && isSend in 0..1 && talker.isNotBlank() && messageId > 0)
         VoiceSource(talker, messageId, createdAt, isSend, imagePath, serverId) else null

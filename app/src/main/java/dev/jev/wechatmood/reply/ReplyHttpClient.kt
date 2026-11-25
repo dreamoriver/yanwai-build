@@ -38,6 +38,14 @@ class ReplyHttpClient(private val client: Call.Factory = HttpClients.shared.newB
             imageFallback = false, kind = UsageKind.IMAGE)
     }
 
+    /** 一次小请求：视频的几张关键帧 → 一句话描述。失败抛异常，由 VideoDigest 兜住。 */
+    suspend fun describeVideo(settings: ReplySettings, frames: List<String>, seconds: Int): String {
+        check(settings.isConfigured) { "请先配置回复模型" }
+        // 与图片描述同一套兜底：宁可失败，也不要拿「没收到视频」这句话当描述缓存下来。
+        return request(settings, ReplyProtocol.videoDigestPayload(settings, frames, seconds),
+            ReplyProtocol::parseDigest, imageFallback = false, kind = UsageKind.IMAGE)
+    }
+
     suspend fun findTopics(settings: ReplySettings, context: ReplyContext, draft: String, notes: String,
         knowledge: String, relationship: ReplyRelationship, time: TopicTimeContext,
         previous: List<TopicSuggestion> = emptyList(), customRelationship: String = ""): List<TopicSuggestion> {
