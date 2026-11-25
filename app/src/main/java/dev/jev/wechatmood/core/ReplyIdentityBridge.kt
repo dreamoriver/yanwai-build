@@ -86,16 +86,20 @@ object ReplyIdentityBridge {
         val captured = generation()
         worker.execute {
             val app = context.applicationContext
+            var online = false
             val result = runCatching {
                 val response = SettingsTransport.call(app, "reply_role_list", null,
                     Bundle().apply { putString(SettingsProvider.KEY_GENERATION, captured.generation) })
                 check(captured.current()) { "角色已变化，请重试" }
+                online = true
                 requireNotNull(response?.getStringArrayList("roles")).also {
                     ReplySnapshotCache.saveRoles(app, it)
                 }.map(ReplyRole::decode)
             }.recoverCatching {
                 ReplySnapshotCache.loadRoles(app)?.map(ReplyRole::decode) ?: emptyList()
             }
+            // 服务通了就把离线期间攒下的角色应用补写回主库。
+            if (online) runCatching { flushPending(app) }
             if (c.isActive) c.resumeWith(result)
         }
     }
@@ -129,13 +133,14 @@ object ReplyIdentityBridge {
         suspendCancellableCoroutine { c ->
             // 角色库被迁移或新增过时，ModulePrefs 里的 catalog revision 可能还停在旧值；
             // 拿旧值去和库里的比对一定被拒，所以这里先强制拉一次再取。
-            runCatching { ModulePrefs.reload(force = true) }
-            val captured = generation()
+            val app = context.applicationContext
             worker.execute {
                 val result = runCatching {
+                    runCatching { ModulePrefs.reload(force = true) }
+                    val captured = generation()
                     check(owner.acceptsAccount(verify()) && captured.current()) { "账号或角色已变化，请重新打开" }
                     val key = requireNotNull(owner.key)
-                    val response = requireNotNull(SettingsTransport.call(context, "reply_role_apply", key.value,
+                    val response = requireNotNull(SettingsTransport.call(app, "reply_role_apply", key.value,
                         Bundle().apply {
                             putString(SettingsProvider.KEY_GENERATION, captured.generation)
                             putLong(ReplyIdentityProvider.KEY_ROLE_REVISION, captured.revision)
@@ -145,10 +150,45 @@ object ReplyIdentityBridge {
                     val background = accept(captured, key, ContactBackground.decode(requireNotNull(response.getString("background"))))
                     ModulePrefs.backgroundChanged(owner.talker)
                     AppliedReplyRole(identity, background)
+                }.recoverCatching { error ->
+                    // 言外被系统停掉时主库写不进去：先本地生效，等下次连上服务再补写。
+                    check(ReplyPendingWrites.isOffline(error)) { throw error }
+                    val key = requireNotNull(owner.key) { throw error }
+                    applyLocally(app, key, role)
                 }
                 if (c.isActive) c.resumeWith(result)
             }
         }
+    /** 服务连不上时本地生效：写快照并排队，面板和后续回复立刻按新身份走。 */
+    private fun applyLocally(context: Context, key: ReplyContactKey, role: ReplyRole): AppliedReplyRole {
+        val identity = role.identity()
+        val background = ContactBackground(role.background)
+        ReplySnapshotCache.save(context, key.value, "id", identity.encode())
+        ReplySnapshotCache.save(context, key.value, "bg", background.encode())
+        ReplyPendingWrites.enqueue(context, key.value, role.id, role.revision)
+        MoodLog.i("REPLY_ROLE_LOCAL relationship=" + role.relationship.id)
+        return AppliedReplyRole(identity, background)
+    }
+
+    /** 把离线期间排队的角色应用补写回主库，写不成的留着下次再试。 */
+    private fun flushPending(context: Context) {
+        val settings = ModulePrefs.analysisSettings() ?: return
+        val pending = ReplyPendingWrites.take(context)
+        if (pending.isEmpty()) return
+        val left = pending.filterNot { entry ->
+            runCatching {
+                SettingsTransport.call(context, "reply_role_apply", entry.key, Bundle().apply {
+                    putString(SettingsProvider.KEY_GENERATION, settings.generation)
+                    putLong(ReplyIdentityProvider.KEY_ROLE_REVISION, settings.rolesRevision)
+                    putString("role_id", entry.roleId)
+                    putString("role_revision", entry.roleRevision)
+                })
+            }.isSuccess
+        }
+        ReplyPendingWrites.save(context, left)
+        MoodLog.i("REPLY_PENDING_FLUSH done=" + (pending.size - left.size) + " left=" + left.size)
+    }
+
     private fun queue(context: Context): ReplyIdentityQueue {
         val captured = generation()
         fun extras() = Bundle().apply {
