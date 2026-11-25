@@ -1205,14 +1205,18 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
             .connectTimeout(15, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
             .readTimeout(180, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).build(),
             kind = UsageKind.DIGEST)
+        // 带画面的视频条数：只有它们需要在正文里逐条交代，也是放宽字数与 token 预算的依据。
+        // 只算真的读到画面的（videos 里已有的描述），只有类型的【视频】不算。
+        val describedVideos = videos.size
         // 推理模型会先把 max_tokens 花在 reasoning 上：日志里 1200 全被思考吃掉、正文 0 字，
-        // 等于每次总结都白跑一次再重试。起始给 4000，够一次写完又不会让模型放飞。
-        var maxTokens = 4000
+        // 等于每次总结都白跑一次再重试。起始给 4000，视频多时按条加，少一次「掐断再重试」。
+        var maxTokens = 4000 + 400 * minOf(describedVideos, MAX_VIDEO_WIDEN)
         var partial = ""
         var lastFinish = ""
         var correction = ""
-        // 群总结要求把每条带描述的视频都点到，字数比原来宽一点：群 500 字，私聊仍 330 字。
-        val textLimit = if (isGroup) 500 else 330
+        // 群总结要把每条带画面的视频都点到：基底 500 字，每多一条视频再给 60 字，
+        // 最多放宽 MAX_VIDEO_WIDEN 条（上限 860）。私聊不涉及逐条交代，仍 330 字。
+        val textLimit = if (isGroup) 500 + 60 * minOf(describedVideos, MAX_VIDEO_WIDEN) else 330
         var lastIssue = ""
         val prompt = if (isGroup) groupSummaryPrompt else privateSummaryPrompt
         repeat(2) { attempt ->
@@ -1721,6 +1725,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         const val MAX_STATS_IMAGES = 5
         /** 一次分析最多看这么多条视频：每条抽 4–6 帧，同样是一次视觉调用，最近优先。 */
         const val MAX_STATS_VIDEOS = 3
+        /** 逐条交代视频时最多放宽这么多条：每条 60 字，再多就靠模型自己压缩，不让总结无限长。 */
+        const val MAX_VIDEO_WIDEN = 6
         /** 抽样后至少保留这几条合并转发：一条能带出好几段对话，被抽掉最可惜。 */
         const val MAX_STATS_FORWARDS = 3
         /** 进程内转写缓存：同一条语音（msgId 全局唯一）不带重复跑原生转写。 */
