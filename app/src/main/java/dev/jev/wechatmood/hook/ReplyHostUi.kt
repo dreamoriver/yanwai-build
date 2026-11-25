@@ -1304,10 +1304,13 @@ class ReplyHostUi(private val activity: Activity,
                 choices.forEach { relationship ->
                     menu.add(0, relationship.ordinal, relationship.ordinal, relationship.label).isChecked = relationship == composition.relationship
                 }
-                savedRoles.forEachIndexed { index, role -> menu.add(1, 1000 + index, 1000 + index, "角色库 · " + role.name) }
+                savedRoles.forEachIndexed { index, role ->
+                    val applied = selectedIdentity?.roleId == role.id
+                    menu.add(0, 1000 + index, 1000 + index, "角色库 · " + role.name).isChecked = applied
+                }
                 menu.setGroupCheckable(0, true, true)
                 setOnMenuItemClickListener { item ->
-                    if (item.groupId == 1) {
+                    if (item.itemId >= 1000) {
                         if (!busy && ownsDrawer() && !group) {
                             val selected = savedRoles[item.itemId - 1000]
                             applyingRole = true
@@ -1325,7 +1328,10 @@ class ReplyHostUi(private val activity: Activity,
                                     customRole.setText(applied.identity.customText)
                                     failed = false; renderParts()
                                 } catch (e: CancellationException) { throw e }
-                                catch (_: Exception) { if (ownsDrawer()) toast("角色应用失败，请重新选择") }
+                                catch (e: Exception) {
+                                    MoodLog.w("ROLE_APPLY_FAILED " + (e.message ?: e.javaClass.simpleName))
+                                    if (ownsDrawer()) toast("角色应用失败，请重新选择")
+                                }
                                 finally { applyingRole = false; if (ownsDrawer()) controls(false) }
                             }
                         }

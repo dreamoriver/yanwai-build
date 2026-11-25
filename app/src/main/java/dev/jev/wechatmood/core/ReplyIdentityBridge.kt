@@ -127,6 +127,9 @@ object ReplyIdentityBridge {
     }
     suspend fun applyRole(context: Context, owner: ReplyIdentityOwner, role: ReplyRole, verify: () -> String?): AppliedReplyRole =
         suspendCancellableCoroutine { c ->
+            // 角色库被迁移或新增过时，ModulePrefs 里的 catalog revision 可能还停在旧值；
+            // 拿旧值去和库里的比对一定被拒，所以这里先强制拉一次再取。
+            runCatching { ModulePrefs.reload(force = true) }
             val captured = generation()
             worker.execute {
                 val result = runCatching {

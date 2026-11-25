@@ -71,6 +71,8 @@ class ReplyRoleStore(private val db: AnalysisCacheDatabase, private val identiti
                     val role = ReplyRole(id, it.label, it.guidance, UUID.randomUUID().toString(), it)
                     db.execute("INSERT OR IGNORE INTO reply_roles(role_id, payload) VALUES(?, ?)", listOf(id, role.encode()))
                 }
+                // 角色表变了就必须动 revision，否则各进程缓存的 catalog 会认为「没有变化」。
+                db.execute("UPDATE reply_role_revision SET revision = revision + 1 WHERE id = 1")
                 db.execute("INSERT INTO reply_role_migrations(migration) VALUES(?)", listOf("defaults-v2"))
             }
         }
