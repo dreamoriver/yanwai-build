@@ -826,6 +826,9 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
           不要猜它说了什么，也不要提「转写」「占位」「系统状态」，不要因为素材少就吐槽或编内容。
         - 【视频：…】【小视频：…】是抽关键帧认出来的画面内容，可以当内容用：说画面里真有的场景、
           人物和动作。但只看到几个瞬间，看不到完整过程，不要替它补前后的动作、结局或台词。
+          素材里有几条带描述的视频，正文就要点到几条：每条各用一句话说清它是什么画面、跟群里
+          在聊的哪件事有关，不要合并成「还发了几条视频」一句带过。这是本提示词里唯一要求点全的
+          东西，其余话题照旧按上面「宁可漏，不要全」取舍。
           【视频】【小视频】【表情】【系统消息】只写着类型，说明这次没读到内容：可以提「有人发了个视频」，
           不要猜拍了什么、说了什么，也不要把「媒体」「占位」这些词写进正文。
         - 转账的金额和备注是消息里真有的，可以写；红包只有祝福语、没有金额，不要猜金额，
@@ -1208,8 +1211,8 @@ internal class GroupStatsUi(private val activity: Activity, private val context:
         var partial = ""
         var lastFinish = ""
         var correction = ""
-        // 第二版按新上限收口：群里 400 字，私聊 330 字，留一点句号余量。
-        val textLimit = if (isGroup) 400 else 330
+        // 群总结要求把每条带描述的视频都点到，字数比原来宽一点：群 500 字，私聊仍 330 字。
+        val textLimit = if (isGroup) 500 else 330
         var lastIssue = ""
         val prompt = if (isGroup) groupSummaryPrompt else privateSummaryPrompt
         repeat(2) { attempt ->
