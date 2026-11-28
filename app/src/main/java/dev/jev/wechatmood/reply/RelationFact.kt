@@ -127,17 +127,23 @@ data class RelationFact(
 
 /** 模型给的相对时间（周五、下周三）在抽取当刻换算成绝对时间，之后不再依赖自然语言。 */
 object FactTimes {
-    private val PATTERNS = listOf("yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm", "yyyy-MM-dd")
+    private val PATTERNS = listOf(
+        "yyyy-MM-dd'T'HH:mm:ssXXX", "yyyy-MM-dd'T'HH:mmXXX",
+        "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm", "yyyy-MM-dd")
 
     fun parseLocal(text: String): Long {
         val raw = text.trim()
-        if (raw.isEmpty() || raw.length > 32) return 0
+        if (raw.isEmpty() || raw.length > 40) return 0
+        // 模型有时会把时间写成 UTC（结尾 Z）或带显式偏移。这种串再按本机时区读一次，
+        // 「今天 15:00」就被存成「今天 07:00」，一进库立刻算逾期，提醒永远带着「（已过）」。
+        // 带偏移的按偏移换算；结尾是 Z 的补成 +00:00；其余仍按本机时区解释。
+        val normalized = if (raw.endsWith("z", ignoreCase = true)) raw.dropLast(1) + "+00:00" else raw
         for (pattern in PATTERNS) {
             val format = SimpleDateFormat(pattern, Locale.CHINA).apply {
                 isLenient = false
                 timeZone = TimeZone.getDefault()
             }
-            val parsed = runCatching { format.parse(raw) }.getOrNull() ?: continue
+            val parsed = runCatching { format.parse(normalized) }.getOrNull() ?: continue
             return parsed.time
         }
         return 0
